@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from server.db import get_db
 from server.auth import get_current_user
-from server.db import User, DBFile
+from server.db import User, File
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from .models import FileUploadSimpleRequest, FileUploadResponse, PaginatedResponse
 
@@ -62,9 +62,9 @@ async def upload_file_simple(
         
         # Check for existing file with same name from same device (optional deduplication)
         if request.device_id:
-            existing_file = db.query(DBFile).filter(
-                DBFile.userId == current_user.userId,
-                DBFile.filename.like(f"file_{request.device_id}_%_{request.filename}")
+            existing_file = db.query(File).filter(
+                File.userId == current_user.userId,
+                File.filename.like(f"file_{request.device_id}_%_{request.filename}")
             ).first()
             
             if existing_file:
@@ -88,7 +88,7 @@ async def upload_file_simple(
         }
         
         # Save file
-        db_file = DBFile(
+        db_file = File(
             userId=current_user.userId,
             filename=unique_filename,
             content=content_bytes,
@@ -143,20 +143,20 @@ async def list_user_files(
         log_request_start("GET", "/file/list", current_user.userId)
         
         # Build query
-        query = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename.like("file_%")  # Only get files uploaded via file endpoints
+        query = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like("file_%")  # Only get files uploaded via file endpoints
         )
         
         # Apply filters
         if device_id:
-            query = query.filter(DBFile.filename.like(f"file_{device_id}_%"))
+            query = query.filter(File.filename.like(f"file_{device_id}_%"))
         
         if content_type:
-            query = query.filter(DBFile.content_type == content_type)
+            query = query.filter(File.content_type == content_type)
         
         # Get files with pagination
-        files = query.order_by(DBFile.uploaded_at.desc()).offset(offset).limit(limit + 1).all()
+        files = query.order_by(File.uploaded_at.desc()).offset(offset).limit(limit + 1).all()
         
         has_more = len(files) > limit
         if has_more:
@@ -231,9 +231,9 @@ async def download_file_simple(
         log_request_start("GET", f"/file/{file_id}", current_user.userId)
         
         # Get file record
-        file_record = db.query(DBFile).filter(
-            DBFile.fileId == file_id,
-            DBFile.userId == current_user.userId
+        file_record = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
         ).first()
         
         if not file_record:
@@ -287,9 +287,9 @@ async def get_file_info(
         log_request_start("GET", f"/file/{file_id}/info", current_user.userId)
         
         # Get file record
-        file_record = db.query(DBFile).filter(
-            DBFile.fileId == file_id,
-            DBFile.userId == current_user.userId
+        file_record = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
         ).first()
         
         if not file_record:
@@ -348,9 +348,9 @@ async def delete_file_simple(
         log_request_start("DELETE", f"/file/{file_id}", current_user.userId)
         
         # Get file record
-        file_record = db.query(DBFile).filter(
-            DBFile.fileId == file_id,
-            DBFile.userId == current_user.userId
+        file_record = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
         ).first()
         
         if not file_record:
@@ -404,9 +404,9 @@ async def delete_files_bulk(
             raise HTTPException(status_code=400, detail="Too many files (max 100 per request)")
         
         # Get file records
-        file_records = db.query(DBFile).filter(
-            DBFile.fileId.in_(file_ids),
-            DBFile.userId == current_user.userId
+        file_records = db.query(File).filter(
+            File.fileId.in_(file_ids),
+            File.userId == current_user.userId
         ).all()
         
         if not file_records:

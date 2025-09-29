@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, validator
 
-from server.db import get_db, User, DBFile, Query as DBQuery
+from server.db import get_db, User, File, Query as DBQuery
 from server.auth import get_current_user
 from server.utils.logging_utils import log_request_start, log_response, log_error, log_ai_call, log_ai_response
 from server.services import ai_query_handler
@@ -93,12 +93,12 @@ async def process_ai_query(
         
         # Get or create memory files
         def get_or_create_memory_file(filename, default_content='{}'):
-            file = db.query(DBFile).filter(
-                DBFile.userId == current_user.userId, 
-                DBFile.filename == filename
+            file = db.query(File).filter(
+                File.userId == current_user.userId, 
+                File.filename == filename
             ).first()
             if not file:
-                file = DBFile(
+                file = File(
                     userId=current_user.userId,
                     filename=filename,
                     content=default_content.encode('utf-8'),

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from server.db import get_db
 from server.auth import get_current_user
-from server.db import User, DBFile
+from server.db import User, File
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from .models import DataUploadRequest, DataUploadResponse
 
@@ -38,9 +38,9 @@ async def upload_data(
         upload_timestamp = request.timestamp or datetime.now().isoformat()
         
         # Verify device is registered
-        device_file = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"device_{request.device_id}.json"
+        device_file = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"device_{request.device_id}.json"
         ).first()
         
         if not device_file:
@@ -71,7 +71,7 @@ async def upload_data(
         
         # Save data file
         content = json.dumps(data_record, indent=2).encode('utf-8')
-        db_file = DBFile(
+        db_file = File(
             userId=current_user.userId,
             filename=data_filename,
             content=content,
@@ -135,22 +135,22 @@ async def get_device_data(
         log_request_start("GET", f"/data/{device_id}", current_user.userId)
         
         # Verify device exists
-        device_file = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"device_{device_id}.json"
+        device_file = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"device_{device_id}.json"
         ).first()
         
         if not device_file:
             raise HTTPException(status_code=404, detail="Device not found")
         
         # Build query for data files
-        query = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename.like(f"data_{device_id}_%.json")
+        query = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like(f"data_{device_id}_%.json")
         )
         
         # Get data files for the device with pagination
-        data_files = query.order_by(DBFile.uploaded_at.desc()).offset(offset).limit(limit + 1).all()
+        data_files = query.order_by(File.uploaded_at.desc()).offset(offset).limit(limit + 1).all()
         
         has_more = len(data_files) > limit
         if has_more:
@@ -227,9 +227,9 @@ async def get_data_analytics(
         log_request_start("GET", f"/data/analytics/{device_id}", current_user.userId)
         
         # Verify device exists
-        device_file = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"device_{device_id}.json"
+        device_file = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"device_{device_id}.json"
         ).first()
         
         if not device_file:
@@ -237,10 +237,10 @@ async def get_data_analytics(
         
         # Get data files from the specified period
         cutoff_date = datetime.now() - timedelta(days=days)
-        data_files = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename.like(f"data_{device_id}_%.json"),
-            DBFile.uploaded_at >= cutoff_date
+        data_files = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like(f"data_{device_id}_%.json"),
+            File.uploaded_at >= cutoff_date
         ).all()
         
         total_uploads = len(data_files)
@@ -335,9 +335,9 @@ async def delete_data_batch(
         log_request_start("DELETE", f"/data/{device_id}/batch/{upload_id}", current_user.userId)
         
         # Find the specific data file
-        data_file = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"{upload_id}.json"
+        data_file = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"{upload_id}.json"
         ).first()
         
         if not data_file:

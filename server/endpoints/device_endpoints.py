@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from server.db import get_db
 from server.auth import get_current_user
-from server.db import User, DBFile
+from server.db import User, File
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from .models import DeviceRegisterRequest, DeviceStatusRequest, DeviceResponse, StandardResponse
 
@@ -43,9 +43,9 @@ async def register_device(
         device_name = request.device_name or f"{request.device_type.title()}-{request.device_id[:8]}"
         
         # Check if device already exists
-        existing_device = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"device_{request.device_id}.json"
+        existing_device = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"device_{request.device_id}.json"
         ).first()
         
         if existing_device:
@@ -65,7 +65,7 @@ async def register_device(
         
         # Save device record
         content = json.dumps(device_record, indent=2).encode('utf-8')
-        db_file = DBFile(
+        db_file = File(
             userId=current_user.userId,
             filename=f"device_{request.device_id}.json",
             content=content,
@@ -106,9 +106,9 @@ async def list_user_devices(
         log_request_start("GET", "/device/list", current_user.userId)
         
         # Get all device files for this user
-        device_files = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename.like("device_%.json")
+        device_files = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like("device_%.json")
         ).all()
         
         devices = []
@@ -169,9 +169,9 @@ async def get_device_status(
         log_request_start("GET", f"/device/{device_id}/status", current_user.userId)
         
         # Get device record
-        device_file = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"device_{device_id}.json"
+        device_file = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"device_{device_id}.json"
         ).first()
         
         if not device_file:
@@ -180,10 +180,10 @@ async def get_device_status(
         device_data = json.loads(device_file.content.decode('utf-8'))
         
         # Get latest data upload summary
-        data_files = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename.like(f"data_{device_id}_%.json")
-        ).order_by(DBFile.uploaded_at.desc()).limit(5).all()
+        data_files = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like(f"data_{device_id}_%.json")
+        ).order_by(File.uploaded_at.desc()).limit(5).all()
         
         data_summary = {
             "recent_uploads": len(data_files),
@@ -246,9 +246,9 @@ async def update_device_status(
         log_request_start("PUT", f"/device/{device_id}/status", current_user.userId)
         
         # Get device record
-        device_file = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"device_{device_id}.json"
+        device_file = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"device_{device_id}.json"
         ).first()
         
         if not device_file:
@@ -309,9 +309,9 @@ async def delete_device(
         log_request_start("DELETE", f"/device/{device_id}", current_user.userId)
         
         # Get device record
-        device_file = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename == f"device_{device_id}.json"
+        device_file = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename == f"device_{device_id}.json"
         ).first()
         
         if not device_file:
@@ -324,9 +324,9 @@ async def delete_device(
         deleted_count += 1
         
         # Delete all data files for this device
-        data_files = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename.like(f"data_{device_id}_%.json")
+        data_files = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like(f"data_{device_id}_%.json")
         ).all()
         
         for file in data_files:
@@ -334,9 +334,9 @@ async def delete_device(
             deleted_count += 1
         
         # Delete all file uploads from this device
-        file_uploads = db.query(DBFile).filter(
-            DBFile.userId == current_user.userId,
-            DBFile.filename.like(f"file_{device_id}_%.%")
+        file_uploads = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like(f"file_{device_id}_%.%")
         ).all()
         
         for file in file_uploads:
