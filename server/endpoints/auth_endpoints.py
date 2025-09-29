@@ -33,7 +33,6 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    email: str
     phone_number: int = None
     
     @validator('username')
@@ -47,12 +46,6 @@ class RegisterRequest(BaseModel):
         if not v or len(v) < 6:
             raise ValueError('Password must be at least 6 characters')
         return v
-    
-    @validator('email')
-    def validate_email(cls, v):
-        if not v or '@' not in v:
-            raise ValueError('Valid email address required')
-        return v.strip().lower()
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -183,14 +176,13 @@ async def register_user(
         
         # Check if user already exists
         existing_user = db.query(User).filter(
-            (User.username == register_data.username) | 
-            (User.email == register_data.email)
+            User.username == register_data.username
         ).first()
         
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username or email already registered"
+                detail="Username already registered"
             )
         
         # Import password hashing function
@@ -199,10 +191,8 @@ async def register_user(
         # Create new user
         new_user = User(
             username=register_data.username,
-            email=register_data.email,
             hashed_password=get_password_hash(register_data.password),
-            phone_number=register_data.phone_number,
-            created_at=datetime.utcnow()
+            phone_number=register_data.phone_number
         )
         
         db.add(new_user)
