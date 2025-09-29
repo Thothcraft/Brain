@@ -1,0 +1,274 @@
+"""Authentication endpoints for user login, registration, and token management."""
+
+from datetime import datetime, timedelta
+from typing import Dict, Any
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, validator
+
+from server.db import get_db, User
+from server.auth import get_current_user
+from server.utils.logging_utils import log_request_start, log_response, log_error
+
+router = APIRouter(prefix="", tags=["auth"])
+
+# Request/Response Models
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    
+    @validator('username')
+    def validate_username(cls, v):
+        if not v or len(v.strip()) < 3:
+            raise ValueError('Username must be at least 3 characters')
+        return v.strip()
+    
+    @validator('password')
+    def validate_password(cls, v):
+        if not v or len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        return v
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    email: str
+    phone_number: int = None
+    
+    @validator('username')
+    def validate_username(cls, v):
+        if not v or len(v.strip()) < 3:
+            raise ValueError('Username must be at least 3 characters')
+        return v.strip()
+    
+    @validator('password')
+    def validate_password(cls, v):
+        if not v or len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        return v
+    
+    @validator('email')
+    def validate_email(cls, v):
+        if not v or '@' not in v:
+            raise ValueError('Valid email address required')
+        return v.strip().lower()
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user_id: int
+    username: str
+
+class RegisterResponse(BaseModel):
+    success: bool
+    user_id: int
+    username: str
+    message: str
+
+class UserResponse(BaseModel):
+    userId: int
+    username: str
+    email: str
+    phone_number: int = None
+    created_at: str
+
+@router.post(
+    "/token",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="User login",
+    description="Authenticate user and return access token",
+    responses={
+        200: {"description": "Login successful"},
+        401: {"description": "Invalid credentials"},
+        422: {"description": "Invalid request format"}
+    }
+)
+async def login_for_access_token(
+    login_data: LoginRequest,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Authenticate user and return JWT access token.
+    
+    Purpose: Authenticate users and provide access tokens for API access
+    
+    Args:
+        login_data: Username and password credentials
+        db: Database session
+        
+    Returns:
+        TokenResponse: Access token and user information
+        
+    Raises:
+        HTTPException: 401 if credentials are invalid
+    """
+    try:
+        log_request_start("POST", "/token", None)
+        
+        # Import auth functions here to avoid circular imports
+        from server.auth import authenticate_user, create_access_token
+        
+        # Authenticate user
+        user = authenticate_user(db, login_data.username, login_data.password)
+        if not user:
+            log_error("Authentication failed for user", None, {"username": login_data.username}, "/token")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Create access token
+        access_token_expires = timedelta(minutes=30)  # Token expires in 30 minutes
+        access_token = create_access_token(
+            data={"sub": str(user.userId)}, expires_delta=access_token_expires
+        )
+        
+        response_data = {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "expires_in": 1800,  # 30 minutes in seconds
+            "user_id": user.userId,
+            "username": user.username
+        }
+        
+        log_response("Login successful", 200)
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Login error: {str(e)}", e, endpoint="/token")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Login failed"
+        )
+
+@router.post(
+    "/register", 
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="User registration",
+    description="Register a new user account",
+    responses={
+        201: {"description": "Registration successful"},
+        400: {"description": "User already exists or invalid data"},
+        422: {"description": "Invalid request format"}
+    }
+)
+async def register_user(
+    register_data: RegisterRequest,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Register a new user account.
+    
+    Purpose: Create new user accounts with validation
+    
+    Args:
+        register_data: User registration information
+        db: Database session
+        
+    Returns:
+        RegisterResponse: Registration confirmation and user info
+        
+    Raises:
+        HTTPException: 400 if user already exists
+    """
+    try:
+        log_request_start("POST", "/register", None)
+        
+        # Check if user already exists
+        existing_user = db.query(User).filter(
+            (User.username == register_data.username) | 
+            (User.email == register_data.email)
+        ).first()
+        
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username or email already registered"
+            )
+        
+        # Import password hashing function
+        from server.auth import get_password_hash
+        
+        # Create new user
+        new_user = User(
+            username=register_data.username,
+            email=register_data.email,
+            hashed_password=get_password_hash(register_data.password),
+            phone_number=register_data.phone_number,
+            created_at=datetime.utcnow()
+        )
+        
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        
+        response_data = {
+            "success": True,
+            "user_id": new_user.userId,
+            "username": new_user.username,
+            "message": "User registered successfully"
+        }
+        
+        log_response("User registered successfully", 201)
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Registration error: {str(e)}", e, endpoint="/register")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Registration failed"
+        )
+
+@router.get(
+    '/profile', 
+    response_model=UserResponse,
+    summary="Get user profile",
+    description="Get profile information for the authenticated user",
+    responses={
+        200: {"description": "Profile retrieved successfully"},
+        401: {"description": "Not authenticated"}
+    }
+)
+async def get_user_profile(
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get profile information for the currently authenticated user.
+    
+    Purpose: Retrieve user profile data for authenticated users
+    
+    Args:
+        current_user: Authenticated user from JWT token
+        
+    Returns:
+        UserResponse: User profile information
+    """
+    try:
+        log_request_start("GET", "/profile", current_user.userId)
+        
+        profile_data = {
+            "userId": current_user.userId,
+            "username": current_user.username,
+            "email": current_user.email,
+            "phone_number": current_user.phone_number,
+            "created_at": current_user.created_at.isoformat() if current_user.created_at else None
+        }
+        
+        log_response("Profile retrieved successfully", 200)
+        return profile_data
+        
+    except Exception as e:
+        log_error(f"Profile retrieval error: {str(e)}", e, endpoint="/profile")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve profile"
+        )
