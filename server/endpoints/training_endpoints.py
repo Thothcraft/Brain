@@ -102,19 +102,19 @@ class DataSource(str, Enum):
 
 class TrainingConfig(BaseModel):
     """Configuration for a training job."""
-    model: ModelType = Field(..., description="Model architecture")
-    data: DataSource = Field(..., description="Data source for training")
-    mode: TrainingMode = Field(..., description="Training execution mode")
-    epochs: int = Field(10, ge=1, le=1000, description="Number of training epochs")
-    batch_size: int = Field(32, ge=1, le=512, description="Batch size")
-    learning_rate: float = Field(0.001, ge=0.0001, le=1.0, description="Learning rate")
-    validation_split: float = Field(0.2, ge=0.0, le=0.5, description="Validation data split")
-    optimizer: str = Field("adam", description="Optimizer (adam, sgd, rmsprop)")
-    loss_function: str = Field("categorical_crossentropy", description="Loss function")
-    metrics: List[str] = Field(["accuracy"], description="Metrics to track")
-    device_id: str = Field("thoth-001", description="Device ID for training")
-    save_model: bool = Field(True, description="Save model after training")
-    model_name: Optional[str] = Field(None, description="Custom model name")
+    model: ModelType
+    data: DataSource
+    mode: TrainingMode
+    epochs: int = 10
+    batch_size: int = 32
+    learning_rate: float = 0.001
+    validation_split: float = 0.2
+    optimizer: str = "adam"
+    loss_function: str = "categorical_crossentropy"
+    metrics: List[str] = ["accuracy"]
+    device_id: str = "thoth-001"
+    save_model: bool = True
+    model_name: Optional[str] = None
 
 class TrainingJob(BaseModel):
     """Training job information."""
@@ -148,16 +148,16 @@ class TrainingMetrics(BaseModel):
 
 class FederatedConfig(BaseModel):
     """Federated learning configuration."""
-    session_name: str = Field(..., description="Federated session name")
-    num_rounds: int = Field(10, ge=1, le=100, description="Number of federated rounds")
-    min_clients: int = Field(2, ge=2, le=100, description="Minimum clients required")
-    max_clients: int = Field(10, ge=2, le=100, description="Maximum clients allowed")
-    client_fraction: float = Field(1.0, ge=0.1, le=1.0, description="Fraction of clients per round")
-    differential_privacy: bool = Field(False, description="Enable differential privacy")
-    noise_multiplier: float = Field(1.0, ge=0.1, le=10.0, description="DP noise level")
-    clip_norm: float = Field(1.0, ge=0.1, le=10.0, description="Gradient clipping norm")
-    secure_aggregation: bool = Field(False, description="Enable secure aggregation")
-    model_config: TrainingConfig = Field(..., description="Base model configuration")
+    session_name: str
+    num_rounds: int = 10
+    min_clients: int = 2
+    max_clients: int = 10
+    client_fraction: float = 1.0
+    differential_privacy: bool = False
+    noise_multiplier: float = 1.0
+    clip_norm: float = 1.0
+    secure_aggregation: bool = False
+    training_config: TrainingConfig
 
 class FederatedSession(BaseModel):
     """Federated learning session."""
@@ -659,7 +659,7 @@ async def list_trained_models(
             model_info = {
                 "model_id": session_id,
                 "model_name": f"federated_{session.config.session_name}",
-                "architecture": session.config.model_config.model,
+                "architecture": session.config.training_config.model,
                 "training_mode": "federated",
                 "accuracy": max(session.round_metrics.values(), key=lambda x: x.get("avg_accuracy", 0)).get("avg_accuracy") if session.round_metrics else None,
                 "model_path": session.global_model_path,
