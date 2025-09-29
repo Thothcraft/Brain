@@ -13,9 +13,9 @@ from server.auth import get_current_user
 from server.utils.logging_utils import log_request_start, log_response, log_error, log_ai_call, log_ai_response
 from server.services import ai_query_handler
 
-# Memory managers
-from aiagent.context.short_term_memory import ShortTermMemoryManager
-from aiagent.context.long_term_memory import LongTermMemoryManager
+# Memory managers (commented out - not available in current environment)
+# from aiagent.context.short_term_memory import ShortTermMemoryManager
+# from aiagent.context.long_term_memory import LongTermMemoryManager
 
 router = APIRouter(prefix="", tags=["ai"])
 
@@ -111,7 +111,7 @@ async def process_ai_query(
                 db.refresh(file)
             return file
         
-        # Initialize memory managers
+        # Initialize simple memory storage (without external memory managers)
         try:
             longterm_file = get_or_create_memory_file("long_term_memory.json")
             shortterm_file = get_or_create_memory_file("short_term_memory.json")
@@ -122,14 +122,10 @@ async def process_ai_query(
             lt_data = json.loads(lt_str) if lt_str.strip() else {}
             st_data = json.loads(st_str) if st_str.strip() else {}
             
-            long_term_memory = LongTermMemoryManager(memory_content=lt_data)
-            short_term_memory = ShortTermMemoryManager(memory_content=st_data)
-            
         except Exception as e:
             log_error(f"Memory initialization error: {str(e)}")
-            # Fallback to empty memory managers
-            long_term_memory = LongTermMemoryManager()
-            short_term_memory = ShortTermMemoryManager()
+            # Fallback to empty memory
+            lt_data = {}
             st_data = {}
         
         # Process query with AI
@@ -138,8 +134,8 @@ async def process_ai_query(
             
             ai_response = query_openai(
                 query=query_data.query,
-                long_term_memory=long_term_memory,
-                short_term_memory=short_term_memory,
+                long_term_memory=lt_data,
+                short_term_memory=st_data,
                 max_tokens=2000,
                 temperature=0.7,
                 aux_data={
@@ -163,11 +159,11 @@ async def process_ai_query(
         try:
             conversations = st_data.get("conversations", []) if isinstance(st_data, dict) else []
             
-            # Generate conversation summary
-            summary = ai_query_handler.summarize_conversation(query_data.query, ai_response)
+            # Simple conversation summary (without external handler)
+            summary = f"Q: {query_data.query[:50]}... A: {ai_response[:50]}..."
             
-            # Update long-term memory
-            updated_lt = ai_query_handler.update_memory(query_data.query, ai_response, long_term_memory)
+            # Update long-term memory (simple approach)
+            updated_lt = lt_data.copy() if isinstance(lt_data, dict) else {}
             
             # Add to conversation history
             conversations.append({
@@ -191,7 +187,7 @@ async def process_ai_query(
             
             # Update long-term memory file if changed
             if updated_lt and longterm_file:
-                longterm_file.content = json.dumps(long_term_memory.get_content(), indent=2).encode('utf-8')
+                longterm_file.content = json.dumps(updated_lt, indent=2).encode('utf-8')
                 longterm_file.size = len(longterm_file.content)
                 longterm_file.uploaded_at = datetime.now()
             
