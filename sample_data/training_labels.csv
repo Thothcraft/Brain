@@ -1,0 +1,16 @@
+timestamp,device_id,activity_label,room_type,occupancy
+2024-01-01T00:00:00Z,thoth-001,stationary,bedroom,1
+2024-01-01T00:00:05Z,thoth-001,stationary,bedroom,1
+2024-01-01T00:00:10Z,thoth-001,slight_movement,bedroom,1
+2024-01-01T00:00:15Z,thoth-001,stationary,bedroom,1
+2024-01-01T00:00:20Z,thoth-001,stationary,bedroom,1
+2024-01-01T00:01:00Z,thoth-002,walking,living_room,2
+2024-01-01T00:01:05Z,thoth-002,walking,living_room,2
+2024-01-01T00:01:10Z,thoth-002,walking,living_room,2
+2024-01-01T00:01:15Z,thoth-002,stationary,living_room,2
+2024-01-01T00:01:20Z,thoth-002,walking,living_room,2
+2024-01-01T00:02:00Z,thoth-003,stationary,kitchen,1
+2024-01-01T00:02:05Z,thoth-003,stationary,kitchen,1
+2024-01-01T00:02:10Z,thoth-003,cooking,kitchen,1
+2024-01-01T00:02:15Z,thoth-003,stationary,kitchen,1
+2024-01-01T00:02:20Z,thoth-003,stationary,kitchen,1

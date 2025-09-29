@@ -230,7 +230,9 @@ async def redoc_html():
 
 # List of allowed origins
 ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # Local development
+    "http://localhost:3000",  # Research Portal
+    "http://localhost:3001",  # Education Portal
+    "http://localhost:3002",  # Website
     "https://thoth-frontend-sable.vercel.app", 
     "https://web-production-d7d37.up.railway.app"  # Your backend domain
 ]

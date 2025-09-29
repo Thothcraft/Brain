@@ -23,6 +23,43 @@ from .models import StandardResponse
 router = APIRouter()
 
 # ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+async def simulate_training_progress(job_id: str):
+    """Simulate training progress for demo purposes"""
+    if job_id not in training_jobs:
+        return
+    
+    job = training_jobs[job_id]
+    epochs = job["config"].get("epochs", 10)
+    
+    for epoch in range(1, epochs + 1):
+        if job["status"] != "running":
+            break
+            
+        await asyncio.sleep(2)  # Simulate training time
+        
+        # Simulate improving metrics
+        base_loss = 1.0 - (epoch / epochs) * 0.8
+        base_acc = 0.5 + (epoch / epochs) * 0.4
+        
+        job["progress"] = int((epoch / epochs) * 100)
+        job["metrics"] = {
+            "epoch": epoch,
+            "loss": base_loss + random.uniform(-0.1, 0.1),
+            "accuracy": base_acc + random.uniform(-0.05, 0.05),
+            "val_loss": base_loss + random.uniform(-0.05, 0.15),
+            "val_accuracy": base_acc + random.uniform(-0.1, 0.1)
+        }
+        job["logs"].append(f"Epoch {epoch}/{epochs} - Loss: {job['metrics']['loss']:.4f}, Acc: {job['metrics']['accuracy']:.4f}")
+    
+    if job["status"] == "running":
+        job["status"] = "completed"
+        job["progress"] = 100
+        job["logs"].append("Training completed successfully")
+
+# ============================================================================
 # ENUMS
 # ============================================================================
 
@@ -329,36 +366,22 @@ async def get_training_status(
             # Return all jobs, optionally filtered by device
             jobs = []
             for jid, job in training_jobs.items():
-                if device_id and job.config.device_id != device_id:
+                if device_id and job["config"]["device_id"] != device_id:
                     continue
-                    
-                job_data = {
-                    "job_id": jid,
-                    "model": job.config.model,
-                    "status": job.status,
-                    "progress": f"{job.current_epoch}/{job.total_epochs}",
-                    "created_at": job.created_at.isoformat()
-                }
-                
-                if job.best_metrics:
-                    job_data["best_accuracy"] = job.best_metrics.get("val_accuracy")
-                
-                jobs.append(job_data)
+                jobs.append(job)
             
             return {
                 "success": True,
-                "total_jobs": len(jobs),
-                "jobs": jobs
+                "jobs": jobs,
+                "total": len(jobs)
             }
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get training status: {str(e)}")
 
-@router.post("/training/{job_id}/control", response_model=StandardResponse)
+@router.post("/training/control/{job_id}")
 async def control_training(
     job_id: str,
-    action: str = Query(..., description="Action: pause, resume, cancel")
+    action: str = Query(..., description="Action to perform: pause, resume, cancel")
 ):
     """Control an active training job.
     
