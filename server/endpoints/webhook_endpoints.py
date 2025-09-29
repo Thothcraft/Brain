@@ -13,7 +13,7 @@ from server.db import get_db, User, Query as DBQuery
 from server.utils.logging_utils import log_request_start, log_response, log_error, log_request_payload
 from server.services import ai_query_handler
 
-router = APIRouter(prefix="phone", tags=["webhooks"])
+router = APIRouter(prefix="/phone", tags=["webhooks"])
 
 @router.post(
     "/incoming-message",

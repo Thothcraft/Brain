@@ -16,7 +16,7 @@ import re
 # Import shared models
 from .models import StandardResponse
 
-router = APIRouter()
+router = APIRouter(prefix="/network", tags=["network"])
 
 # ============================================================================
 # MODELS

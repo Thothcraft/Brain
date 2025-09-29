@@ -19,7 +19,7 @@ from collections import deque
 # Import shared models
 from .models import StandardResponse
 
-router = APIRouter()
+router = APIRouter(prefix="/sensors", tags=["sensors"])
 
 # ============================================================================
 # MODELS

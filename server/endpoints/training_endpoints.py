@@ -20,7 +20,7 @@ from collections import defaultdict
 # Import shared models
 from .models import StandardResponse
 
-router = APIRouter()
+router = APIRouter(prefix="/training", tags=["training"])
 
 # ============================================================================
 # HELPER FUNCTIONS

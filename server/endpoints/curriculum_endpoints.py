@@ -17,7 +17,7 @@ import uuid
 # Import shared models
 from .models import StandardResponse
 
-router = APIRouter()
+router = APIRouter(prefix="/curriculum", tags=["curriculum"])
 
 # ============================================================================
 # ENUMS
