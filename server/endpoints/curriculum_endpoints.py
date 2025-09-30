@@ -17,7 +17,7 @@ import uuid
 # Import shared models
 from .models import StandardResponse
 
-router = APIRouter(prefix="/curriculum", tags=["curriculum"])
+router = APIRouter(tags=["curriculum"])
 
 # ============================================================================
 # ENUMS
@@ -624,7 +624,7 @@ async def submit_lab(submission: LabSubmission):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to submit lab: {str(e)}")
 
-@router.get("/curriculum/leaderboard", response_model=Dict[str, Any])
+@router.get("/leaderboard", response_model=Dict[str, Any])
 async def get_leaderboard(
     course_id: Optional[str] = Query(None, description="Filter by course"),
     limit: int = Query(10, ge=1, le=100, description="Number of top students")

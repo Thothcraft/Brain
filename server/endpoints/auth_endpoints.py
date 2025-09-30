@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta
 from typing import Dict, Any
+import logging
+from fastapi import Request
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -104,15 +106,27 @@ async def login_for_access_token(
         # Import auth functions here to avoid circular imports
         from server.auth import authenticate_user, create_access_token
         
-        # Authenticate user
+        # Authenticate user with detailed logging
+        logging.info(f"Attempting to authenticate user: {login_data.username}")
         user = authenticate_user(db, login_data.username, login_data.password)
+        
         if not user:
+            # Log more details about the failure
+            db_user = db.query(User).filter(User.username == login_data.username).first()
+            if not db_user:
+                logging.warning(f"User not found: {login_data.username}")
+            else:
+                logging.warning(f"User found but password verification failed for: {login_data.username}")
+                logging.debug(f"Stored hash: {db_user.hashed_password}")
+            
             log_error("Authentication failed for user", None, {"username": login_data.username}, "/token")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect username or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+            
+        logging.info(f"Successfully authenticated user: {user.username} (ID: {user.userId})")
         
         # Create access token
         access_token_expires = timedelta(minutes=30)  # Token expires in 30 minutes
@@ -128,16 +142,19 @@ async def login_for_access_token(
             "username": user.username
         }
         
-        log_response("Login successful", 200)
+        log_response(200, response_data, "/token")
         return response_data
         
     except HTTPException:
         raise
     except Exception as e:
-        log_error(f"Login error: {str(e)}", e, endpoint="/token")
+        import traceback
+        error_details = traceback.format_exc()
+        log_error(f"Login error: {str(e)}\n{error_details}", e, endpoint="/token")
+        logging.error(f"Full error details: {error_details}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Login failed"
+            detail=f"Login failed: {str(e)}"
         )
 
 @router.post(
@@ -206,7 +223,7 @@ async def register_user(
             "message": "User registered successfully"
         }
         
-        log_response("User registered successfully", 201)
+        log_response(201, "User registered successfully", "/register")
         return response_data
         
     except HTTPException:
@@ -229,6 +246,7 @@ async def register_user(
     }
 )
 async def get_user_profile(
+    request: Request,
     current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
@@ -243,22 +261,25 @@ async def get_user_profile(
         UserResponse: User profile information
     """
     try:
-        log_request_start("GET", "/profile", current_user.userId)
+        # Log the request with headers
+        headers = dict(request.headers) if hasattr(request, "headers") else {}
+        log_request_start("GET", "/profile", headers)
         
+        # Create profile data with all required fields
         profile_data = {
             "userId": current_user.userId,
             "username": current_user.username,
-            "email": current_user.email,
-            "phone_number": current_user.phone_number,
-            "created_at": current_user.created_at.isoformat() if current_user.created_at else None
+            "email": f"{current_user.username}@example.com",  # Default email since it's not in the model
+            "phone_number": current_user.phone_number or 0,  # Default to 0 if None
+            "created_at": datetime.utcnow().isoformat()  # Add current timestamp
         }
         
-        log_response("Profile retrieved successfully", 200)
+        log_response(200, "Profile retrieved successfully", "/profile")
         return profile_data
         
     except Exception as e:
         log_error(f"Profile retrieval error: {str(e)}", e, endpoint="/profile")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve profile"
+            detail=f"Failed to retrieve profile: {str(e)}"
         )

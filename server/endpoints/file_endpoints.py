@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 from sqlalchemy.orm import Session
 
 from server.db import get_db
@@ -22,7 +22,8 @@ router = APIRouter(prefix="/file", tags=["files"])
 async def upload_file_simple(
     request: FileUploadSimpleRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    fastapi_request: Request = None
 ) -> Dict[str, Any]:
     """Upload a file with simplified interface.
     
@@ -35,7 +36,13 @@ async def upload_file_simple(
         FileUploadResponse: Upload confirmation with file_id and size
     """
     try:
-        log_request_start("POST", "/file/upload", current_user.userId)
+        log_request_start(
+            "/file/upload", 
+            "POST", 
+            fastapi_request, 
+            remote_addr=None, 
+            user_id=current_user.userId
+        )
         
         # Decode content if base64
         if request.is_base64:
@@ -102,7 +109,7 @@ async def upload_file_simple(
         db.commit()
         db.refresh(db_file)
         
-        log_response(f"File uploaded: {request.filename} ({len(content_bytes)} bytes)", 200)
+        log_response(200, f"File uploaded: {request.filename} ({len(content_bytes)} bytes)", "/file/upload")
         return {
             "success": True,
             "file_id": db_file.fileId,
@@ -111,11 +118,14 @@ async def upload_file_simple(
             "message": "File uploaded successfully"
         }
         
-    except HTTPException:
+    except HTTPException as he:
+        log_error(f"HTTPException in file upload: {str(he.detail)}")
         raise
     except Exception as e:
-        log_error(f"Error uploading file: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to upload file")
+        import traceback
+        error_details = traceback.format_exc()
+        log_error(f"Error uploading file: {str(e)}\n{error_details}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
 @router.get("/list")
 async def list_user_files(
@@ -140,7 +150,7 @@ async def list_user_files(
         Dict containing files array, count, and pagination info
     """
     try:
-        log_request_start("GET", "/file/list", current_user.userId)
+        log_request_start("/file/list", "GET", None, None, current_user.userId)
         
         # Build query
         query = db.query(File).filter(
@@ -192,7 +202,7 @@ async def list_user_files(
             }
             file_list.append(file_info)
         
-        log_response(f"Retrieved {len(file_list)} files", 200)
+        log_response(200, f"Retrieved {len(file_list)} files", "/file/list")
         return {
             "success": True,
             "files": file_list,
@@ -360,19 +370,19 @@ async def delete_file_simple(
         parts = file_record.filename.split('_', 3)
         original_filename = parts[-1] if len(parts) >= 4 else file_record.filename
         
-        # Delete file
+        # Delete the file
         db.delete(file_record)
         db.commit()
         
-        log_response(f"File deleted: {original_filename}", 200)
+        log_response(f"File deleted: {original_filename} (ID: {file_id})", 200)
         return {
             "success": True,
-            "file_id": file_id,
-            "filename": original_filename,
-            "message": "File deleted successfully"
+            "message": f"File '{original_filename}' deleted successfully",
+            "file_id": file_id
         }
         
-    except HTTPException:
+    except HTTPException as he:
+        log_error(f"HTTPException in file deletion: {str(he.detail)}")
         raise
     except Exception as e:
         log_error(f"Error deleting file: {str(e)}")

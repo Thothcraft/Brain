@@ -8,10 +8,11 @@ This module handles all aspects of user authentication including:
 """
 
 import logging
-from passlib.context import CryptContext
+import bcrypt
 from jose import jwt, JWTError
+from fastapi import status
 from datetime import datetime, timedelta
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -21,7 +22,6 @@ from .db import User, SessionLocal
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))  # Default to 24 hours
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Load secret key; fall back to a default (development) key to avoid runtime errors
@@ -54,21 +54,69 @@ def get_password_hash(password: str) -> str:
         password: The plain text password to hash
         
     Returns:
-        str: The hashed password
+        str: The hashed password as a string
     """
-    return pwd_context.hash(password)
+    # Ensure password is not too long for bcrypt (72 bytes max)
+    if len(password) > 72:
+        password = password[:72]
+        
+    try:
+        # Generate salt and hash the password using bcrypt directly
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+        return hashed.decode('utf-8')
+    except Exception as e:
+        logging.error(f"[Auth] Error hashing password: {str(e)}")
+        raise
 
-def verify_password(plain: str, hashed: str) -> bool:
+def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against a hash.
     
     Args:
-        plain: The plain text password
-        hashed: The hashed password to compare against
+        plain_password: The plain text password
+        hashed_password: The hashed password to compare against
         
     Returns:
         bool: True if password matches, False otherwise
     """
-    return pwd_context.verify(plain, hashed)
+    logging.info("[Auth] Starting password verification")
+    
+    # Input validation
+    if not plain_password:
+        logging.warning("[Auth] verify_password: No plain password provided")
+        return False
+        
+    if not hashed_password:
+        logging.warning("[Auth] verify_password: No hash provided")
+        return False
+    
+    # Log the inputs (be careful with sensitive data in production)
+    logging.debug(f"[Auth] Plain password length: {len(plain_password)}")
+    logging.debug(f"[Auth] Hashed password: {hashed_password[:10]}...")
+    
+    # Ensure plain_password is not too long for bcrypt
+    if len(plain_password) > 72:
+        logging.warning("[Auth] Password exceeds 72 bytes, truncating")
+        plain_password = plain_password[:72]
+    
+    try:
+        # Encode both strings to bytes
+        plain_bytes = plain_password.encode('utf-8')
+        hash_bytes = hashed_password.encode('utf-8')
+        
+        logging.debug("[Auth] Calling bcrypt.checkpw")
+        result = bcrypt.checkpw(plain_bytes, hash_bytes)
+        logging.info(f"[Auth] bcrypt.checkpw result: {result}")
+        return result
+        
+    except ValueError as ve:
+        logging.error(f"[Auth] ValueError in verify_password: {str(ve)}")
+        logging.error(f"[Auth] Hash format may be invalid")
+        return False
+    except Exception as e:
+        logging.error(f"[Auth] Unexpected error in verify_password: {str(e)}")
+        logging.error(f"[Auth] Error type: {type(e).__name__}", exc_info=True)
+        return False
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT access token.
@@ -79,14 +127,42 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         
     Returns:
         str: The encoded JWT token
+        
+    Raises:
+        HTTPException: If there's an error encoding the JWT token
     """
-    to_encode = data.copy()
-    # If expires_delta is an int (minutes), convert to timedelta
-    if isinstance(expires_delta, int):
-        expires_delta = timedelta(minutes=expires_delta)
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    try:
+        to_encode = data.copy()
+        # If expires_delta is an int (minutes), convert to timedelta
+        if isinstance(expires_delta, int):
+            expires_delta = timedelta(minutes=expires_delta)
+        expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+        to_encode.update({"exp": expire})
+        
+        # Ensure SECRET_KEY is set
+        if not SECRET_KEY:
+            logging.error("[Auth] SECRET_KEY is not set")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Server configuration error"
+            )
+            
+        # Encode the JWT token
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
+        
+    except JWTError as e:
+        logging.error(f"[Auth] Error encoding JWT token: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create access token"
+        )
+    except Exception as e:
+        logging.error(f"[Auth] Unexpected error in create_access_token: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
 
 def authenticate_user(db: Session, username: str, password: str) -> Optional[User]:
     """Authenticate a user with username and password.
@@ -99,27 +175,43 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
     Returns:
         Optional[User]: The authenticated user object or None if authentication fails
     """
-    user = db.query(User).filter(User.username == username).first()
-    # If the user record is missing or the stored hash is NULL / empty, treat as invalid credentials.
-    if not user or not user.hashed_password:
-        return None
-
-    # Verify the supplied password against the stored bcrypt hash. Wrap in a
-    # try/except so any unexpected passlib errors (e.g. invalid hash format)
-    # don't bubble up as a 500 Internal Server Error – instead, fail the
-    # authentication gracefully.
     try:
-        if not verify_password(password, user.hashed_password):
+        logging.info(f"[Auth] Starting authentication for user: {username}")
+        
+        # Find user by username
+        user = db.query(User).filter(User.username == username).first()
+        
+        if not user:
+            logging.warning(f"[Auth] User not found: {username}")
             return None
-    except Exception:
-        # Log at DEBUG level via the app logger if available, but avoid
-        # exposing details to the client.
-        import logging
-        logging.getLogger("lms.server").debug("[Auth] Password verification error for user '%s'", username, exc_info=True)
+            
+        if not user.hashed_password:
+            logging.warning(f"[Auth] User {username} has no password set")
+            return None
+            
+        logging.info(f"[Auth] Found user: {user.username} (ID: {user.userId})")
+        
+        # Verify the password
+        try:
+            password_matches = verify_password(password, user.hashed_password)
+            logging.info(f"[Auth] Password verification result for {username}: {password_matches}")
+            
+            if password_matches:
+                logging.info(f"[Auth] Successful authentication for user: {username}")
+                return user
+            else:
+                logging.warning(f"[Auth] Password verification failed for user: {username}")
+                return None
+                
+        except Exception as verify_error:
+            logging.error(f"[Auth] Error during password verification for {username}: {str(verify_error)}")
+            logging.error(f"[Auth] Error type: {type(verify_error).__name__}")
+            return None
+        
+    except Exception as e:
+        logging.error(f"[Auth] Unexpected error during authentication for {username}: {str(e)}")
+        logging.error(f"[Auth] Error type: {type(e).__name__}", exc_info=True)
         return None
-
-    # Successful authentication
-    return user
 
 async def get_current_user(
     request: Request,
@@ -154,13 +246,35 @@ async def get_current_user(
             token[:10] + '...' if token else None,
         )
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if username is None:
+        
+        # Log the full payload for debugging
+        logging.getLogger("lms.server").debug(
+            "[AUTH] Decoded token payload: %s",
+            payload
+        )
+        
+        # Try to get user by username or user_id from the token
+        username = payload.get("username")
+        user_id = payload.get("sub")
+        
+        if username:
+            user = db.query(User).filter(User.username == username).first()
+        elif user_id:
+            # Try to get user by ID if username is not in the token
+            user = db.query(User).filter(User.userId == int(user_id)).first()
+        else:
+            logging.error("[AUTH] No username or user_id found in token")
             raise credentials_exception
-    except JWTError:
+            
+        if user is None:
+            logging.error(f"[AUTH] User not found in database. Username: {username}, User ID: {user_id}")
+            raise credentials_exception
+            
+        return user
+        
+    except JWTError as e:
+        logging.error(f"[AUTH] JWT decoding error: {str(e)}")
         raise credentials_exception
-    
-    user = db.query(User).filter(User.username == username).first()
-    if user is None:
+    except Exception as e:
+        logging.error(f"[AUTH] Unexpected error in get_current_user: {str(e)}")
         raise credentials_exception
-    return user

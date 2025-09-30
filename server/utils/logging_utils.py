@@ -66,39 +66,52 @@ def log_server_lifecycle(event: str, details: Optional[Dict] = None) -> None:
 def log_server_health() -> None:
     """Log server health metrics including CPU, memory, and threads."""
     process = psutil.Process()
-    logger.info(f"[SERVER] CPU usage: {psutil.cpu_percent()}%")
     logger.info(f"[SERVER] Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     logger.info(f"[SERVER] Thread count: {process.num_threads()}")
     logger.info(f"[SERVER] Process start time: {datetime.fromtimestamp(process.create_time()).isoformat()}")
     logger.info(f"[SERVER] System uptime: {datetime.fromtimestamp(psutil.boot_time()).isoformat()}")
 
-def log_request_start(endpoint: str, method: Optional[str] = None, 
-                    headers: Optional[Dict] = None, remote_addr: Optional[str] = None) -> None:
+def log_request_start(endpoint: str, method: str = 'UNKNOWN', 
+                    request=None, remote_addr: Optional[str] = None, 
+                    user_id: Optional[int] = None):
     """Log the start of a request with detailed information.
     
     Args:
         endpoint (str): The API endpoint being accessed
-        method (str, optional): The HTTP method used
-        headers (dict, optional): The request headers
+        method (str): The HTTP method used
+        request: The FastAPI Request object or None
         remote_addr (str, optional): The client's IP address
+        user_id (int, optional): The ID of the authenticated user
     """
-    method = method or request.method if request else 'UNKNOWN'
-    remote_addr = remote_addr or (request.remote_addr if request else 'unknown')
-    headers = headers or (dict(request.headers) if request else {})
-    
-    logger.info(
-        "[REQUEST] %s %s from %s\nHeaders: %s",
-        method,
-        endpoint,
-        remote_addr,
-        {k: v for k, v in headers.items() if k.lower() not in ['authorization', 'cookie']}
-    )
+    try:
+        if request and hasattr(request, 'get'):
+            # Handle ASGI scope
+            headers = dict(request.get('headers', []))
+            method = request.get('method', method)
+            remote_addr = remote_addr or request.get('client', ['unknown'])[0]
+        elif request and hasattr(request, 'headers'):
+            # Handle FastAPI Request object
+            headers = dict(request.headers)
+            method = request.method
+            remote_addr = remote_addr or request.client.host if request.client else 'unknown'
+        else:
+            headers = {}
+            
+        logger.info(
+            "[REQUEST] %s %s from %s (User ID: %s)\nHeaders: %s",
+            method,
+            endpoint,
+            remote_addr,
+            user_id or 'unauthenticated',
+            {k: v for k, v in headers.items() if k.lower() not in ['authorization', 'cookie']}
+        )
+    except Exception as e:
+        logger.error("Error in log_request_start: %s", str(e))
 
 def log_request_payload(payload: Any, endpoint: str) -> None:
     """Log details about the request payload.
     
     Args:
-        payload: The request payload
         endpoint: The API endpoint being accessed
     """
     if payload:
