@@ -213,7 +213,49 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
         logging.error(f"[Auth] Error type: {type(e).__name__}", exc_info=True)
         return None
 
-async def get_current_user(
+async def get_user_from_token(token: str) -> dict:
+    """Get user information from a JWT token without requiring a database session.
+    
+    This is a lighter version of get_current_user that doesn't hit the database.
+    Use this when you only need basic user info from the token.
+    
+    Args:
+        token: The JWT token to decode
+        
+    Returns:
+        dict: User information from the token
+        
+    Raises:
+        HTTPException: 401 error if token is invalid
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+            
+        # Return basic user info from the token
+        return {
+            "username": username,
+            "user_id": payload.get("user_id"),
+            "email": payload.get("email"),
+            "scopes": payload.get("scopes", [])
+        }
+    except JWTError as e:
+        logging.error(f"[Auth] JWT validation error: {str(e)}")
+        raise credentials_exception
+    except Exception as e:
+        logging.error(f"[Auth] Error in get_user_from_token: {str(e)}")
+        raise credentials_exception
+
+
+def get_current_user(
     request: Request,
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
