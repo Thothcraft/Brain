@@ -177,19 +177,43 @@ class Device(Base):
     deviceId = Column("device_id", Integer, primary_key=True, autoincrement=True, index=True)
     userId = Column("user_id", Integer, ForeignKey("user_account.user_id"), nullable=False)
     # Stable, client-provided identifier, e.g. IOPlatformUUID (mac) or extension ID (chrome)
-    device_uuid = Column("device_uuid", String, unique=True, nullable=True)
+    device_uuid = Column("device_uuid", String, unique=True, nullable=False, index=True)
     device_name = Column("device_name", String, nullable=False)
-    device_type = Column("device_type", String, nullable=False)
-    last_seen = Column("last_seen", DateTime, default=datetime.utcnow)
-    online = Column("online", Boolean, default=False)
+    device_type = Column("device_type", String, nullable=False, default="thoth")
+    device_model = Column("device_model", String, nullable=True)
+    os_version = Column("os_version", String, nullable=True)
+    app_version = Column("app_version", String, nullable=True)
+    ip_address = Column("ip_address", String, nullable=True)
+    mac_address = Column("mac_address", String, nullable=True)
+    last_seen = Column("last_seen", DateTime, default=datetime.utcnow, index=True)
+    online = Column("online", Boolean, default=False, index=True)
+    battery_level = Column("battery_level", Integer, nullable=True)
+    wifi_connected = Column("wifi_connected", Boolean, default=False)
+    collection_active = Column("collection_active", Boolean, default=False)
+    created_at = Column("created_at", DateTime, default=datetime.utcnow)
+    updated_at = Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationship back to user
     user = relationship("User", back_populates="devices")
     """Relationship to the User who owns this device"""
     file_device_updates = relationship("FileDeviceUpdate", back_populates="device")
     """Relationship to FileDeviceUpdate objects for this device"""
-    activities = relationship("DeviceActivity", back_populates="device")
-    """Relationship to DeviceActivity objects for this device"""
+    
+    def to_dict(self):
+        return {
+            "device_id": self.device_uuid,
+            "device_name": self.device_name,
+            "device_type": self.device_type,
+            "device_model": self.device_model,
+            "os_version": self.os_version,
+            "app_version": self.app_version,
+            "online": self.online,
+            "battery_level": self.battery_level,
+            "wifi_connected": self.wifi_connected,
+            "collection_active": self.collection_active,
+            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
 
 
 class FileDeviceUpdate(Base):
@@ -207,24 +231,6 @@ class FileDeviceUpdate(Base):
     """Relationship to the File that this update is for"""
     device = relationship("Device", back_populates="file_device_updates")
     """Relationship to the Device that this update is for"""
-
-
-class DeviceActivity(Base):
-    """Model for tracking device activity and usage statistics."""
-    __tablename__ = "device_activity"
-    
-    activity_id = Column(Integer, primary_key=True, autoincrement=True, index=True)
-    device_id = Column(Integer, ForeignKey("device.device_id"), nullable=False)
-    activity_date = Column(DateTime, default=datetime.utcnow, nullable=False)
-    activity_duration = Column(Integer, default=0)  # in seconds
-    last_activity = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    device = relationship("Device", back_populates="activities")
-    
-    __table_args__ = (
-        UniqueConstraint('device_id', 'activity_date', name='_device_date_uc'),
-    )
 
 
 # DO NOT run migrations or create tables at import time in serverless environments!

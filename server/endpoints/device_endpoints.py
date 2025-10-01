@@ -1,293 +1,465 @@
-"""Device management endpoints."""
+"""
+Device Management Endpoints
+
+This module provides endpoints for device registration, status updates, and management.
+It handles the communication between Thoth devices and the Brain server.
+"""
 
 import json
 import time
-from datetime import datetime
-from typing import Dict, Any
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Union
+import uuid as uuid_lib
+from ipaddress import ip_address, IPv4Address
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
-from server.db import get_db
-from server.auth import get_current_user
-from server.db import User, File
+from server.db import get_db, Device, User, File
+from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
-from .models import DeviceRegisterRequest, DeviceStatusRequest, DeviceResponse, StandardResponse
+from .models import (
+    DeviceRegisterRequest, 
+    DeviceStatusRequest, 
+    DeviceResponse, 
+    StandardResponse,
+    DeviceHeartbeatRequest
+)
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/device", tags=["devices"])
+
+# Cache for device authentication tokens
+device_auth_cache = {}
+
+# Rate limiting for device registration
+REGISTRATION_RATE_LIMIT = {
+    'max_attempts': 5,
+    'window_seconds': 300  # 5 minutes
+}
+
+class DeviceRegistrationError(Exception):
+    """Custom exception for device registration errors."""
+    pass
+
+def validate_ip_address(ip_str: str) -> bool:
+    """Validate an IP address string."""
+    try:
+        return bool(ip_address(ip_str))
+    except ValueError:
+        return False
+
+def get_client_ip(request: Request) -> str:
+    """Get the client's IP address from the request."""
+    if not request:
+        return None
+        
+    x_forwarded_for = request.headers.get('X-Forwarded-For')
+    if x_forwarded_for:
+        # Get the first IP in the list
+        ip = x_forwarded_for.split(',')[0].strip()
+    else:
+        ip = request.client.host
+    
+    return ip if validate_ip_address(ip) else None
 
 @router.post("/register", response_model=DeviceResponse)
 async def register_device(
     request: DeviceRegisterRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user_agent: str = Header(None),
+    request_obj: Request = None
 ) -> Dict[str, Any]:
-    """Register a new device for the authenticated user.
+    """
+    Register a new device for the authenticated user.
     
-    Purpose: Register any type of device (Thoth, mobile, desktop, etc.) with the system
+    This endpoint allows devices to register with the system. If the device already exists,
+    its information will be updated. The device will be marked as online upon registration.
     
     Args:
         request: Device registration data
         current_user: Authenticated user
         db: Database session
+        user_agent: User agent string from the request headers
+        request_obj: The incoming request object
         
     Returns:
-        DeviceResponse: Registration result with device_id and status
+        DeviceResponse: Registration result with device details
         
     Raises:
-        HTTPException: 400 if device already exists, 500 on server error
+        HTTPException: 400 if request is invalid, 403 if rate limited, 500 on server error
     """
     try:
         log_request_start("POST", "/device/register", current_user.userId)
         
-        device_name = request.device_name or f"{request.device_type.title()}-{request.device_id[:8]}"
+        # Rate limiting check
+        ip = get_client_ip(request_obj)
+        if ip:
+            current_time = datetime.utcnow()
+            cache_key = f"reg_attempt:{ip}"
+            
+            attempts = device_auth_cache.get(cache_key, [])
+            # Remove old attempts outside the time window
+            attempts = [t for t in attempts if current_time - t < timedelta(seconds=REGISTRATION_RATE_LIMIT['window_seconds'])]
+            
+            if len(attempts) >= REGISTRATION_RATE_LIMIT['max_attempts']:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many registration attempts. Please try again later."
+                )
+            
+            attempts.append(current_time)
+            device_auth_cache[cache_key] = attempts
         
-        # Check if device already exists
-        existing_device = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename == f"device_{request.device_id}.json"
-        ).first()
+        # Process device information
+        try:
+            # Generate a friendly device name if not provided
+            device_name = request.device_name or f"{request.device_type or 'Device'}-{request.device_id[:8]}"
+            
+            # Get additional device info from request
+            device_model = getattr(request, 'device_model', None)
+            os_version = getattr(request, 'os_version', None)
+            app_version = getattr(request, 'app_version', None)
+            mac_address = getattr(request, 'mac_address', None)
+            
+            # Get IP address from request
+            ip_address = get_client_ip(request_obj)
+            
+            # Check if device already exists for this user
+            existing_device = db.query(Device).filter(
+                Device.device_uuid == request.device_id,
+                Device.userId == current_user.userId
+            ).first()
+            
+            # Convert device_id to UUID if it's not already in UUID format
+            try:
+                device_uuid = str(uuid_lib.UUID(request.device_id)) if not isinstance(request.device_id, uuid_lib.UUID) else request.device_id
+            except (ValueError, AttributeError):
+                # If conversion fails, create a UUID from the string
+                device_uuid = str(uuid_lib.uuid5(uuid_lib.NAMESPACE_DNS, request.device_id))
+            
+            now = datetime.utcnow()
+            
+            if existing_device:
+                # Update existing device
+                existing_device.device_name = device_name
+                existing_device.device_type = request.device_type or existing_device.device_type
+                existing_device.device_model = device_model or existing_device.device_model
+                existing_device.os_version = os_version or existing_device.os_version
+                existing_device.app_version = app_version or existing_device.app_version
+                existing_device.ip_address = ip_address or existing_device.ip_address
+                existing_device.mac_address = mac_address or existing_device.mac_address
+                existing_device.last_seen = now
+                existing_device.online = True
+                existing_device.updated_at = now
+                
+                db.commit()
+                db.refresh(existing_device)
+                
+                logger.info(f"Device updated: {device_uuid} for user {current_user.userId}")
+                log_response("Device updated successfully", 200, "/device/register", "/device/register")
+                
+                return {
+                    "success": True,
+                    "device_id": device_uuid,
+                    "device_name": device_name,
+                    "message": "Device updated successfully"
+                }
+            
+            # Create new device record
+            new_device = Device(
+                userId=current_user.userId,
+                device_uuid=device_uuid,
+                device_name=device_name,
+                device_type=request.device_type or "unknown",
+                device_model=device_model,
+                os_version=os_version,
+                app_version=app_version,
+                ip_address=ip_address,
+                mac_address=mac_address,
+                last_seen=now,
+                online=True,
+                created_at=now,
+                updated_at=now
+            )
+            
+            db.add(new_device)
+            db.commit()
+            db.refresh(new_device)
+            
+            logger.info(f"New device registered: {device_uuid} for user {current_user.userId}")
+            log_response("Device registered successfully", 201, "/device/register", "/device/register")
+            
+            return {
+                "success": True,
+                "device_id": device_uuid,
+                "device_name": device_name,
+                "message": "Device registered successfully"
+            }
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error processing device registration: {str(e)}", exc_info=True)
+            raise DeviceRegistrationError(f"Error processing registration: {str(e)}")
         
-        if existing_device:
-            raise HTTPException(status_code=400, detail="Device already registered")
-        
-        # Create device record
-        device_record = {
-            "device_id": request.device_id,
-            "device_name": device_name,
-            "device_type": request.device_type,
-            "hardware_info": request.hardware_info or {},
-            "registered_at": datetime.now().isoformat(),
-            "last_seen": datetime.now().isoformat(),
-            "status": "online",
-            "created_by": current_user.userId
-        }
-        
-        # Save device record
-        content = json.dumps(device_record, indent=2).encode('utf-8')
-        db_file = File(
-            userId=current_user.userId,
-            filename=f"device_{request.device_id}.json",
-            content=content,
-            size=len(content),
-            content_type="application/json",
-            uploaded_at=datetime.now()
-        )
-        db.add(db_file)
-        db.commit()
-        
-        log_response("Device registered successfully", 200)
-        return {
-            "success": True,
-            "device_id": request.device_id,
-            "device_name": device_name,
-            "message": "Device registered successfully"
-        }
-        
+        log_response(200, {"success": True, "device_id": request.device_id, "device_name": device_name}, "/device/register")
     except HTTPException:
         raise
+    except DeviceRegistrationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     except Exception as e:
-        log_error(f"Error registering device: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to register device")
+        db.rollback()
+        error_msg = f"Failed to register device: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        log_error(error_msg)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while registering the device. Please try again."
+        )
 
 @router.get("/list")
 async def list_user_devices(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    include_offline: bool = False
 ) -> Dict[str, Any]:
     """List all registered devices for the authenticated user.
     
-    Purpose: Retrieve all devices registered by the current user with their status
-    
+    Args:
+        current_user: The authenticated user
+        db: Database session
+        include_offline: Whether to include offline devices in the results
+        
     Returns:
         Dict containing devices array, count, and success status
+        
+    Raises:
+        HTTPException: 500 if there's an error retrieving the device list
     """
+    log_request_start("GET", "/device/list", current_user.userId)
+    
     try:
-        log_request_start("GET", "/device/list", current_user.userId)
+        # Build query based on include_offline parameter
+        query = db.query(Device).filter(Device.userId == current_user.userId)
+        if not include_offline:
+            query = query.filter(Device.online == True)
+            
+        devices = query.all()
+        device_list = [device.to_dict() for device in devices]
         
-        # Get all device files for this user
-        device_files = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename.like("device_%.json")
-        ).all()
+        log_response(200, {
+            "success": True,
+            "count": len(device_list),
+            "devices": device_list
+        }, "/device/list")
         
-        devices = []
-        for file in device_files:
-            try:
-                device_data = json.loads(file.content.decode('utf-8'))
-                # Calculate online status based on last_seen (within 5 minutes)
-                last_seen_str = device_data.get('last_seen', '2000-01-01T00:00:00')
-                try:
-                    last_seen = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
-                except ValueError:
-                    # Handle different datetime formats
-                    last_seen = datetime.fromisoformat(last_seen_str)
-                
-                is_online = (datetime.now() - last_seen).total_seconds() < 300
-                
-                devices.append({
-                    "device_id": device_data.get("device_id"),
-                    "device_name": device_data.get("device_name"),
-                    "device_type": device_data.get("device_type"),
-                    "status": "online" if is_online else "offline",
-                    "last_seen": device_data.get("last_seen"),
-                    "hardware_info": device_data.get("hardware_info", {}),
-                    "registered_at": device_data.get("registered_at")
-                })
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                log_error(f"Error parsing device file {file.filename}: {str(e)}")
-                continue
-        
-        log_response(f"Retrieved {len(devices)} devices", 200)
         return {
             "success": True,
-            "devices": devices,
-            "count": len(devices)
+            "count": len(device_list),
+            "devices": device_list,
+            "message": f"Found {len(device_list)} devices"
         }
-        
+            
     except Exception as e:
         log_error(f"Error listing devices: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve devices")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve device list"
+        )
 
-@router.get("/{device_id}/status")
-async def get_device_status(
-    device_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
-    """Get detailed status of a specific device.
+@router.post("/heartbeat")
+async def device_heartbeat(
+    request: DeviceHeartbeatRequest,
+    db: Session = Depends(get_db),
+    request_obj: Request = None
+) -> StandardResponse:
+    """
+    Handle device heartbeat and status updates.
     
-    Purpose: Retrieve comprehensive status information for a registered device
+    This endpoint allows devices to periodically check in and update their status.
+    It also handles device authentication and updates the last_seen timestamp.
     
     Args:
-        device_id: The unique device identifier
+        request: Heartbeat request containing device status
+        db: Database session
+        request_obj: The incoming request object
         
     Returns:
-        Dict containing detailed device status information
+        StandardResponse: Status update confirmation
+        
+    Raises:
+        HTTPException: 401 if unauthorized, 404 if device not found
     """
     try:
-        log_request_start("GET", f"/device/{device_id}/status", current_user.userId)
+        # Get authorization header
+        auth_header = request_obj.headers.get("Authorization") if request_obj else None
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing or invalid authorization header"
+            )
+            
+        token = auth_header.split(" ")[1]
         
-        # Get device record
-        device_file = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename == f"device_{device_id}.json"
+        # Get user from token
+        user = await get_user_from_token(token, db)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token"
+            )
+        
+        # Get the device
+        device = db.query(Device).filter(
+            Device.device_uuid == request.device_id,
+            Device.userId == user.userId
         ).first()
         
-        if not device_file:
-            raise HTTPException(status_code=404, detail="Device not found")
+        if not device:
+            logger.warning(f"Device not found: {request.device_id} for user {user.userId}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or access denied"
+            )
         
-        device_data = json.loads(device_file.content.decode('utf-8'))
-        
-        # Get latest data upload summary
-        data_files = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename.like(f"data_{device_id}_%.json")
-        ).order_by(File.uploaded_at.desc()).limit(5).all()
-        
-        data_summary = {
-            "recent_uploads": len(data_files),
-            "last_upload": data_files[0].uploaded_at.isoformat() if data_files else None,
-            "total_data_files": len(data_files)
+        # Update device status
+        now = datetime.utcnow()
+        update_data = {
+            "last_seen": now,
+            "online": True,
+            "updated_at": now
         }
         
-        # Calculate online status
-        last_seen_str = device_data.get('last_seen', '2000-01-01T00:00:00')
-        try:
-            last_seen = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
-        except ValueError:
-            last_seen = datetime.fromisoformat(last_seen_str)
+        # Update optional fields if provided
+        if hasattr(request, 'battery_level') and request.battery_level is not None:
+            update_data["battery_level"] = request.battery_level
+        if hasattr(request, 'wifi_connected') and request.wifi_connected is not None:
+            update_data["wifi_connected"] = request.wifi_connected
+        if hasattr(request, 'collection_active') and request.collection_active is not None:
+            update_data["collection_active"] = request.collection_active
+        if hasattr(request, 'current_app') and request.current_app:
+            update_data["last_known_app"] = request.current_app
+        if hasattr(request, 'current_page') and request.current_page:
+            update_data["last_known_page"] = request.current_page
         
-        is_online = (datetime.now() - last_seen).total_seconds() < 300
+        # Update IP address if available
+        ip = get_client_ip(request_obj)
+        if ip:
+            update_data["ip_address"] = ip
         
-        status_info = {
+        # Apply updates
+        db.query(Device).filter(Device.deviceId == device.deviceId).update(update_data)
+        db.commit()
+        
+        logger.debug(f"Heartbeat received from device {request.device_id}")
+        
+        return {
             "success": True,
-            "device_id": device_id,
-            "device_name": device_data.get("device_name"),
-            "device_type": device_data.get("device_type"),
-            "status": "online" if is_online else "offline",
-            "last_seen": device_data.get("last_seen"),
-            "registered_at": device_data.get("registered_at"),
-            "hardware_info": device_data.get("hardware_info", {}),
-            "battery_level": device_data.get("battery_level"),
-            "wifi_connected": device_data.get("wifi_connected"),
-            "collection_active": device_data.get("collection_active"),
-            "data_summary": data_summary
+            "message": "Heartbeat received",
+            "server_time": now.isoformat(),
+            "next_heartbeat_in": 60  # Recommended seconds until next heartbeat
         }
-        
-        log_response("Device status retrieved", 200)
-        return status_info
         
     except HTTPException:
         raise
     except Exception as e:
-        log_error(f"Error getting device status: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get device status")
+        db.rollback()
+        logger.error(f"Error processing heartbeat: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while processing the heartbeat"
+        )
 
-@router.put("/{device_id}/status", response_model=StandardResponse)
+@router.put("/{device_id}/status")
 async def update_device_status(
     device_id: str,
     request: DeviceStatusRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
-    """Update the status of a specific device.
+    db: Session = Depends(get_db),
+    request_obj: Request = None
+) -> StandardResponse:
+    """
+    Update the status of a specific device.
     
-    Purpose: Allow devices to report their current status and health metrics
+    This endpoint allows updating various status fields of a device, such as
+    battery level, WiFi status, and collection status.
     
     Args:
-        device_id: The unique device identifier
+        device_id: The unique device identifier (UUID)
         request: Status update data
+        current_user: Authenticated user
+        db: Database session
+        request_obj: The incoming request object
         
     Returns:
         StandardResponse: Update confirmation
+        
+    Raises:
+        HTTPException: 404 if device not found, 500 on server error
     """
     try:
         log_request_start("PUT", f"/device/{device_id}/status", current_user.userId)
         
-        # Get device record
-        device_file = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename == f"device_{device_id}.json"
+        # Get the device
+        device = db.query(Device).filter(
+            Device.device_uuid == str(device_id),
+            Device.userId == current_user.userId
         ).first()
         
-        if not device_file:
-            raise HTTPException(status_code=404, detail="Device not found")
-        
-        device_data = json.loads(device_file.content.decode('utf-8'))
+        if not device:
+            log_error(f"Device not found for user {current_user.userId} and device ID {device_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or access denied"
+            )
         
         # Update device status
-        device_data["status"] = request.status
-        device_data["last_seen"] = datetime.now().isoformat()
-        device_data["updated_at"] = datetime.now().isoformat()
-        
-        # Update optional fields if provided
-        if request.battery_level is not None:
-            device_data["battery_level"] = request.battery_level
-        if request.wifi_connected is not None:
-            device_data["wifi_connected"] = request.wifi_connected
-        if request.collection_active is not None:
-            device_data["collection_active"] = request.collection_active
-        
-        # Save updated device record
-        content = json.dumps(device_data, indent=2).encode('utf-8')
-        device_file.content = content
-        device_file.size = len(content)
-        device_file.uploaded_at = datetime.now()  # Update modification time
-        db.commit()
-        
-        log_response("Device status updated", 200)
-        return {
-            "success": True,
-            "device_id": device_id,
-            "message": "Device status updated successfully"
+        now = datetime.utcnow()
+        update_data = {
+            "last_seen": now,
+            "online": request.status.lower() == "online" if hasattr(request, 'status') else device.online,
+            "updated_at": now
         }
         
+        # Update optional fields if provided
+        if hasattr(request, 'battery_level') and request.battery_level is not None:
+            update_data["battery_level"] = request.battery_level
+        if hasattr(request, 'wifi_connected') and request.wifi_connected is not None:
+            update_data["wifi_connected"] = request.wifi_connected
+        if hasattr(request, 'collection_active') and request.collection_active is not None:
+            update_data["collection_active"] = request.collection_active
+        
+        # Update IP address if available
+        ip = get_client_ip(request_obj)
+        if ip:
+            update_data["ip_address"] = ip
+        
+        # Apply updates
+        db.query(Device).filter(Device.deviceId == device.deviceId).update(update_data)
+        db.commit()
+        
+        log_response(200, {"success": True, "message": "Device status updated successfully"}, f"/device/{device_id}/status")
+        return {
+            "success": True,
+            "message": "Device status updated successfully"
+        }
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         log_error(f"Error updating device status: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to update device status")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update device status: {str(e)}"
+        )
 
 @router.delete("/{device_id}", response_model=StandardResponse)
 async def delete_device(
@@ -297,64 +469,80 @@ async def delete_device(
 ) -> Dict[str, Any]:
     """Delete a device and all its associated data.
     
-    Purpose: Remove a device registration and clean up all related data files
+    Purpose: Remove a device registration and clean up all related data
     
     Args:
-        device_id: The unique device identifier
+        device_id: The unique device identifier (UUID)
         
     Returns:
-        StandardResponse: Deletion confirmation with file count
+        StandardResponse: Deletion confirmation
     """
     try:
         log_request_start("DELETE", f"/device/{device_id}", current_user.userId)
         
-        # Get device record
-        device_file = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename == f"device_{device_id}.json"
+        # Find the device
+        device = db.query(Device).filter(
+            Device.device_uuid == device_id,
+            Device.userId == current_user.userId
         ).first()
         
-        if not device_file:
-            raise HTTPException(status_code=404, detail="Device not found")
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or access denied"
+            )
         
-        deleted_count = 0
-        
-        # Delete device record
-        db.delete(device_file)
-        deleted_count += 1
-        
-        # Delete all data files for this device
-        data_files = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename.like(f"data_{device_id}_%.json")
-        ).all()
-        
-        for file in data_files:
-            db.delete(file)
-            deleted_count += 1
-        
-        # Delete all file uploads from this device
-        file_uploads = db.query(File).filter(
-            File.userId == current_user.userId,
-            File.filename.like(f"file_{device_id}_%.%")
-        ).all()
-        
-        for file in file_uploads:
-            db.delete(file)
-            deleted_count += 1
-        
-        db.commit()
-        
-        log_response(f"Device and {deleted_count} files deleted", 200)
-        return {
-            "success": True,
-            "device_id": device_id,
-            "deleted_files": deleted_count,
-            "message": "Device deleted successfully"
-        }
+        try:
+            # First, try to delete the device directly
+            db.delete(device)
+            db.commit()
+            
+            log_response(200, {"success": True, "message": "Device deleted"}, f"/device/{device_id}")
+            return {
+                "success": True,
+                "message": "Device deleted successfully"
+            }
+            
+        except Exception as e:
+            db.rollback()
+            log_error(f"Error during device deletion: {str(e)}")
+            
+            # If there's a foreign key constraint error, try to delete related records first
+            if "foreign key constraint" in str(e).lower() or "violates foreign key" in str(e).lower():
+                try:
+                    # Use raw SQL to delete related records
+                    db.execute("""
+                        DELETE FROM device_activity 
+                        WHERE device_id = :device_id
+                    """, {"device_id": device.device_id})
+                    
+                    # Now try to delete the device again
+                    db.delete(device)
+                    db.commit()
+                    
+                    log_response(200, {"success": True, "message": "Device deleted with cleanup"}, f"/device/{device_id}")
+                    return {
+                        "success": True,
+                        "message": "Device and related data deleted successfully"
+                    }
+                    
+                except Exception as cleanup_error:
+                    db.rollback()
+                    log_error(f"Error during device deletion cleanup: {str(cleanup_error)}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to clean up device data: {str(cleanup_error)}"
+                    )
+            
+            # If it's a different error, re-raise it
+            raise
         
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         log_error(f"Error deleting device: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to delete device")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete device: {str(e)}"
+        )
