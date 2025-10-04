@@ -88,30 +88,32 @@ def send_status(message: str = "", to_phone_number: str = ""):
 
 
 def auto_disconnect_stale_devices():
-    """Mark devices as offline if they haven't sent a heartbeat in the last 2 minutes."""
+    """Mark devices as offline if they haven't sent a heartbeat recently."""
     db = SessionLocal()
     try:
-        # Check for devices that haven't been seen in the last 2 minutes
-        stale_time = datetime.utcnow() - timedelta(minutes=2)
+        # Check for devices that haven't been seen in the last 5 minutes
+        stale_time = datetime.utcnow() - timedelta(minutes=5)
+        
+        # Get devices that haven't sent a heartbeat recently
         stale_devices = db.query(Device).filter(
-            Device.last_seen < stale_time,
-            Device.online == True  # Only check devices that are currently online
+            (Device.last_heartbeat < stale_time) | (Device.last_seen < stale_time),
+            (Device.is_online == True) | (Device.online == True)  # Check both possible column names
         ).all()
         
-        # Mark devices as offline
-        for device in stale_devices:
-            device.online = False
-            device.updated_at = datetime.utcnow()
-            db.add(device)
-            
-            # Log the device going offline
-            user = db.query(User).filter(User.userId == device.userId).first()
-            logger.info(
-                f"Device {device.device_uuid} ({device.device_name}) for user {user.username if user else 'unknown'} "
-                f"marked as offline. Last seen: {device.last_seen}"
-            )
-        
         if stale_devices:
+            for device in stale_devices:
+                # Handle both possible attribute names
+                if hasattr(device, 'is_online'):
+                    device.is_online = False
+                if hasattr(device, 'online'):
+                    device.online = False
+                if hasattr(device, 'disconnected_at'):
+                    device.disconnected_at = datetime.utcnow()
+                if hasattr(device, 'updated_at'):
+                    device.updated_at = datetime.utcnow()
+                
+                logger.info(f"Marked device {getattr(device, 'id', 'unknown')} as offline")
+            
             db.commit()
             logger.info(f"Marked {len(stale_devices)} devices as offline")
         
@@ -123,17 +125,11 @@ def auto_disconnect_stale_devices():
         return 0
     finally:
         db.close()
-    except Exception as e:
-        logger.error(f"Error checking for stale devices: {e}")
-        db.rollback()
-    finally:
-        db.close()
 
 
 def start_scheduler():
     """Start the background scheduler for periodic tasks."""
     global scheduler
-    
     if scheduler is not None:
         logger.warning("Scheduler already running")
         return scheduler
