@@ -12,6 +12,7 @@ from pathlib import Path
 import os
 import json
 from server.routes import router
+from server.services import start_scheduler
 from server.utils.logging_utils import (
     log_request_start, 
     log_response,
@@ -387,6 +388,9 @@ async def health_check():
 
 # Include API router without prefix
 app.include_router(router, prefix="")
+
+# Start the scheduler when the application starts
+start_scheduler()
 
 if __name__ == "__main__":
     """Entry point for running the backend with optional CLI arguments.

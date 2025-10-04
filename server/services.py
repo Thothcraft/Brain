@@ -88,26 +88,41 @@ def send_status(message: str = "", to_phone_number: str = ""):
 
 
 def auto_disconnect_stale_devices():
-    """Log stale devices that haven't sent a heartbeat recently."""
+    """Mark devices as offline if they haven't sent a heartbeat in the last 2 minutes."""
     db = SessionLocal()
     try:
-        # Log devices that haven't been seen in the last 1 minutes
-        stale_time = datetime.utcnow() - timedelta(minutes=1)
-        stale_devices = db.query(Device).filter(Device.last_seen < stale_time).all()
+        # Check for devices that haven't been seen in the last 2 minutes
+        stale_time = datetime.utcnow() - timedelta(minutes=2)
+        stale_devices = db.query(Device).filter(
+            Device.last_seen < stale_time,
+            Device.online == True  # Only check devices that are currently online
+        ).all()
         
-        # Disconnect stale devices
+        # Mark devices as offline
         for device in stale_devices:
             device.online = False
+            device.updated_at = datetime.utcnow()
             db.add(device)
-            db.commit()
+            
+            # Log the device going offline
             user = db.query(User).filter(User.userId == device.userId).first()
-            phone_number = user.phone_number
-            
-            
-        for device in stale_devices:
-            logger.info(f"Device {device.deviceId} (UUID: {device.device_uuid}) last seen at {device.last_seen} is stale")
+            logger.info(
+                f"Device {device.device_uuid} ({device.device_name}) for user {user.username if user else 'unknown'} "
+                f"marked as offline. Last seen: {device.last_seen}"
+            )
         
-        logger.info(f"Found {len(stale_devices)} stale devices")
+        if stale_devices:
+            db.commit()
+            logger.info(f"Marked {len(stale_devices)} devices as offline")
+        
+        return len(stale_devices)
+        
+    except Exception as e:
+        logger.error(f"Error in auto_disconnect_stale_devices: {e}")
+        db.rollback()
+        return 0
+    finally:
+        db.close()
     except Exception as e:
         logger.error(f"Error checking for stale devices: {e}")
         db.rollback()
@@ -121,21 +136,21 @@ def start_scheduler():
     
     if scheduler is not None:
         logger.warning("Scheduler already running")
-        return
+        return scheduler
     
     try:
         scheduler = BackgroundScheduler()
         
-
-        
+        # Add status update job (every ~3.3 hours)
         scheduler.add_job(
             send_status,
-            trigger=IntervalTrigger(minutes=200),  # ~3.3 hours
+            trigger=IntervalTrigger(minutes=200),
             id='send_status_job',
             name='Send status periodically',
             replace_existing=True
         )
         
+        # Add device status check job (every 2 minutes)
         scheduler.add_job(
             auto_disconnect_stale_devices,
             trigger=IntervalTrigger(minutes=2),
@@ -145,17 +160,24 @@ def start_scheduler():
         )
         
         scheduler.start()
-        logger.info("Scheduler started successfully")
+        logger.info("Scheduler started successfully with jobs: %s", 
+                   [job.name for job in scheduler.get_jobs()])
         
         # Register shutdown handler
         import atexit
         atexit.register(lambda: scheduler.shutdown() if scheduler else None)
         
+        return scheduler
+        
     except Exception as e:
-        logger.error(f"Failed to start scheduler: {e}")
+        logger.error(f"Failed to start scheduler: {e}", exc_info=True)
         if scheduler is not None:
-            scheduler.shutdown()
+            try:
+                scheduler.shutdown()
+            except:
+                pass
             scheduler = None
+        raise
 
 
 def send_twilio_message(to_phone_number: str, message: str) -> Dict[str, Any]:
