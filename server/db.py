@@ -170,6 +170,7 @@ class Session(Base):
     """Relationship to the User who owns this session"""
 
 
+
 class Device(Base):
     """Device model representing user devices that interact with the platform."""
     __tablename__ = "device"
@@ -181,17 +182,14 @@ class Device(Base):
     device_name = Column("device_name", String, nullable=False)
     device_type = Column("device_type", String, nullable=False, default="thoth")
     
-    os_version = Column("os_version", String, nullable=True)
-    app_version = Column("app_version", String, nullable=True)
-    ip_address = Column("ip_address", String, nullable=True)
-    mac_address = Column("mac_address", String, nullable=True)
     last_seen = Column("last_seen", DateTime, default=datetime.utcnow, index=True)
     online = Column("online", Boolean, default=False, index=True)
+    
+    ip_address = Column("ip_address", String, nullable=True)
+    mac_address = Column("mac_address", String, nullable=True)
     battery_level = Column("battery_level", Integer, nullable=True)
-    wifi_connected = Column("wifi_connected", Boolean, default=False)
-    collection_active = Column("collection_active", Boolean, default=False)
-    created_at = Column("created_at", DateTime, default=datetime.utcnow)
-    updated_at = Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    
 
     # Relationship back to user
     user = relationship("User", back_populates="devices")
@@ -204,15 +202,15 @@ class Device(Base):
             "device_id": self.device_uuid,
             "device_name": self.device_name,
             "device_type": self.device_type,
-            "os_version": self.os_version,
-            "app_version": self.app_version,
             "online": self.online,
             "battery_level": self.battery_level,
-            "wifi_connected": self.wifi_connected,
-            "collection_active": self.collection_active,
             "last_seen": self.last_seen.isoformat() if self.last_seen else None,
-            "created_at": self.created_at.isoformat() if self.created_at else None
+            "ip_address": self.ip_address,
+            "mac_address": self.mac_address,
+            "device_uuid": self.device_uuid,
+            "user_id": userId
         }
+
 
 
 class FileDeviceUpdate(Base):
