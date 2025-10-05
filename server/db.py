@@ -180,7 +180,7 @@ class Device(Base):
     device_uuid = Column("device_uuid", String, unique=True, nullable=False, index=True)
     device_name = Column("device_name", String, nullable=False)
     device_type = Column("device_type", String, nullable=False, default="thoth")
-    device_model = Column("device_model", String, nullable=True)
+    
     os_version = Column("os_version", String, nullable=True)
     app_version = Column("app_version", String, nullable=True)
     ip_address = Column("ip_address", String, nullable=True)
@@ -204,7 +204,6 @@ class Device(Base):
             "device_id": self.device_uuid,
             "device_name": self.device_name,
             "device_type": self.device_type,
-            "device_model": self.device_model,
             "os_version": self.os_version,
             "app_version": self.app_version,
             "online": self.online,
