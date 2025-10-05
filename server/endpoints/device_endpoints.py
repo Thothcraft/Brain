@@ -122,10 +122,9 @@ async def register_device(
             device_name = request.device_name or f"{request.device_type or 'Device'}-{request.device_id[:8]}"
             
             # Get additional device info from request
-            device_model = getattr(request, 'device_model', None)
-            os_version = getattr(request, 'os_version', None)
-            app_version = getattr(request, 'app_version', None)
-            mac_address = getattr(request, 'mac_address', None)
+            os_version = getattr(request.hardware_info, 'os_version', None) if request.hardware_info else None
+            app_version = getattr(request.hardware_info, 'app_version', None) if request.hardware_info else None
+            mac_address = next(iter(getattr(request.hardware_info, 'network_interfaces', {}).values()), None) if request.hardware_info else None
             
             # Get IP address from request
             ip_address = get_client_ip(request_obj)
@@ -149,11 +148,14 @@ async def register_device(
                 # Update existing device
                 existing_device.device_name = device_name
                 existing_device.device_type = request.device_type or existing_device.device_type
-                existing_device.device_model = device_model or existing_device.device_model
-                existing_device.os_version = os_version or existing_device.os_version
-                existing_device.app_version = app_version or existing_device.app_version
-                existing_device.ip_address = ip_address or existing_device.ip_address
-                existing_device.mac_address = mac_address or existing_device.mac_address
+                if os_version is not None:
+                    existing_device.os_version = os_version
+                if app_version is not None:
+                    existing_device.app_version = app_version
+                if ip_address is not None:
+                    existing_device.ip_address = ip_address
+                if mac_address is not None:
+                    existing_device.mac_address = mac_address
                 existing_device.last_seen = now
                 existing_device.online = True
                 existing_device.updated_at = now
@@ -170,34 +172,33 @@ async def register_device(
                     "device_name": device_name,
                     "message": "Device updated successfully"
                 }
-            
-            # Create new device record
-            new_device = Device(
-                userId=current_user.userId,
-                device_uuid=device_uuid,
-                device_name=device_name,
-                device_type=request.device_type or "unknown",
-                device_model=device_model,
-                os_version=os_version,
-                app_version=app_version,
-                ip_address=ip_address,
-                mac_address=mac_address,
-                last_seen=now,
-                online=True,
-                created_at=now,
-                updated_at=now
-            )
-            
-            db.add(new_device)
-            db.commit()
-            db.refresh(new_device)
-            
-            logger.info(f"New device registered: {device_uuid} for user {current_user.userId}")
-            log_response("Device registered successfully", 201, "/device/register", "/device/register")
-            
-            return {
-                "success": True,
-                "device_id": device_uuid,
+            else:
+                # Create new device
+                new_device = Device(
+                    userId=current_user.userId,
+                    device_uuid=device_uuid,
+                    device_name=device_name,
+                    device_type=request.device_type or "unknown",
+                    os_version=os_version,
+                    app_version=app_version,
+                    ip_address=ip_address,
+                    mac_address=mac_address,
+                    last_seen=now,
+                    online=True,
+                    created_at=now,
+                    updated_at=now
+                )          
+                
+                db.add(new_device)
+                db.commit()
+                db.refresh(new_device)
+                
+                logger.info(f"New device registered: {device_uuid} for user {current_user.userId}")
+                log_response("Device registered successfully", 201, "/device/register", "/device/register")
+                
+                return {
+                    "success": True,
+                    "device_id": device_uuid,
                 "device_name": device_name,
                 "message": "Device registered successfully"
             }
