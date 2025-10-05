@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request, status
 from sqlalchemy.orm import Session
 
 from server.db import get_db
@@ -17,6 +17,22 @@ from server.utils.logging_utils import log_request_start, log_response, log_erro
 from .models import FileUploadSimpleRequest, FileUploadResponse, PaginatedResponse
 
 router = APIRouter(prefix="/file", tags=["files"])
+
+@router.get("/files", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def list_files_compat(
+    limit: int = Query(50, ge=1, le=200, description="Maximum number of files to return"),
+    offset: int = Query(0, ge=0, description="Number of files to skip"),
+    device_id: Optional[str] = Query(None, description="Filter by source device"),
+    content_type: Optional[str] = Query(None, description="Filter by content type"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    List files (compatibility endpoint).
+    
+    This is a compatibility endpoint that forwards to /file/list
+    """
+    return await list_user_files(limit, offset, device_id, content_type, current_user, db)
 
 @router.post("/upload", response_model=FileUploadResponse)
 async def upload_file_simple(

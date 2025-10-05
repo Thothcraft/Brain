@@ -205,7 +205,7 @@ async def process_ai_query(
             "timestamp": datetime.now().isoformat()
         }
         
-        log_response("Query processed successfully", 200)
+        log_response("Query processed successfully", 200, "/query")
         return response_data
         
     except HTTPException:
