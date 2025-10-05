@@ -94,9 +94,9 @@ def auto_disconnect_stale_devices():
         # Check for devices that haven't been seen in the last 5 minutes
         stale_time = datetime.utcnow() - timedelta(minutes=5)
         
-        # Get devices that haven't sent a heartbeat recently
+        # Get devices that haven't been seen recently
         stale_devices = db.query(Device).filter(
-            (Device.last_heartbeat < stale_time) | (Device.last_seen < stale_time),
+            Device.last_seen < stale_time,
             (Device.is_online == True) | (Device.online == True)  # Check both possible column names
         ).all()
         
