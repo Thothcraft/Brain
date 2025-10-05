@@ -94,19 +94,15 @@ def auto_disconnect_stale_devices():
         # Check for devices that haven't been seen in the last 5 minutes
         stale_time = datetime.utcnow() - timedelta(minutes=5)
         
-        # Get devices that haven't been seen recently
+        # Get devices that haven't been seen recently and are currently online
         stale_devices = db.query(Device).filter(
             Device.last_seen < stale_time,
-            (Device.is_online == True) | (Device.online == True)  # Check both possible column names
+            Device.online == True
         ).all()
         
         if stale_devices:
             for device in stale_devices:
-                # Handle both possible attribute names
-                if hasattr(device, 'is_online'):
-                    device.is_online = False
-                if hasattr(device, 'online'):
-                    device.online = False
+                device.online = False
                 if hasattr(device, 'disconnected_at'):
                     device.disconnected_at = datetime.utcnow()
                 if hasattr(device, 'updated_at'):
