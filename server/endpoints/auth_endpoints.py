@@ -129,7 +129,7 @@ async def login_for_access_token(
         logging.info(f"Successfully authenticated user: {user.username} (ID: {user.userId})")
         
         # Create access token
-        access_token_expires = timedelta(minutes=30)  # Token expires in 30 minutes
+        access_token_expires = timedelta(days=30)  # Token expires in 30 days
         access_token = create_access_token(
             data={"sub": str(user.userId)}, expires_delta=access_token_expires
         )
@@ -137,7 +137,7 @@ async def login_for_access_token(
         response_data = {
             "access_token": access_token,
             "token_type": "bearer",
-            "expires_in": 1800,  # 30 minutes in seconds
+            "expires_in": 2592000,  # 30 days in seconds (30 * 24 * 60 * 60)
             "user_id": user.userId,
             "username": user.username
         }
