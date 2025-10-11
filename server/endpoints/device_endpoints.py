@@ -155,7 +155,7 @@ async def register_device(
                 db.refresh(existing_device)
                 
                 logger.info(f"Device updated: {device_uuid} for user {current_user.userId}")
-                log_response("Device updated successfully", 200, "/device/register", "/device/register")
+                log_response(200, "Device updated successfully", "/device/register")
                 
                 return {
                     "success": True,
