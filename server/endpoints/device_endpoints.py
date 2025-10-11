@@ -257,10 +257,26 @@ async def list_user_devices(
         }
             
     except Exception as e:
-        log_error(f"Error listing devices: {str(e)}")
+        import traceback
+        error_details = {
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc(),
+            "user_id": getattr(current_user, 'userId', 'unknown'),
+            "user_type": type(current_user).__name__,
+            "user_attrs": [attr for attr in dir(current_user) if not attr.startswith('_')]
+        }
+        log_error(f"Error listing devices: {error_details}")
+        
+        # For debugging, return the full error details
+        # In production, you might want to limit what's returned to the client
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve device list"
+            detail={
+                "error": "Failed to retrieve device list",
+                "details": str(e),
+                "type": type(e).__name__
+            }
         )
 
 @router.post("/heartbeat")
