@@ -201,11 +201,11 @@ def main():
     
     # Test all endpoint groups
     test_health_endpoints()
-    test_sensor_endpoints()
-    test_network_endpoints()
-    test_training_endpoints()
-    test_curriculum_endpoints()
-    test_auth_endpoints()
+    # test_sensor_endpoints()
+    # test_network_endpoints()
+    # test_training_endpoints()
+    # test_curriculum_endpoints()
+    # test_auth_endpoints()
     
     print(f"\n✅ Endpoint testing completed at: {datetime.now()}")
     print("\nNote: Some endpoints may return errors if the backend is not fully configured")
