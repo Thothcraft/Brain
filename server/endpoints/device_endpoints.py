@@ -80,19 +80,7 @@ async def register_device(
     
     This endpoint allows devices to register with the system. If the device already exists,
     its information will be updated. The device will be marked as online upon registration.
-    
-    Args:
-        request: Device registration data
-        current_user: Authenticated user
-        db: Database session
-        user_agent: User agent string from the request headers
-        request_obj: The incoming request object
-        
-    Returns:
-        DeviceResponse: Registration result with device details
-        
-    Raises:
-        HTTPException: 400 if request is invalid, 403 if rate limited, 500 on server error
+    After successful registration, it will attempt to fetch the list of files from the device.
     """
     try:
         log_request_start("POST", "/device/register", current_user.userId)
@@ -124,8 +112,15 @@ async def register_device(
             # Get additional device info from request
             mac_address = getattr(request, 'mac_address', None)
             
-            # Get IP address from request
-            ip_address = get_client_ip(request_obj)
+            # Get IP address from request or use the one provided in the request
+            ip_address = request.ip_address or get_client_ip(request_obj)
+            
+            # Store IP in hardware info if available
+            hardware_info = request.hardware_info or {}
+            if ip_address:
+                hardware_info['ip_address'] = ip_address
+            if mac_address:
+                hardware_info['mac_address'] = mac_address
             
             # Check if device already exists for this user
             existing_device = db.query(Device).filter(
@@ -148,6 +143,7 @@ async def register_device(
                 existing_device.device_type = request.device_type or existing_device.device_type
                 existing_device.ip_address = ip_address or existing_device.ip_address
                 existing_device.mac_address = mac_address or existing_device.mac_address
+                existing_device.hardware_info = hardware_info or existing_device.hardware_info
                 existing_device.last_seen = now
                 existing_device.online = True
                 
@@ -161,6 +157,7 @@ async def register_device(
                     "success": True,
                     "device_id": device_uuid,
                     "device_name": device_name,
+                    "ip_address": ip_address,
                     "message": "Device updated successfully"
                 }
             
@@ -172,6 +169,7 @@ async def register_device(
                 device_type=request.device_type or "unknown",
                 ip_address=ip_address,
                 mac_address=mac_address,
+                hardware_info=hardware_info,
                 last_seen=now,
                 online=True
             )
@@ -187,6 +185,7 @@ async def register_device(
                 "success": True,
                 "device_id": device_uuid,
                 "device_name": device_name,
+                "ip_address": ip_address,
                 "message": "Device registered successfully"
             }
             
