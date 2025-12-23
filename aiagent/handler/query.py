@@ -64,6 +64,9 @@ def query_openai(
 
     # Initialize the Functions Registry
     tools = FunctionsRegistry()
+    
+    # Log registered functions for debugging
+    logging.info(f"[AI Agent] Registered functions: {tools.get_registry_contents()}")
 
     # Get the callable functions from the registry
     function_map = tools.get_function_callable()
@@ -85,7 +88,7 @@ def query_openai(
     past_conversations = json.dumps(past_conversations_data if past_conversations_data is not None else [])
     
     messages.append(
-        {"role": "system", "content": "You are a personal assistant. The user is asking you a question. Answer briefly and concisely. "},
+        {"role": "system", "content": "You are a personal assistant. The user is asking you a question. Answer briefly and concisely. When the user asks you to send them an SMS, use their phone number from the user details (user_phone_number field). Always use the send_twilio_message function with the user's actual phone number, never use placeholder values."},
     )    
 
     messages.append(
@@ -116,6 +119,10 @@ def query_openai(
     )
 
     response_message = response.choices[0].message
+    
+    # Log if tool calls were requested
+    logging.info(f"[AI Agent] Initial response tool_calls: {response_message.tool_calls}")
+    logging.info(f"[AI Agent] Initial response content: {response_message.content}")
 
     # Iterate until model returns a final message without further tool calls
     max_tool_iterations = 5
@@ -141,6 +148,8 @@ def query_openai(
         for tool_call in tool_calls:
             function_name = tool_call.function.name
             raw_args = tool_call.function.arguments  # may be JSON string per OpenAI spec
+            
+            logging.info(f"[AI Agent] Executing tool: {function_name} with args: {raw_args}")
 
             # Ensure we have a dict before passing via **kwargs
             try:
@@ -151,6 +160,7 @@ def query_openai(
 
             # Call through registry helper first (allows additional wrappers)
             function_result = tools.resolve_function(function_name, parsed_args)
+            logging.info(f"[AI Agent] Tool result: {function_result}")
 
             # If the concrete callable is present, execute directly as well
             if function_name in function_map:

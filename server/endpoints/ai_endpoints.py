@@ -119,6 +119,12 @@ async def process_ai_query(
             lt_data = json.loads(lt_str) if lt_str.strip() else {}
             st_data = json.loads(st_str) if st_str.strip() else {}
             
+            # Inject user's phone number from database into long-term memory context
+            if current_user.phone_number:
+                lt_data["user_phone_number"] = f"+{current_user.phone_number}"
+            lt_data["username"] = current_user.username
+            lt_data["user_id"] = current_user.userId
+            
         except Exception as e:
             log_error(f"Memory initialization error: {str(e)}")
             # Fallback to empty memory
