@@ -146,7 +146,7 @@ async def process_ai_query(
                 }
             )
             
-            log_ai_response(ai_response, "default_model", "/query")
+            log_ai_response(ai_response, "/query")
             
         except Exception as e:
             log_error(f"AI processing error: {str(e)}")
