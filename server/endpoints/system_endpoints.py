@@ -50,7 +50,7 @@ async def health_check() -> Dict[str, Any]:
             "environment": os.getenv("ENVIRONMENT", "development")
         }
         
-        log_response("Health check successful", 200)
+        log_response(200, "Health check successful", "/health")
         return response_data
         
     except Exception as e:
@@ -95,7 +95,7 @@ async def root() -> Dict[str, Any]:
             }
         }
         
-        log_response("Root endpoint accessed", 200)
+        log_response(200, "Root endpoint accessed", "/")
         return response_data
         
     except Exception as e:

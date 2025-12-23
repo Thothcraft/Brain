@@ -11,7 +11,8 @@ from twilio.twiml.voice_response import VoiceResponse
 
 from server.db import get_db, User, Query as DBQuery
 from server.utils.logging_utils import log_request_start, log_response, log_error, log_request_payload
-from server.services import ai_query_handler
+from aiagent.handler.query import query_openai
+from aiagent.memory.memory_manager import LongTermMemoryManager, ShortTermMemoryManager
 
 router = APIRouter(prefix="/phone", tags=["webhooks"])
 
@@ -52,7 +53,7 @@ async def handle_twilio_incoming_message(
         log_request_payload(dict(form_data), endpoint_name)
         
         # Log the incoming message
-        log_response(f"Incoming message from {from_number}: {body}", 200)
+        log_response(200, f"Incoming message from {from_number}: {body}", "/webhooks/twilio/incoming-message")
         
         # Normalize phone number (remove non-digits)
         normalized_from = re.sub(r'\D', '', from_number)
@@ -94,11 +95,6 @@ async def handle_twilio_incoming_message(
         
         # Process with AI (simplified version)
         try:
-            # Import AI processing function
-            from server.services.ai_query_handler import query_openai
-            from aiagent.context.short_term_memory import ShortTermMemoryManager
-            from aiagent.context.long_term_memory import LongTermMemoryManager
-            
             # Use basic memory managers for SMS
             long_term_memory = LongTermMemoryManager()
             short_term_memory = ShortTermMemoryManager()
@@ -127,7 +123,7 @@ async def handle_twilio_incoming_message(
         # Return TwiML response
         twiml_response = f"<Response><Message>{ai_response}</Message></Response>"
         
-        log_response("SMS response sent", 200)
+        log_response(200, "SMS response sent", "/webhooks/twilio/incoming-message")
         return Response(
             content=twiml_response,
             media_type="application/xml",
@@ -174,7 +170,7 @@ async def handle_twilio_message_status(
         log_request_start("POST", "/api/webhooks/twilio/message-status", None)
         
         # Log the status update
-        log_response(f"Message {MessageSid} status: {MessageStatus}", 200)
+        log_response(200, f"Message {MessageSid} status: {MessageStatus}", "/webhooks/twilio/message-status")
         
         # You could store this in a message_status table if needed
         # For now, just log it
@@ -242,7 +238,7 @@ async def handle_twilio_incoming_call(
             
             resp.say("Thank you. Processing your request.")
         
-        log_response("Call handled", 200)
+        log_response(200, "Call handled", "/webhooks/twilio/incoming-call")
         return Response(content=str(resp), media_type="application/xml", status_code=200)
         
     except Exception as e:
@@ -314,10 +310,6 @@ async def handle_transcription_callback(
             db.refresh(db_query)
             
             # Process with AI
-            from server.services.ai_query_handler import query_openai
-            from aiagent.context.short_term_memory import ShortTermMemoryManager
-            from aiagent.context.long_term_memory import LongTermMemoryManager
-            
             long_term_memory = LongTermMemoryManager()
             short_term_memory = ShortTermMemoryManager()
             
@@ -341,7 +333,7 @@ async def handle_transcription_callback(
             except Exception as sms_error:
                 log_error(f"Failed to send SMS response: {str(sms_error)}")
             
-            log_response("Transcription processed and response sent", 200)
+            log_response(200, "Transcription processed and response sent", "/webhooks/twilio/transcription")
             return {"status": "processed"}
             
         except Exception as e:

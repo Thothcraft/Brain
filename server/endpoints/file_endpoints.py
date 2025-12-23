@@ -91,7 +91,7 @@ async def upload_file_simple(
             ).first()
             
             if existing_file:
-                log_response(f"File already exists: {request.filename}", 200)
+                log_response(200, f"File already exists: {request.filename}", "/file/upload")
                 return {
                     "success": True,
                     "file_id": existing_file.fileId,
@@ -279,7 +279,7 @@ async def download_file_simple(
         else:
             headers["Content-Disposition"] = f'inline; filename="{original_filename}"'
         
-        log_response(f"File {'downloaded' if download else 'viewed'}: {original_filename}", 200)
+        log_response(200, f"File {'downloaded' if download else 'viewed'}: {original_filename}", f"/file/{file_id}")
         
         return Response(
             content=file_record.content,
@@ -345,7 +345,7 @@ async def get_file_info(
             "metadata": metadata
         }
         
-        log_response("File info retrieved", 200)
+        log_response(200, "File info retrieved", f"/file/{file_id}/info")
         return file_info
         
     except HTTPException:
@@ -390,7 +390,7 @@ async def delete_file_simple(
         db.delete(file_record)
         db.commit()
         
-        log_response(f"File deleted: {original_filename} (ID: {file_id})", 200)
+        log_response(200, f"File deleted: {original_filename} (ID: {file_id})", f"/file/{file_id}")
         return {
             "success": True,
             "message": f"File '{original_filename}' deleted successfully",
@@ -450,7 +450,7 @@ async def delete_files_bulk(
         
         db.commit()
         
-        log_response(f"Bulk deleted {len(deleted_files)} files", 200)
+        log_response(200, f"Bulk deleted {len(deleted_files)} files", "/file/bulk")
         return {
             "success": True,
             "deleted_count": len(deleted_files),

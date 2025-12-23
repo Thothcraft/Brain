@@ -94,7 +94,7 @@ async def upload_data(
         
         db.commit()
         
-        log_response(f"Uploaded {len(request.data)} data points", 200)
+        log_response(200, f"Uploaded {len(request.data)} data points", "/data/upload")
         return {
             "success": True,
             "upload_id": upload_id,
@@ -184,7 +184,7 @@ async def get_device_data(
                 log_error(f"Error parsing data file {file.filename}: {str(e)}")
                 continue
         
-        log_response(f"Retrieved {len(data_records)} data batches with {total_count} total points", 200)
+        log_response(200, f"Retrieved {len(data_records)} data batches with {total_count} total points", "/data/{device_id}")
         return {
             "success": True,
             "device_id": device_id,
@@ -304,7 +304,7 @@ async def get_data_analytics(
             "data_types": data_types
         }
         
-        log_response("Analytics retrieved", 200)
+        log_response(200, "Analytics retrieved", "/data/analytics")
         return analytics
         
     except HTTPException:
@@ -355,7 +355,7 @@ async def delete_data_batch(
         db.delete(data_file)
         db.commit()
         
-        log_response("Data batch deleted", 200)
+        log_response(200, "Data batch deleted", "/data/batch/delete")
         return {
             "success": True,
             "device_id": device_id,

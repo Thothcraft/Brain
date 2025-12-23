@@ -11,11 +11,8 @@ from pydantic import BaseModel, validator
 from server.db import get_db, User, File, Query as DBQuery
 from server.auth import get_current_user
 from server.utils.logging_utils import log_request_start, log_response, log_error, log_ai_call, log_ai_response
-from server.services import ai_query_handler
-
-# Memory managers (commented out - not available in current environment)
-# from aiagent.context.short_term_memory import ShortTermMemoryManager
-# from aiagent.context.long_term_memory import LongTermMemoryManager
+from aiagent.handler.query import query_openai
+from aiagent.memory.memory_manager import LongTermMemoryManager, ShortTermMemoryManager
 
 router = APIRouter(prefix="", tags=["ai"])
 
@@ -130,12 +127,16 @@ async def process_ai_query(
         
         # Process query with AI
         try:
-            from server.services.ai_query_handler import query_openai
+            # Create memory managers with the loaded data
+            long_term_memory = LongTermMemoryManager()
+            long_term_memory._memory_content = lt_data
+            short_term_memory = ShortTermMemoryManager()
+            short_term_memory._memory_content = st_data
             
             ai_response = query_openai(
                 query=query_data.query,
-                long_term_memory=lt_data,
-                short_term_memory=st_data,
+                long_term_memory=long_term_memory,
+                short_term_memory=short_term_memory,
                 max_tokens=2000,
                 temperature=0.7,
                 aux_data={
@@ -205,7 +206,7 @@ async def process_ai_query(
             "timestamp": datetime.now().isoformat()
         }
         
-        log_response("Query processed successfully", 200, "/query")
+        log_response(200, "Query processed successfully", "/query")
         return response_data
         
     except HTTPException:
