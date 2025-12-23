@@ -208,7 +208,7 @@ class Device(Base):
             "ip_address": self.ip_address,
             "mac_address": self.mac_address,
             "device_uuid": self.device_uuid,
-            "user_id": userId
+            "user_id": self.userId
         }
 
 

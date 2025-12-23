@@ -80,19 +80,7 @@ async def register_device(
     
     This endpoint allows devices to register with the system. If the device already exists,
     its information will be updated. The device will be marked as online upon registration.
-    
-    Args:
-        request: Device registration data
-        current_user: Authenticated user
-        db: Database session
-        user_agent: User agent string from the request headers
-        request_obj: The incoming request object
-        
-    Returns:
-        DeviceResponse: Registration result with device details
-        
-    Raises:
-        HTTPException: 400 if request is invalid, 403 if rate limited, 500 on server error
+    After successful registration, it will attempt to fetch the list of files from the device.
     """
     try:
         log_request_start("POST", "/device/register", current_user.userId)
@@ -124,8 +112,15 @@ async def register_device(
             # Get additional device info from request
             mac_address = getattr(request, 'mac_address', None)
             
-            # Get IP address from request
-            ip_address = get_client_ip(request_obj)
+            # Get IP address from request or use the one provided in the request
+            ip_address = request.ip_address or get_client_ip(request_obj)
+            
+            # Store IP in hardware info if available
+            hardware_info = request.hardware_info or {}
+            if ip_address:
+                hardware_info['ip_address'] = ip_address
+            if mac_address:
+                hardware_info['mac_address'] = mac_address
             
             # Check if device already exists for this user
             existing_device = db.query(Device).filter(
@@ -148,6 +143,7 @@ async def register_device(
                 existing_device.device_type = request.device_type or existing_device.device_type
                 existing_device.ip_address = ip_address or existing_device.ip_address
                 existing_device.mac_address = mac_address or existing_device.mac_address
+                existing_device.hardware_info = hardware_info or existing_device.hardware_info
                 existing_device.last_seen = now
                 existing_device.online = True
                 
@@ -161,6 +157,7 @@ async def register_device(
                     "success": True,
                     "device_id": device_uuid,
                     "device_name": device_name,
+                    "ip_address": ip_address,
                     "message": "Device updated successfully"
                 }
             
@@ -172,6 +169,7 @@ async def register_device(
                 device_type=request.device_type or "unknown",
                 ip_address=ip_address,
                 mac_address=mac_address,
+                hardware_info=hardware_info,
                 last_seen=now,
                 online=True
             )
@@ -187,6 +185,7 @@ async def register_device(
                 "success": True,
                 "device_id": device_uuid,
                 "device_name": device_name,
+                "ip_address": ip_address,
                 "message": "Device registered successfully"
             }
             
@@ -257,113 +256,26 @@ async def list_user_devices(
         }
             
     except Exception as e:
-        log_error(f"Error listing devices: {str(e)}")
+        import traceback
+        error_details = {
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc(),
+            "user_id": getattr(current_user, 'userId', 'unknown'),
+            "user_type": type(current_user).__name__,
+            "user_attrs": [attr for attr in dir(current_user) if not attr.startswith('_')]
+        }
+        log_error(f"Error listing devices: {error_details}")
+        
+        # For debugging, return the full error details
+        # In production, you might want to limit what's returned to the client
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve device list"
-        )
-
-@router.post("/heartbeat")
-async def device_heartbeat(
-    request: DeviceHeartbeatRequest,
-    db: Session = Depends(get_db),
-    request_obj: Request = None
-) -> StandardResponse:
-    """
-    Handle device heartbeat and status updates.
-    
-    This endpoint allows devices to periodically check in and update their status.
-    It also handles device authentication and updates the last_seen timestamp.
-    
-    Args:
-        request: Heartbeat request containing device status
-        db: Database session
-        request_obj: The incoming request object
-        
-    Returns:
-        StandardResponse: Status update confirmation
-        
-    Raises:
-        HTTPException: 401 if unauthorized, 404 if device not found
-    """
-    try:
-        # Get authorization header
-        auth_header = request_obj.headers.get("Authorization") if request_obj else None
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing or invalid authorization header"
-            )
-            
-        token = auth_header.split(" ")[1]
-        
-        # Get user from token
-        user = await get_user_from_token(token, db)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired token"
-            )
-        
-        # Get the device
-        device = db.query(Device).filter(
-            Device.device_uuid == request.device_id,
-            Device.userId == user.userId
-        ).first()
-        
-        if not device:
-            logger.warning(f"Device not found: {request.device_id} for user {user.userId}")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Device not found or access denied"
-            )
-        
-        # Update device status
-        now = datetime.utcnow()
-        update_data = {
-            "last_seen": now,
-            "online": True,
-            "updated_at": now
-        }
-        
-        # Update optional fields if provided
-        if hasattr(request, 'battery_level') and request.battery_level is not None:
-            update_data["battery_level"] = request.battery_level
-        if hasattr(request, 'wifi_connected') and request.wifi_connected is not None:
-            update_data["wifi_connected"] = request.wifi_connected
-        if hasattr(request, 'collection_active') and request.collection_active is not None:
-            update_data["collection_active"] = request.collection_active
-        if hasattr(request, 'current_app') and request.current_app:
-            update_data["last_known_app"] = request.current_app
-        if hasattr(request, 'current_page') and request.current_page:
-            update_data["last_known_page"] = request.current_page
-        
-        # Update IP address if available
-        ip = get_client_ip(request_obj)
-        if ip:
-            update_data["ip_address"] = ip
-        
-        # Apply updates
-        db.query(Device).filter(Device.deviceId == device.deviceId).update(update_data)
-        db.commit()
-        
-        logger.debug(f"Heartbeat received from device {request.device_id}")
-        
-        return {
-            "success": True,
-            "message": "Heartbeat received",
-            "server_time": now.isoformat(),
-            "next_heartbeat_in": 60  # Recommended seconds until next heartbeat
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error processing heartbeat: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while processing the heartbeat"
+            detail={
+                "error": "Failed to retrieve device list",
+                "details": str(e),
+                "type": type(e).__name__
+            }
         )
 
 @router.put("/{device_id}/status")

@@ -50,12 +50,23 @@ class DeviceRegisterRequest(BaseModel):
     device_name: Optional[str] = None
     device_type: str = "thoth"
     hardware_info: Optional[Dict[str, Any]] = {}
+    ip_address: Optional[str] = None
     
     @validator('device_id')
     def validate_device_id(cls, v):
         if not v or len(v.strip()) < 3:
             raise ValueError('Device ID must be at least 3 characters')
         return v.strip()
+    
+    @validator('ip_address')
+    def validate_ip_address(cls, v):
+        if v is None:
+            return v
+        try:
+            ip_address(v)
+            return v
+        except ValueError:
+            raise ValueError('Invalid IP address format')
 
 class DeviceStatusRequest(BaseModel):
     status: str
