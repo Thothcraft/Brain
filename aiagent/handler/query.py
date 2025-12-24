@@ -88,7 +88,7 @@ def query_openai(
     past_conversations = json.dumps(past_conversations_data if past_conversations_data is not None else [])
     
     messages.append(
-        {"role": "system", "content": "You are a personal assistant. The user is asking you a question. Answer briefly and concisely. When the user asks you to send them an SMS, use their phone number from the user details (user_phone_number field). Always use the send_twilio_message function with the user's actual phone number, never use placeholder values."},
+        {"role": "system", "content": "You are a personal assistant answering questions about Gad's portfolio."},
     )    
 
     messages.append(
