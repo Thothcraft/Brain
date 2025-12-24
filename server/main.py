@@ -333,30 +333,10 @@ async def global_logging_middleware(request: Request, call_next):
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"(https?://(localhost(:\d+)?|thothfrontend\.vercel\.app|.*-thoth\.vercel\.app|.*\.vercel\.app|web-production-d7d37\.up\.railway\.app)|chrome-extension://nnhcocdhioccnhcbjflcdnicmjlbcnbd)",  # Allow Vercel, localhost, and Chrome extension
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "Access-Control-Allow-Headers",
-        "Access-Control-Allow-Origin",
-        "X-Requested-With",
-        "X-CSRF-Token",
-        "Accept",
-        "Accept-Version",
-        "Content-Length",
-        "Content-MD5",
-        "Date",
-        "X-Api-Version",
-        "X-Request-Id",
-        "X-Forwarded-For",
-        "X-Forwarded-Proto",
-        "X-Forwarded-Host",
-        "X-Forwarded-Port",
-        "X-Forwarded-Prefix",
-    ],
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
+    allow_methods=["*"],  # Allow all methods including OPTIONS
+    allow_headers=["*"],  # Allow all headers
     expose_headers=[
         "Content-Range",
         "X-Total-Count",
