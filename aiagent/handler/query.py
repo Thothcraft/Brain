@@ -95,8 +95,12 @@ def query_openai(
         {"role": "system", "content": f"Here are the current user details: {long_term_memory_content}\n\nPast Conversations: {past_conversations}\n"}
     )
 
-        
-
+    # Add additional context if provided
+    if aux_data and aux_data.get("context"):
+        context_str = json.dumps(aux_data["context"]) if isinstance(aux_data["context"], dict) else str(aux_data["context"])
+        messages.append(
+            {"role": "system", "content": f"Additional context for this query: {context_str}"}
+        )
         
     # Add user query
     messages.append({"role": "user", "content": query})
