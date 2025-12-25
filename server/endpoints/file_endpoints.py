@@ -106,6 +106,9 @@ async def list_files(
                 "next_offset": offset + limit if has_more else None
             }
         }
+    except Exception as e:
+        log_error(f"Error listing files: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list files")
 
 
 @router.post("/upload", response_model=FileUploadResponse)
