@@ -229,13 +229,14 @@ async def redoc_html():
         redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js",
     )
 
-# List of allowed origins
+# List of allowed origins for CORS with credentials
 ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # Research Portal
+    "http://localhost:3000",  # Research Portal local
     "http://localhost:3001",  # Education Portal
     "http://localhost:3002",  # Website
-    "https://thoth-frontend-sable.vercel.app", 
-    "https://web-production-d7d37.up.railway.app"  # Your backend domain
+    "https://thoth-frontend-sable.vercel.app",
+    "https://portal-three-rho.vercel.app",  # Research Portal on Vercel
+    "https://web-production-d7d37.up.railway.app"  # Backend domain
 ]
 
 # --------------------------------------------------
@@ -333,8 +334,8 @@ async def global_logging_middleware(request: Request, call_next):
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=False,  # Must be False when allow_origins=["*"]
+    allow_origins=ALLOWED_ORIGINS,  # Use specific origins to allow credentials
+    allow_credentials=True,  # Allow credentials with specific origins
     allow_methods=["*"],  # Allow all methods including OPTIONS
     allow_headers=["*"],  # Allow all headers
     expose_headers=[
