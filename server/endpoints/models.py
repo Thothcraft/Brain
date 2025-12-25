@@ -1,6 +1,7 @@
 """Request/Response models for all endpoints."""
 
 import uuid
+from ipaddress import ip_address as validate_ip
 from pydantic import BaseModel, validator
 from typing import Dict, List, Optional, Any
 
@@ -63,7 +64,7 @@ class DeviceRegisterRequest(BaseModel):
         if v is None:
             return v
         try:
-            ip_address(v)
+            validate_ip(v)
             return v
         except ValueError:
             raise ValueError('Invalid IP address format')

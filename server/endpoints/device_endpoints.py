@@ -143,7 +143,6 @@ async def register_device(
                 existing_device.device_type = request.device_type or existing_device.device_type
                 existing_device.ip_address = ip_address or existing_device.ip_address
                 existing_device.mac_address = mac_address or existing_device.mac_address
-                existing_device.hardware_info = hardware_info or existing_device.hardware_info
                 existing_device.last_seen = now
                 existing_device.online = True
                 
@@ -169,7 +168,6 @@ async def register_device(
                 device_type=request.device_type or "unknown",
                 ip_address=ip_address,
                 mac_address=mac_address,
-                hardware_info=hardware_info,
                 last_seen=now,
                 online=True
             )
