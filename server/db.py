@@ -230,6 +230,52 @@ class FileDeviceUpdate(Base):
     """Relationship to the Device that this update is for"""
 
 
+class DeviceFile(Base):
+    """Model representing files that exist on a device.
+    
+    Files start as on_device=True, on_cloud=False.
+    When uploaded to cloud, on_cloud becomes True and cloud_file_id is set.
+    """
+    __tablename__ = "device_file"
+    
+    id = Column("id", Integer, primary_key=True, autoincrement=True, index=True)
+    device_id = Column("device_id", Integer, ForeignKey("device.device_id"), nullable=False, index=True)
+    user_id = Column("user_id", Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    filename = Column("filename", String, nullable=False)
+    size = Column("size", BigInteger, nullable=True)
+    file_type = Column("file_type", String, nullable=True)  # imu, csi, mfcw, img, vid, other
+    created_at = Column("created_at", DateTime, nullable=True)
+    modified_at = Column("modified_at", DateTime, nullable=True)
+    on_device = Column("on_device", Boolean, default=True)
+    on_cloud = Column("on_cloud", Boolean, default=False)
+    cloud_file_id = Column("cloud_file_id", Integer, ForeignKey("file.file_id"), nullable=True)
+    last_synced = Column("last_synced", DateTime, default=datetime.utcnow)
+    
+    # Unique constraint: one file per device
+    __table_args__ = (
+        UniqueConstraint('device_id', 'filename', name='uq_device_filename'),
+    )
+    
+    # Relationships
+    device = relationship("Device", backref="device_files")
+    user = relationship("User")
+    cloud_file = relationship("File")
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "filename": self.filename,
+            "size": self.size,
+            "file_type": self.file_type,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "modified_at": self.modified_at.isoformat() if self.modified_at else None,
+            "on_device": self.on_device,
+            "on_cloud": self.on_cloud,
+            "cloud_file_id": self.cloud_file_id,
+            "last_synced": self.last_synced.isoformat() if self.last_synced else None,
+        }
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)

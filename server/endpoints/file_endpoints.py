@@ -443,3 +443,115 @@ async def get_file_info(
         log_error(f"Error getting file info: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get file info")
 
+
+@router.post("/upload-from-device")
+async def upload_file_from_device(
+    device_file_id: int = Query(..., description="ID of the DeviceFile record"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Upload a file from a device to cloud storage.
+    
+    This endpoint fetches the file content from the Thoth device and stores it in the cloud.
+    The device must be online and reachable.
+    
+    Args:
+        device_file_id: The ID of the DeviceFile record to upload
+        
+    Returns:
+        Dict with success status and cloud file ID
+    """
+    import requests as http_requests
+    from server.db import DeviceFile, Device
+    
+    try:
+        log_request_start("POST", "/file/upload-from-device", current_user.userId)
+        
+        # Get the DeviceFile record
+        device_file = db.query(DeviceFile).filter(
+            DeviceFile.id == device_file_id,
+            DeviceFile.user_id == current_user.userId
+        ).first()
+        
+        if not device_file:
+            raise HTTPException(status_code=404, detail="Device file not found")
+        
+        if device_file.on_cloud:
+            return {
+                "success": True,
+                "message": "File already on cloud",
+                "cloud_file_id": device_file.cloud_file_id
+            }
+        
+        # Get the device
+        device = db.query(Device).filter(Device.deviceId == device_file.device_id).first()
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+        
+        if not device.online or not device.ip_address:
+            raise HTTPException(status_code=400, detail="Device is offline or IP address unknown")
+        
+        # Fetch file content from device
+        device_url = f"http://{device.ip_address}:5000/api/files/download/{device_file.filename}"
+        
+        try:
+            response = http_requests.get(device_url, timeout=60, stream=True)
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Failed to fetch file from device: {response.status_code}")
+            
+            content_bytes = response.content
+        except http_requests.exceptions.RequestException as e:
+            raise HTTPException(status_code=502, detail=f"Could not reach device: {str(e)}")
+        
+        # Determine content type
+        content_type = mimetypes.guess_type(device_file.filename)[0] or "application/octet-stream"
+        
+        # Generate unique filename
+        timestamp = int(time.time())
+        unique_filename = f"file_{device.device_uuid}_{timestamp}_{device_file.filename}"
+        
+        # Create file metadata
+        file_metadata = {
+            "original_filename": device_file.filename,
+            "content_type": content_type,
+            "upload_timestamp": datetime.now().isoformat(),
+            "device_id": device.device_uuid,
+            "device_file_id": device_file_id,
+            "user_id": current_user.userId
+        }
+        
+        # Save to database
+        db_file = File(
+            userId=current_user.userId,
+            filename=unique_filename,
+            content=content_bytes,
+            size=len(content_bytes),
+            content_type=content_type,
+            uploaded_at=datetime.now(),
+            file_hash=json.dumps(file_metadata)
+        )
+        db.add(db_file)
+        
+        # Update DeviceFile to mark as on_cloud
+        device_file.on_cloud = True
+        device_file.cloud_file_id = db_file.fileId
+        
+        db.commit()
+        db.refresh(db_file)
+        
+        log_response(200, f"File uploaded from device: {device_file.filename}", "/file/upload-from-device")
+        return {
+            "success": True,
+            "cloud_file_id": db_file.fileId,
+            "filename": device_file.filename,
+            "size": len(content_bytes),
+            "message": "File uploaded to cloud successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log_error(f"Error uploading file from device: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+

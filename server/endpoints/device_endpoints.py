@@ -36,10 +36,11 @@ router = APIRouter(prefix="/device", tags=["devices"])
 # Cache for device authentication tokens
 device_auth_cache = {}
 
-# Rate limiting for device registration
+# Rate limiting for device registration (new devices only)
+# Existing device updates are not rate limited as strictly
 REGISTRATION_RATE_LIMIT = {
-    'max_attempts': 5,
-    'window_seconds': 300  # 5 minutes
+    'max_attempts': 60,  # Allow frequent updates from registered devices
+    'window_seconds': 60  # 1 minute window
 }
 
 class DeviceRegistrationError(Exception):
@@ -66,6 +67,116 @@ def get_client_ip(request: Request) -> str:
         ip = request.client.host
     
     return ip if validate_ip_address(ip) else None
+
+
+def _fetch_device_files_async(device_id: int, ip_address: str, user_id: int, device_uuid: str):
+    """Fetch file list from device and store in database (runs in background thread)."""
+    import threading
+    import requests as http_requests
+    
+    def fetch_files():
+        try:
+            # Request file list from Thoth device
+            device_url = f"http://{ip_address}:5000/api/files"
+            logger.info(f"Fetching files from device at {device_url}")
+            
+            response = http_requests.get(device_url, timeout=10)
+            
+            if response.status_code != 200:
+                logger.warning(f"Failed to fetch files from device {device_uuid}: {response.status_code}")
+                return
+            
+            data = response.json()
+            if data.get('status') != 'success':
+                logger.warning(f"Device returned error: {data}")
+                return
+            
+            files = data.get('data', [])
+            logger.info(f"Received {len(files)} files from device {device_uuid}")
+            
+            # Store files in database
+            from server.db import SessionLocal, DeviceFile
+            db = SessionLocal()
+            try:
+                for file_info in files:
+                    # Skip directories
+                    if file_info.get('type') == 'directory':
+                        continue
+                    
+                    filename = file_info.get('name', '')
+                    if not filename:
+                        continue
+                    
+                    # Determine file type from prefix
+                    file_type = 'other'
+                    lower_name = filename.lower()
+                    if lower_name.startswith('imu_'):
+                        file_type = 'imu'
+                    elif lower_name.startswith('csi_'):
+                        file_type = 'csi'
+                    elif lower_name.startswith('mfcw_'):
+                        file_type = 'mfcw'
+                    elif lower_name.startswith('img_'):
+                        file_type = 'img'
+                    elif lower_name.startswith('vid_'):
+                        file_type = 'vid'
+                    
+                    # Parse timestamps
+                    created_at = None
+                    modified_at = None
+                    try:
+                        if file_info.get('created'):
+                            created_at = datetime.fromisoformat(file_info['created'].replace('Z', '+00:00'))
+                        if file_info.get('modified'):
+                            modified_at = datetime.fromisoformat(file_info['modified'].replace('Z', '+00:00'))
+                    except (ValueError, TypeError):
+                        pass
+                    
+                    # Check if file already exists
+                    existing = db.query(DeviceFile).filter(
+                        DeviceFile.device_id == device_id,
+                        DeviceFile.filename == filename
+                    ).first()
+                    
+                    if existing:
+                        # Update existing record
+                        existing.size = file_info.get('size', 0)
+                        existing.modified_at = modified_at
+                        existing.on_device = True
+                        existing.last_synced = datetime.utcnow()
+                    else:
+                        # Create new record
+                        device_file = DeviceFile(
+                            device_id=device_id,
+                            user_id=user_id,
+                            filename=filename,
+                            size=file_info.get('size', 0),
+                            file_type=file_type,
+                            created_at=created_at,
+                            modified_at=modified_at,
+                            on_device=True,
+                            on_cloud=False,
+                            last_synced=datetime.utcnow()
+                        )
+                        db.add(device_file)
+                
+                db.commit()
+                logger.info(f"Synced {len(files)} files for device {device_uuid}")
+                
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Error storing device files: {e}")
+            finally:
+                db.close()
+                
+        except http_requests.exceptions.RequestException as e:
+            logger.warning(f"Could not reach device {device_uuid} at {ip_address}: {e}")
+        except Exception as e:
+            logger.error(f"Error fetching device files: {e}")
+    
+    # Run in background thread to not block registration response
+    thread = threading.Thread(target=fetch_files, daemon=True)
+    thread.start()
 
 @router.post("/register", response_model=DeviceResponse)
 async def register_device(
@@ -149,6 +260,10 @@ async def register_device(
                 db.commit()
                 db.refresh(existing_device)
                 
+                # Fetch files from device in background
+                if ip_address:
+                    _fetch_device_files_async(existing_device.deviceId, ip_address, current_user.userId, device_uuid)
+                
                 logger.info(f"Device updated: {device_uuid} for user {current_user.userId}")
                 log_response(200, "Device updated successfully", "/device/register")
                 
@@ -175,6 +290,10 @@ async def register_device(
             db.add(new_device)
             db.commit()
             db.refresh(new_device)
+            
+            # Fetch files from device in background
+            if ip_address:
+                _fetch_device_files_async(new_device.deviceId, ip_address, current_user.userId, device_uuid)
             
             logger.info(f"New device registered: {device_uuid} for user {current_user.userId}")
             log_response(201, "Device registered successfully", "/device/register")
@@ -443,4 +562,58 @@ async def delete_device(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete device: {str(e)}"
+        )
+
+
+@router.get("/{device_uuid}/files", response_model=Dict[str, Any])
+async def get_device_files(
+    device_uuid: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get all files for a specific device.
+    
+    Returns files from the DeviceFile table which tracks files on the device.
+    Files are marked as on_device=True when on the device, on_cloud=True when uploaded.
+    """
+    from server.db import DeviceFile
+    
+    log_request_start("GET", f"/device/{device_uuid}/files", current_user.userId)
+    
+    try:
+        # Find the device
+        device = db.query(Device).filter(
+            Device.device_uuid == device_uuid,
+            Device.userId == current_user.userId
+        ).first()
+        
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found"
+            )
+        
+        # Get all files for this device
+        files = db.query(DeviceFile).filter(
+            DeviceFile.device_id == device.deviceId
+        ).order_by(DeviceFile.modified_at.desc()).all()
+        
+        file_list = [f.to_dict() for f in files]
+        
+        return {
+            "success": True,
+            "device_id": device_uuid,
+            "device_name": device.device_name,
+            "device_online": device.online,
+            "files": file_list,
+            "count": len(file_list)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error getting device files: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get device files: {str(e)}"
         )
