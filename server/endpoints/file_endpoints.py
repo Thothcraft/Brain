@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from server.db import get_db
 from server.auth import get_current_user
-from server.db import User, File
+from server.db import User, File, DeviceFile, Device
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from .models import FileUploadSimpleRequest, FileUploadResponse, PaginatedResponse
 
@@ -168,6 +168,27 @@ async def upload_file_simple(
             ).first()
             
             if existing_file:
+                # Update DeviceFile record even if file already exists
+                try:
+                    device = db.query(Device).filter(
+                        Device.device_uuid == request.device_id
+                    ).first()
+                    
+                    if device:
+                        device_file = db.query(DeviceFile).filter(
+                            DeviceFile.device_id == device.deviceId,
+                            DeviceFile.filename == request.filename
+                        ).first()
+                        
+                        if device_file:
+                            device_file.on_cloud = True
+                            device_file.upload_requested = False
+                            device_file.cloud_file_id = existing_file.fileId
+                            db.commit()
+                            log_response(200, f"DeviceFile updated (existing): {request.filename} now on cloud", "/file/upload")
+                except Exception as e:
+                    log_error(f"Error updating DeviceFile for existing file: {e}")
+                
                 log_response(200, f"File already exists: {request.filename}", "/file/upload")
                 return {
                     "success": True,
@@ -201,6 +222,31 @@ async def upload_file_simple(
         db.add(db_file)
         db.commit()
         db.refresh(db_file)
+        
+        # If this upload is from a device, update the DeviceFile record
+        if request.device_id:
+            try:
+                # Find the device by UUID
+                device = db.query(Device).filter(
+                    Device.device_uuid == request.device_id
+                ).first()
+                
+                if device:
+                    # Find the DeviceFile record for this file
+                    device_file = db.query(DeviceFile).filter(
+                        DeviceFile.device_id == device.deviceId,
+                        DeviceFile.filename == request.filename
+                    ).first()
+                    
+                    if device_file:
+                        device_file.on_cloud = True
+                        device_file.upload_requested = False
+                        device_file.cloud_file_id = db_file.fileId
+                        db.commit()
+                        log_response(200, f"DeviceFile updated: {request.filename} now on cloud (file_id={db_file.fileId})", "/file/upload")
+            except Exception as e:
+                log_error(f"Error updating DeviceFile record: {e}")
+                # Don't fail the upload if DeviceFile update fails
         
         log_response(200, f"File uploaded: {request.filename} ({len(content_bytes)} bytes)", "/file/upload")
         return {
