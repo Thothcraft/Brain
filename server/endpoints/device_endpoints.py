@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from server.db import get_db, Device, User, File
+from server.db import get_db, Device, User, File, DeviceFile
 from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from .models import (
@@ -74,8 +74,6 @@ def _get_pending_uploads(device_id: int, db: Session) -> list:
     
     Returns list of filenames that need to be uploaded.
     """
-    from server.db import DeviceFile
-    
     try:
         pending = db.query(DeviceFile).filter(
             DeviceFile.device_id == device_id,
