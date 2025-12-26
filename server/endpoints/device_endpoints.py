@@ -269,6 +269,8 @@ async def register_device(
                 pending_uploads = _get_pending_uploads(existing_device.deviceId, db)
                 
                 logger.info(f"Device updated: {device_uuid} for user {current_user.userId}")
+                if pending_uploads:
+                    logger.info(f"Pending uploads for device {device_uuid}: {pending_uploads}")
                 log_response(200, "Device updated successfully", "/device/register")
                 
                 return {
