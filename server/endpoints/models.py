@@ -281,6 +281,8 @@ class StandardResponse(BaseModel):
 class DeviceResponse(StandardResponse):
     device_id: str
     device_name: Optional[str] = None
+    ip_address: Optional[str] = None
+    pending_uploads: Optional[List[str]] = None
 
 class DataUploadResponse(StandardResponse):
     upload_id: str
