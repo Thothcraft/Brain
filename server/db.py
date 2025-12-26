@@ -249,6 +249,7 @@ class DeviceFile(Base):
     on_device = Column("on_device", Boolean, default=True)
     on_cloud = Column("on_cloud", Boolean, default=False)
     cloud_file_id = Column("cloud_file_id", Integer, ForeignKey("file.file_id"), nullable=True)
+    upload_requested = Column("upload_requested", Boolean, default=False)  # Set by Research Portal to request upload
     last_synced = Column("last_synced", DateTime, default=datetime.utcnow)
     
     # Unique constraint: one file per device
@@ -272,6 +273,7 @@ class DeviceFile(Base):
             "on_device": self.on_device,
             "on_cloud": self.on_cloud,
             "cloud_file_id": self.cloud_file_id,
+            "upload_requested": self.upload_requested,
             "last_synced": self.last_synced.isoformat() if self.last_synced else None,
         }
 

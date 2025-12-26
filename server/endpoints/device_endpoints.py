@@ -69,6 +69,26 @@ def get_client_ip(request: Request) -> str:
     return ip if validate_ip_address(ip) else None
 
 
+def _get_pending_uploads(device_id: int, db: Session) -> list:
+    """Get list of files that have been requested for upload to cloud.
+    
+    Returns list of filenames that need to be uploaded.
+    """
+    from server.db import DeviceFile
+    
+    try:
+        pending = db.query(DeviceFile).filter(
+            DeviceFile.device_id == device_id,
+            DeviceFile.upload_requested == True,
+            DeviceFile.on_cloud == False
+        ).all()
+        
+        return [f.filename for f in pending]
+    except Exception as e:
+        logger.error(f"Error getting pending uploads: {e}")
+        return []
+
+
 def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: list, db: Session):
     """Store file list pushed from device into database.
     
@@ -247,6 +267,9 @@ async def register_device(
                 if request.files:
                     _store_device_files(existing_device.deviceId, current_user.userId, device_uuid, request.files, db)
                 
+                # Get pending upload requests for this device
+                pending_uploads = _get_pending_uploads(existing_device.deviceId, db)
+                
                 logger.info(f"Device updated: {device_uuid} for user {current_user.userId}")
                 log_response(200, "Device updated successfully", "/device/register")
                 
@@ -255,7 +278,8 @@ async def register_device(
                     "device_id": device_uuid,
                     "device_name": device_name,
                     "ip_address": ip_address,
-                    "message": "Device updated successfully"
+                    "message": "Device updated successfully",
+                    "pending_uploads": pending_uploads  # Files to upload to cloud
                 }
             
             # Create new device record
@@ -286,7 +310,8 @@ async def register_device(
                 "device_id": device_uuid,
                 "device_name": device_name,
                 "ip_address": ip_address,
-                "message": "Device registered successfully"
+                "message": "Device registered successfully",
+                "pending_uploads": []  # No pending uploads for new device
             }
             
         except Exception as e:
@@ -600,3 +625,53 @@ async def get_device_files(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get device files: {str(e)}"
         )
+
+
+@router.post("/file/{device_file_id}/request-upload")
+async def request_file_upload(
+    device_file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Request a file to be uploaded from device to cloud.
+    
+    Sets upload_requested=True on the DeviceFile record.
+    The device will see this in its next registration response and upload the file.
+    """
+    try:
+        log_request_start("POST", f"/device/file/{device_file_id}/request-upload", current_user.userId)
+        
+        # Get the device file
+        device_file = db.query(DeviceFile).filter(
+            DeviceFile.id == device_file_id,
+            DeviceFile.user_id == current_user.userId
+        ).first()
+        
+        if not device_file:
+            raise HTTPException(status_code=404, detail="Device file not found")
+        
+        if device_file.on_cloud:
+            return {
+                "success": True,
+                "message": "File already on cloud",
+                "cloud_file_id": device_file.cloud_file_id
+            }
+        
+        # Mark for upload
+        device_file.upload_requested = True
+        db.commit()
+        
+        logger.info(f"Upload requested for file {device_file.filename} (id={device_file_id})")
+        
+        return {
+            "success": True,
+            "message": "Upload requested. File will be uploaded on next device sync.",
+            "filename": device_file.filename
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log_error(f"Error requesting file upload: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to request upload: {str(e)}")
