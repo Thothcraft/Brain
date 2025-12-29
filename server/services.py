@@ -133,10 +133,10 @@ def start_scheduler():
     try:
         scheduler = BackgroundScheduler()
         
-        # Add device status check job (every 2 minutes)
+        # Add device status check job (every 30 seconds)
         scheduler.add_job(
             auto_disconnect_stale_devices,
-            trigger=IntervalTrigger(minutes=2),
+            trigger=IntervalTrigger(seconds=30),
             id='auto_disconnect_job',
             name='Auto disconnect stale devices',
             replace_existing=True
