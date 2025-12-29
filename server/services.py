@@ -133,15 +133,6 @@ def start_scheduler():
     try:
         scheduler = BackgroundScheduler()
         
-        # Add status update job (every ~3.3 hours)
-        scheduler.add_job(
-            send_status,
-            trigger=IntervalTrigger(minutes=200),
-            id='send_status_job',
-            name='Send status periodically',
-            replace_existing=True
-        )
-        
         # Add device status check job (every 2 minutes)
         scheduler.add_job(
             auto_disconnect_stale_devices,
