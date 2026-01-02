@@ -28,6 +28,7 @@ from server.endpoints.sensor_endpoints import router as sensor_router
 from server.endpoints.network_endpoints import router as network_router
 from server.endpoints.training_endpoints import router as training_router
 from server.endpoints.curriculum_endpoints import router as curriculum_router
+from server.endpoints.dataset_endpoints import router as dataset_router
 
 # Create main router
 router = APIRouter()
@@ -44,6 +45,7 @@ router.include_router(sensor_router)      # /sensors/* (Sense HAT sensors)
 router.include_router(network_router)     # /network/* (WiFi configuration)
 router.include_router(training_router)    # /training/*, /federated/* (ML training)
 router.include_router(curriculum_router)  # /curriculum/* (Education content)
+router.include_router(dataset_router)     # /datasets/* (Training datasets and cloud training)
 
 # ============================================================================
 # MODULAR ENDPOINTS LOADED

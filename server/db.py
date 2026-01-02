@@ -278,6 +278,143 @@ class DeviceFile(Base):
         }
 
 
+class TrainingDataset(Base):
+    """Dataset for training - groups files with labels."""
+    __tablename__ = "training_dataset"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User")
+    files = relationship("DatasetFile", back_populates="dataset", cascade="all, delete-orphan")
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "file_count": len(self.files) if self.files else 0,
+            "labels": list(set(f.label for f in self.files)) if self.files else [],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class DatasetFile(Base):
+    """Links files to datasets with labels for training."""
+    __tablename__ = "dataset_file"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
+    dataset_id = Column(Integer, ForeignKey("training_dataset.id", ondelete="CASCADE"), nullable=False, index=True)
+    file_id = Column(Integer, ForeignKey("file.file_id"), nullable=False, index=True)
+    label = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('dataset_id', 'file_id', name='uq_dataset_file'),
+    )
+    
+    # Relationships
+    dataset = relationship("TrainingDataset", back_populates="files")
+    file = relationship("File")
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "dataset_id": self.dataset_id,
+            "file_id": self.file_id,
+            "filename": self.file.filename if self.file else None,
+            "label": self.label,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class TrainingJob(Base):
+    """Persists training jobs for cloud training."""
+    __tablename__ = "training_job"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
+    job_id = Column(String(255), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    dataset_id = Column(Integer, ForeignKey("training_dataset.id"), nullable=True)
+    model_type = Column(String(50), nullable=False)
+    training_mode = Column(String(50), nullable=False)
+    config = Column(Text, nullable=True)  # JSON string
+    status = Column(String(50), default="pending")
+    current_epoch = Column(Integer, default=0)
+    total_epochs = Column(Integer)
+    metrics = Column(Text, nullable=True)  # JSON string
+    best_metrics = Column(Text, nullable=True)  # JSON string
+    model_path = Column(String(500), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    user = relationship("User")
+    dataset = relationship("TrainingDataset")
+    
+    def to_dict(self):
+        import json
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "dataset_id": self.dataset_id,
+            "dataset_name": self.dataset.name if self.dataset else None,
+            "model_type": self.model_type,
+            "training_mode": self.training_mode,
+            "config": json.loads(self.config) if self.config else {},
+            "status": self.status,
+            "current_epoch": self.current_epoch,
+            "total_epochs": self.total_epochs,
+            "metrics": json.loads(self.metrics) if self.metrics else {},
+            "best_metrics": json.loads(self.best_metrics) if self.best_metrics else {},
+            "model_path": self.model_path,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class TrainedModel(Base):
+    """Stores completed trained models for deployment."""
+    __tablename__ = "trained_model"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    job_id = Column(String(255), nullable=True)
+    name = Column(String(255), nullable=False)
+    architecture = Column(String(50), nullable=True)
+    accuracy = Column(Integer, nullable=True)  # Stored as percentage * 100
+    size_bytes = Column(BigInteger, nullable=True)
+    model_data = Column(LargeBinary, nullable=True)
+    config = Column(Text, nullable=True)  # JSON string
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User")
+    
+    def to_dict(self):
+        import json
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "name": self.name,
+            "architecture": self.architecture,
+            "accuracy": self.accuracy / 100.0 if self.accuracy else None,
+            "size_mb": self.size_bytes / (1024 * 1024) if self.size_bytes else None,
+            "config": json.loads(self.config) if self.config else {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)
