@@ -394,6 +394,10 @@ async def run_cloud_training(job_id: str, db_url: str):
                 val_loss = train_loss * 1.1 + random.uniform(-0.05, 0.05)
                 val_acc = train_acc - 5 + random.uniform(-2, 2)
                 
+                # Ensure accuracy is within realistic bounds (0-100%)
+                train_acc = max(0, min(100, train_acc))
+                val_acc = max(0, min(100, val_acc))
+                
                 train_losses.append(round(train_loss, 4))
                 train_accuracies.append(round(train_acc, 2))
                 val_losses.append(round(val_loss, 4))
@@ -445,26 +449,57 @@ async def run_cloud_training(job_id: str, db_url: str):
         # Create trained model record
         if not train_imu_model:  # Only for mock training
             try:
-                # Check if table exists first
-                from sqlalchemy import inspect
-                inspector = inspect(db.bind)
-                if 'trained_model' in inspector.get_table_names():
-                    model_name = f"MockModel_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-                    trained_model = TrainedModel(
-                        user_id=job.user_id,
-                        job_id=job_id,
-                        name=model_name,
-                        architecture=job.model_type,
-                        accuracy=int(results["best_val_accuracy"] * 100),  # Store as percentage * 100
-                        size_bytes=random.randint(1000000, 50000000),  # 1-50 MB
-                        config=job.config
-                    )
-                    db.add(trained_model)
-                    print(f"[INFO] Created mock model {model_name} for job {job_id}")
-                else:
-                    print(f"[WARNING] trained_model table doesn't exist, skipping model creation")
+                # Try to create table if it doesn't exist
+                from sqlalchemy import text
+                try:
+                    # Create the table if it doesn't exist
+                    db.execute(text("""
+                        CREATE TABLE IF NOT EXISTS trained_model (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER NOT NULL,
+                            job_id VARCHAR(255),
+                            name VARCHAR(255) NOT NULL,
+                            architecture VARCHAR(50),
+                            accuracy INTEGER,
+                            size_bytes BIGINT,
+                            model_data BYTEA,
+                            config TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
+                    db.commit()
+                    print(f"[INFO] Ensured trained_model table exists")
+                except Exception as table_error:
+                    print(f"[WARNING] Could not create trained_model table: {table_error}")
+                
+                # Now create the model record
+                model_name = f"MockModel_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                trained_model = TrainedModel(
+                    user_id=job.user_id,
+                    job_id=job_id,
+                    name=model_name,
+                    architecture=job.model_type,
+                    accuracy=int(results["best_val_accuracy"]),  # Store as integer percentage (0-100)
+                    size_bytes=random.randint(1000000, 50000000),  # 1-50 MB
+                    config=json.dumps({
+                        "training_results": {
+                            "total_epochs": total_epochs,
+                            "best_epoch": results["best_epoch"],
+                            "final_train_loss": results["train_losses"][-1],
+                            "final_val_loss": results["val_losses"][-1],
+                            "final_train_acc": results["train_accuracies"][-1],
+                            "final_val_acc": results["val_accuracies"][-1],
+                            "best_val_acc": results["best_val_accuracy"]
+                        }
+                    })
+                )
+                db.add(trained_model)
+                db.commit()
+                print(f"[INFO] Created mock model {model_name} with {results['best_val_accuracy']:.1f}% accuracy for job {job_id}")
             except Exception as e:
                 print(f"[ERROR] Failed to create trained model: {str(e)}")
+                import traceback
+                traceback.print_exc()
         
         db.commit()
         
@@ -658,17 +693,28 @@ async def list_trained_models(
 ):
     """List all trained models for the current user."""
     try:
-        # Check if table exists
-        from sqlalchemy import inspect
-        inspector = inspect(db.bind)
-        if 'trained_model' not in inspector.get_table_names():
-            # Table doesn't exist, return empty list
-            return {
-                "success": True,
-                "models": [],
-                "total": 0
-            }
+        # Try to create table if it doesn't exist
+        from sqlalchemy import text
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS trained_model (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    job_id VARCHAR(255),
+                    name VARCHAR(255) NOT NULL,
+                    architecture VARCHAR(50),
+                    accuracy INTEGER,
+                    size_bytes BIGINT,
+                    model_data BYTEA,
+                    config TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            db.commit()
+        except Exception as table_error:
+            print(f"[WARNING] Could not ensure trained_model table exists: {table_error}")
         
+        # Now query the models
         models = db.query(TrainedModel).filter(
             TrainedModel.user_id == current_user.userId
         ).order_by(TrainedModel.created_at.desc()).all()

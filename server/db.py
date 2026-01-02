@@ -396,7 +396,7 @@ class TrainedModel(Base):
     job_id = Column(String(255), nullable=True)
     name = Column(String(255), nullable=False)
     architecture = Column(String(50), nullable=True)
-    accuracy = Column(Integer, nullable=True)  # Stored as percentage * 100
+    accuracy = Column(Integer, nullable=True)  # Stored as percentage (0-100)
     size_bytes = Column(BigInteger, nullable=True)
     model_data = Column(LargeBinary, nullable=True)
     config = Column(Text, nullable=True)  # JSON string
@@ -412,7 +412,7 @@ class TrainedModel(Base):
             "job_id": self.job_id,
             "name": self.name,
             "architecture": self.architecture,
-            "accuracy": self.accuracy / 100.0 if self.accuracy else None,
+            "accuracy": float(self.accuracy) if self.accuracy else None,
             "size_mb": self.size_bytes / (1024 * 1024) if self.size_bytes else None,
             "config": json.loads(self.config) if self.config else {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
