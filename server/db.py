@@ -29,7 +29,13 @@ print(f"[DB] Using DATABASE_URL: {DATABASE_URL}")
 
 # SQLAlchemy setup
 Base = declarative_base()
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=60,
+    pool_pre_ping=True
+)
 SessionLocal = sessionmaker(bind=engine)
 
 def get_db():
