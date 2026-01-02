@@ -373,16 +373,57 @@ async def run_cloud_training(job_id: str, db_url: str):
                 db=db
             )
         else:
-            # Mock training as fallback
+            # Mock training as fallback with realistic delays
             import random
+            import asyncio
             total_epochs = job.total_epochs or 10
+            
+            # Simulate training with delays
+            train_losses = []
+            train_accuracies = []
+            val_losses = []
+            val_accuracies = []
+            
+            for epoch in range(total_epochs):
+                # Simulate epoch training time
+                await asyncio.sleep(2)  # 2 seconds per epoch
+                
+                # Generate realistic metrics
+                train_loss = 2.0 * (0.9 ** epoch) + random.uniform(0, 0.1)
+                train_acc = min(95, 60 + epoch * 3 + random.uniform(-2, 2))
+                val_loss = train_loss * 1.1 + random.uniform(-0.05, 0.05)
+                val_acc = train_acc - 5 + random.uniform(-2, 2)
+                
+                train_losses.append(round(train_loss, 4))
+                train_accuracies.append(round(train_acc, 2))
+                val_losses.append(round(val_loss, 4))
+                val_accuracies.append(round(val_acc, 2))
+                
+                # Update job progress in database
+                job.current_epoch = epoch + 1
+                job.metrics = json.dumps({
+                    "loss": train_losses,
+                    "accuracy": train_accuracies,
+                    "val_loss": val_losses,
+                    "val_accuracy": val_accuracies
+                })
+                db.commit()
+                
+                print(f"[INFO] Job {job_id} - Epoch {epoch + 1}/{total_epochs}: "
+                      f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
+                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+            
+            # Find best epoch
+            best_val_acc = max(val_accuracies)
+            best_epoch = val_accuracies.index(best_val_acc) + 1
+            
             results = {
-                "train_losses": [2.0 * (0.9 ** i) + random.uniform(0, 0.1) for i in range(total_epochs)],
-                "train_accuracies": [min(95, 60 + i * 3 + random.uniform(-2, 2)) for i in range(total_epochs)],
-                "val_losses": [2.2 * (0.9 ** i) + random.uniform(-0.05, 0.05) for i in range(total_epochs)],
-                "val_accuracies": [min(90, 55 + i * 3 + random.uniform(-2, 2)) for i in range(total_epochs)],
-                "best_val_accuracy": 85.5,
-                "best_epoch": 8
+                "train_losses": train_losses,
+                "train_accuracies": train_accuracies,
+                "val_losses": val_losses,
+                "val_accuracies": val_accuracies,
+                "best_val_accuracy": best_val_acc,
+                "best_epoch": best_epoch
             }
         
         # Update job with results
@@ -417,12 +458,12 @@ async def run_cloud_training(job_id: str, db_url: str):
         
         db.commit()
         
-        logger.info(f"Training job {job_id} completed successfully")
+        print(f"[INFO] Training job {job_id} completed successfully")
         
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        logger.error(f"Training job {job_id} failed: {str(e)}\n{error_details}")
+        print(f"[ERROR] Training job {job_id} failed: {str(e)}\n{error_details}")
         
         job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
         if job:

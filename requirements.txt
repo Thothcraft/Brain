@@ -18,7 +18,8 @@ psutil
 Flask
 apscheduler
 # openai-whisper
-# torch
+torch>=2.0.0
+numpy>=1.21.0
 loguru
 google-auth-oauthlib
 google-api-python-client
