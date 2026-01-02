@@ -7,7 +7,7 @@ This module handles:
 - Model evaluation and deployment
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Request
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -85,6 +85,14 @@ async def create_dataset(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create dataset: {str(e)}")
+
+
+# -------------------------------------------
+# List trained models (static path before dynamic /{dataset_id})
+# -------------------------------------------
+@router.get("/models", response_model=Dict[str, Any])
+async def get_trained_models(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    return await list_trained_models(db, current_user)
 
 
 @router.get("/list", response_model=Dict[str, Any])
@@ -668,32 +676,36 @@ async def list_training_jobs(
         raise HTTPException(status_code=500, detail=f"Failed to list jobs: {str(e)}")
 
 
-@router.get("/train/jobs/{job_id}", response_model=Dict[str, Any])
-async def get_training_job(
-    job_id: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Get details of a specific training job."""
+@router.api_route("/train/jobs/{job_id}", methods=["GET", "DELETE"], response_model=Dict[str, Any])
+async def training_job_detail(request: Request, job_id: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    """Get or delete a specific training job, depending on HTTP method."""
     try:
         job = db.query(TrainingJob).filter(
             TrainingJob.job_id == job_id,
             TrainingJob.user_id == current_user.userId
         ).first()
-        
+
         if not job:
             raise HTTPException(status_code=404, detail="Training job not found")
-        
-        return {
-            "success": True,
-            "job": job.to_dict()
-        }
+
+        # Branch by HTTP method
+        if request.method == "DELETE":
+            db.delete(job)
+            db.commit()
+            return StandardResponse(success=True, message="Training job deleted successfully").model_dump()
+
+        # GET request
+        return {"success": True, "job": job.to_dict()}
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get job: {str(e)}")
 
 
+# -----------------------------
+# Training job cancel endpoint
+# -----------------------------
 @router.post("/train/jobs/{job_id}/cancel", response_model=StandardResponse)
 async def cancel_training_job(
     job_id: str,
@@ -728,37 +740,6 @@ async def cancel_training_job(
         raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
 
 
-@router.delete("/train/jobs/{job_id}", response_model=StandardResponse)
-async def delete_training_job(
-    job_id: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Delete a specific training job."""
-    try:
-        job = db.query(TrainingJob).filter(
-            TrainingJob.job_id == job_id,
-            TrainingJob.user_id == current_user.userId
-        ).first()
-        
-        if not job:
-            raise HTTPException(status_code=404, detail="Training job not found")
-        
-        db.delete(job)
-        db.commit()
-        
-        return StandardResponse(
-            success=True,
-            message="Training job deleted successfully"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete job: {str(e)}")
-
-
-@router.get("/models", response_model=Dict[str, Any])
 async def list_trained_models(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
