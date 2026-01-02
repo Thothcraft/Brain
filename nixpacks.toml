@@ -1,0 +1,20 @@
+[phases.setup]
+nixPkgs = ["python312", "pip"]
+
+[phases.install]
+cmds = [
+  "pip install --no-cache-dir --upgrade pip",
+  "pip install --no-cache-dir -r requirements-deploy.txt"
+]
+
+[phases.build]
+cmds = [
+  "echo 'Build phase complete'"
+]
+
+[start]
+cmd = "bash start.sh"
+
+[variables]
+PYTHON_VERSION = "3.12"
+PORT = "8000"

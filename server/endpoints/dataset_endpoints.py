@@ -47,6 +47,7 @@ class UpdateFileLabelRequest(BaseModel):
 class CloudTrainingRequest(BaseModel):
     """Request to start cloud training."""
     dataset_id: int
+    test_dataset_id: Optional[int] = None
     model_type: str = "cnn"  # cnn, lstm, transformer, linear
     epochs: int = 10
     batch_size: int = 32
@@ -421,13 +422,30 @@ async def run_cloud_training(job_id: str, db_url: str):
             best_val_acc = max(val_accuracies)
             best_epoch = val_accuracies.index(best_val_acc) + 1
             
+            # Test dataset evaluation
+            test_results = None
+            if job.test_dataset_id:
+                print(f"[INFO] Evaluating on test dataset {job.test_dataset_id}")
+                # Simulate test evaluation
+                test_loss = val_losses[-1] * 1.05 + random.uniform(-0.02, 0.02)
+                test_acc = best_val_acc - 3 + random.uniform(-1, 1)
+                test_acc = max(0, min(100, test_acc))
+                
+                test_results = {
+                    "test_loss": round(test_loss, 4),
+                    "test_accuracy": round(test_acc, 2),
+                    "test_dataset_id": job.test_dataset_id
+                }
+                print(f"[INFO] Test Results - Loss: {test_loss:.4f}, Accuracy: {test_acc:.2f}%")
+            
             results = {
                 "train_losses": train_losses,
                 "train_accuracies": train_accuracies,
                 "val_losses": val_losses,
                 "val_accuracies": val_accuracies,
                 "best_val_accuracy": best_val_acc,
-                "best_epoch": best_epoch
+                "best_epoch": best_epoch,
+                "test_results": test_results
             }
         
         # Update job with results
@@ -438,10 +456,18 @@ async def run_cloud_training(job_id: str, db_url: str):
             "val_accuracy": results["val_accuracies"]
         })
         
-        job.best_metrics = json.dumps({
+        best_metrics = {
             "val_accuracy": results["best_val_accuracy"],
             "best_epoch": results["best_epoch"]
-        })
+        }
+        
+        # Add test results if available
+        if results.get("test_results"):
+            best_metrics["test_accuracy"] = results["test_results"]["test_accuracy"]
+            best_metrics["test_loss"] = results["test_results"]["test_loss"]
+            best_metrics["test_dataset_id"] = results["test_results"]["test_dataset_id"]
+        
+        job.best_metrics = json.dumps(best_metrics)
         
         job.status = "completed"
         job.completed_at = datetime.utcnow()
@@ -452,7 +478,7 @@ async def run_cloud_training(job_id: str, db_url: str):
                 # Try to create table if it doesn't exist
                 from sqlalchemy import text
                 try:
-                    # Create the table if it doesn't exist
+                    # Create the table if it doesn't exist with is_pinned column
                     db.execute(text("""
                         CREATE TABLE IF NOT EXISTS trained_model (
                             id SERIAL PRIMARY KEY,
@@ -460,10 +486,11 @@ async def run_cloud_training(job_id: str, db_url: str):
                             job_id VARCHAR(255),
                             name VARCHAR(255) NOT NULL,
                             architecture VARCHAR(50),
-                            accuracy INTEGER,
+                            accuracy FLOAT,
                             size_bytes BIGINT,
                             model_data BYTEA,
                             config TEXT,
+                            is_pinned BOOLEAN DEFAULT FALSE,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """))
@@ -472,6 +499,19 @@ async def run_cloud_training(job_id: str, db_url: str):
                 except Exception as table_error:
                     print(f"[WARNING] Could not create trained_model table: {table_error}")
                 
+                # Check model limit and cleanup old models
+                existing_models = db.query(TrainedModel).filter(
+                    TrainedModel.user_id == job.user_id,
+                    TrainedModel.is_pinned == False
+                ).order_by(TrainedModel.created_at.desc()).all()
+                
+                # If we have 10 or more unpinned models, remove the oldest
+                if len(existing_models) >= 10:
+                    models_to_delete = existing_models[9:]  # Get all models beyond the 10 most recent
+                    for old_model in models_to_delete:
+                        db.delete(old_model)
+                        print(f"[INFO] Deleted old model {old_model.name} to maintain 10-model limit")
+                
                 # Now create the model record
                 model_name = f"MockModel_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
                 trained_model = TrainedModel(
@@ -479,7 +519,7 @@ async def run_cloud_training(job_id: str, db_url: str):
                     job_id=job_id,
                     name=model_name,
                     architecture=job.model_type,
-                    accuracy=int(results["best_val_accuracy"]),  # Store as integer percentage (0-100)
+                    accuracy=float(results["best_val_accuracy"]),  # Store as float percentage (0-100)
                     size_bytes=random.randint(1000000, 50000000),  # 1-50 MB
                     config=json.dumps({
                         "training_results": {
@@ -489,7 +529,8 @@ async def run_cloud_training(job_id: str, db_url: str):
                             "final_val_loss": results["val_losses"][-1],
                             "final_train_acc": results["train_accuracies"][-1],
                             "final_val_acc": results["val_accuracies"][-1],
-                            "best_val_acc": results["best_val_accuracy"]
+                            "best_val_acc": results["best_val_accuracy"],
+                            "test_results": results.get("test_results")
                         }
                     })
                 )
@@ -563,6 +604,7 @@ async def start_cloud_training(
             job_id=job_id,
             user_id=current_user.userId,
             dataset_id=request.dataset_id,
+            test_dataset_id=request.test_dataset_id,
             model_type=request.model_type,
             training_mode="cloud",
             config=json.dumps(config),
@@ -703,10 +745,11 @@ async def list_trained_models(
                     job_id VARCHAR(255),
                     name VARCHAR(255) NOT NULL,
                     architecture VARCHAR(50),
-                    accuracy INTEGER,
+                    accuracy FLOAT,
                     size_bytes BIGINT,
                     model_data BYTEA,
                     config TEXT,
+                    is_pinned BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """))
@@ -762,3 +805,102 @@ async def delete_model(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
+
+
+@router.post("/models/{model_id}/pin", response_model=StandardResponse)
+async def pin_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Pin a trained model to prevent auto-deletion."""
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        model.is_pinned = True
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Model pinned successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to pin model: {str(e)}")
+
+
+@router.post("/models/{model_id}/unpin", response_model=StandardResponse)
+async def unpin_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Unpin a trained model to allow auto-deletion."""
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        model.is_pinned = False
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Model unpinned successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to unpin model: {str(e)}")
+
+
+class RenameModelRequest(BaseModel):
+    """Request to rename a trained model."""
+    name: str
+
+
+@router.put("/models/{model_id}/rename", response_model=StandardResponse)
+async def rename_model(
+    model_id: int,
+    request: RenameModelRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Rename a trained model."""
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        if not request.name or len(request.name.strip()) == 0:
+            raise HTTPException(status_code=400, detail="Model name cannot be empty")
+        
+        model.name = request.name.strip()
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Model renamed successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to rename model: {str(e)}")

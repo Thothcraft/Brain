@@ -6,7 +6,7 @@ It includes the User model and database connection configuration.
 
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, LargeBinary, UniqueConstraint, SmallInteger, BigInteger, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, LargeBinary, UniqueConstraint, SmallInteger, BigInteger, Boolean, Float
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 # Load environment variables from .env if present
@@ -346,6 +346,7 @@ class TrainingJob(Base):
     job_id = Column(String(255), unique=True, nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
     dataset_id = Column(Integer, ForeignKey("training_dataset.id"), nullable=True)
+    test_dataset_id = Column(Integer, ForeignKey("training_dataset.id"), nullable=True)
     model_type = Column(String(50), nullable=False)
     training_mode = Column(String(50), nullable=False)
     config = Column(Text, nullable=True)  # JSON string
@@ -371,6 +372,7 @@ class TrainingJob(Base):
             "job_id": self.job_id,
             "dataset_id": self.dataset_id,
             "dataset_name": self.dataset.name if self.dataset else None,
+            "test_dataset_id": self.test_dataset_id,
             "model_type": self.model_type,
             "training_mode": self.training_mode,
             "config": json.loads(self.config) if self.config else {},
@@ -396,10 +398,11 @@ class TrainedModel(Base):
     job_id = Column(String(255), nullable=True)
     name = Column(String(255), nullable=False)
     architecture = Column(String(50), nullable=True)
-    accuracy = Column(Integer, nullable=True)  # Stored as percentage (0-100)
+    accuracy = Column(Float, nullable=True)  # Stored as percentage (0-100)
     size_bytes = Column(BigInteger, nullable=True)
     model_data = Column(LargeBinary, nullable=True)
     config = Column(Text, nullable=True)  # JSON string
+    is_pinned = Column(Boolean, default=False)  # Pinned models won't be auto-deleted
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -412,9 +415,10 @@ class TrainedModel(Base):
             "job_id": self.job_id,
             "name": self.name,
             "architecture": self.architecture,
-            "accuracy": float(self.accuracy) if self.accuracy else None,
+            "accuracy": round(self.accuracy, 2) if self.accuracy else None,
             "size_mb": self.size_bytes / (1024 * 1024) if self.size_bytes else None,
             "config": json.loads(self.config) if self.config else {},
+            "is_pinned": self.is_pinned,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
