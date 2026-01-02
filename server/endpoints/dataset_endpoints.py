@@ -330,89 +330,62 @@ async def delete_dataset(
 # ============================================================================
 
 async def run_cloud_training(job_id: str, db_url: str):
-    """Simulate cloud training in background."""
+    """Run actual cloud training for IMU model in background."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    from train_imu import run_cloud_training as train_imu_model
     
     engine = create_engine(db_url)
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
     
     try:
+        # Get job details
         job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
         if not job:
             return
-        
-        config = json.loads(job.config) if job.config else {}
-        epochs = job.total_epochs or 10
         
         # Update status to running
         job.status = "running"
         job.started_at = datetime.utcnow()
         db.commit()
         
-        metrics = {"loss": [], "accuracy": [], "val_loss": [], "val_accuracy": []}
-        best_val_acc = 0
-        best_epoch = 0
+        # Load config
+        config = json.loads(job.config) if job.config else {}
         
-        for epoch in range(1, epochs + 1):
-            # Refresh job to check for cancellation
-            db.refresh(job)
-            if job.status == "cancelled":
-                break
-            
-            # Simulate training time (2 seconds per epoch)
-            await asyncio.sleep(2)
-            
-            # Generate realistic metrics
-            progress = epoch / epochs
-            base_loss = 1.0 - progress * 0.7
-            base_acc = 0.5 + progress * 0.4
-            
-            loss = max(0.05, base_loss + random.uniform(-0.1, 0.1))
-            accuracy = min(0.98, base_acc + random.uniform(-0.05, 0.05))
-            val_loss = max(0.08, base_loss + 0.1 + random.uniform(-0.1, 0.1))
-            val_accuracy = min(0.95, base_acc - 0.05 + random.uniform(-0.05, 0.05))
-            
-            metrics["loss"].append(round(loss, 4))
-            metrics["accuracy"].append(round(accuracy, 4))
-            metrics["val_loss"].append(round(val_loss, 4))
-            metrics["val_accuracy"].append(round(val_accuracy, 4))
-            
-            if val_accuracy > best_val_acc:
-                best_val_acc = val_accuracy
-                best_epoch = epoch
-            
-            # Update job progress
-            job.current_epoch = epoch
-            job.metrics = json.dumps(metrics)
-            job.best_metrics = json.dumps({
-                "val_accuracy": round(best_val_acc, 4),
-                "best_epoch": best_epoch
-            })
-            db.commit()
+        # Run the actual training
+        results = await train_imu_model(
+            job_id=job_id,
+            dataset_id=job.dataset_id,
+            model_type=job.model_type,
+            config=config,
+            db=db
+        )
         
-        # Complete training
-        if job.status == "running":
-            job.status = "completed"
-            job.completed_at = datetime.utcnow()
-            job.model_path = f"/models/cloud/{job_id}/model.h5"
-            
-            # Create trained model record
-            model_name = config.get("model_name") or f"{job.model_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-            trained_model = TrainedModel(
-                user_id=job.user_id,
-                job_id=job_id,
-                name=model_name,
-                architecture=job.model_type,
-                accuracy=int(best_val_acc * 10000),  # Store as int (e.g., 0.95 -> 9500)
-                size_bytes=random.randint(1000000, 50000000),  # 1-50 MB
-                config=job.config
-            )
-            db.add(trained_model)
-            db.commit()
-            
+        # Update job with results
+        job.metrics = json.dumps({
+            "loss": results["train_losses"],
+            "accuracy": results["train_accuracies"],
+            "val_loss": results["val_losses"],
+            "val_accuracy": results["val_accuracies"]
+        })
+        
+        job.best_metrics = json.dumps({
+            "val_accuracy": results["best_val_accuracy"],
+            "best_epoch": results["best_epoch"]
+        })
+        
+        job.status = "completed"
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"Training job {job_id} completed successfully")
+        
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        logger.error(f"Training job {job_id} failed: {str(e)}\n{error_details}")
+        
         job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
         if job:
             job.status = "failed"
