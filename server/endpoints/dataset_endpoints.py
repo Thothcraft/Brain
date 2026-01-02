@@ -188,23 +188,13 @@ async def add_files_to_dataset(
                 errors.append(f"File {file_id} not found")
                 continue
             
-            # Check if already in dataset
-            existing = db.query(DatasetFile).filter(
-                DatasetFile.dataset_id == dataset_id,
-                DatasetFile.file_id == file_id
-            ).first()
-            
-            if existing:
-                # Update label
-                existing.label = label
-            else:
-                # Add new
-                dataset_file = DatasetFile(
-                    dataset_id=dataset_id,
-                    file_id=file_id,
-                    label=label
-                )
-                db.add(dataset_file)
+            # Always add new entry - allow same file with different labels
+            dataset_file = DatasetFile(
+                dataset_id=dataset_id,
+                file_id=file_id,
+                label=label
+            )
+            db.add(dataset_file)
             
             added_count += 1
         

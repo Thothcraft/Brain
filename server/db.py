@@ -321,9 +321,7 @@ class DatasetFile(Base):
     label = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    __table_args__ = (
-        UniqueConstraint('dataset_id', 'file_id', name='uq_dataset_file'),
-    )
+    # No unique constraint - allow same file with different labels for testing
     
     # Relationships
     dataset = relationship("TrainingDataset", back_populates="files")
