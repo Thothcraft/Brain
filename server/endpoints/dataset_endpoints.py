@@ -209,6 +209,9 @@ async def add_files_to_dataset(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"[ERROR] Failed to add files: {str(e)}\n{error_details}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to add files: {str(e)}")
 
