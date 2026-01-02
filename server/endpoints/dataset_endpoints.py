@@ -728,6 +728,36 @@ async def cancel_training_job(
         raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
 
 
+@router.delete("/train/jobs/{job_id}", response_model=StandardResponse)
+async def delete_training_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Delete a specific training job."""
+    try:
+        job = db.query(TrainingJob).filter(
+            TrainingJob.job_id == job_id,
+            TrainingJob.user_id == current_user.userId
+        ).first()
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+        
+        db.delete(job)
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Training job deleted successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete job: {str(e)}")
+
+
 @router.get("/models", response_model=Dict[str, Any])
 async def list_trained_models(
     db: Session = Depends(get_db),
