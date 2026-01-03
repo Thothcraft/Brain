@@ -1,4 +1,4 @@
-# Core dependencies only for faster deployment
+# Core dependencies for Railway deployment
 fastapi>=0.95.0
 uvicorn[standard]>=0.21.0
 SQLAlchemy>=2.0.0
@@ -14,15 +14,9 @@ loguru
 requests
 python-dotenv
 email-validator
-
-# Heavy dependencies - install separately if needed
-# torch>=2.0.0
-# numpy>=1.21.0
-# openai
-# pytesseract
-# psutil
-# Flask
-# twilio>=8.0.0
-# google-auth-oauthlib
-# google-api-python-client
-# pytest
+openai
+twilio>=8.0.0
+google-auth-oauthlib
+google-api-python-client
+psutil
+numpy>=1.21.0
