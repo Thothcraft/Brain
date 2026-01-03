@@ -23,6 +23,9 @@ from .models import StandardResponse
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
+# Debug: Print when module loads to verify deployment
+print("[DATASET_ENDPOINTS] Module loaded - routes ordered correctly (v2)")
+
 
 # ============================================================================
 # REQUEST/RESPONSE MODELS
