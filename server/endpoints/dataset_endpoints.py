@@ -7,7 +7,7 @@ This module handles:
 - Model evaluation and deployment
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Request
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -87,14 +87,6 @@ async def create_dataset(
         raise HTTPException(status_code=500, detail=f"Failed to create dataset: {str(e)}")
 
 
-# -------------------------------------------
-# List trained models (static path before dynamic /{dataset_id})
-# -------------------------------------------
-@router.get("/models", response_model=Dict[str, Any])
-async def get_trained_models(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    return await list_trained_models(db, current_user)
-
-
 @router.get("/list", response_model=Dict[str, Any])
 async def list_datasets(
     db: Session = Depends(get_db),
@@ -114,6 +106,589 @@ async def list_datasets(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list datasets: {str(e)}")
 
+
+# ============================================================================
+# CLOUD TRAINING ENDPOINTS (must be before /{dataset_id} catch-all)
+# ============================================================================
+
+async def run_cloud_training(job_id: str, db_url: str):
+    """Run actual cloud training for IMU model in background."""
+    print(f"[INFO] Background task started for job {job_id}")
+    
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    
+    try:
+        from train_imu import run_cloud_training as train_imu_model
+        print(f"[INFO] Successfully imported train_imu for job {job_id}")
+    except ImportError as e:
+        print(f"[ERROR] Failed to import train_imu for job {job_id}: {e}")
+        train_imu_model = None
+    
+    engine = create_engine(db_url)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    
+    try:
+        job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+        if not job:
+            return
+        
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
+        
+        config = json.loads(job.config) if job.config else {}
+        
+        if train_imu_model:
+            results = await train_imu_model(
+                job_id=job_id,
+                dataset_id=job.dataset_id,
+                model_type=job.model_type,
+                config=config,
+                db=db
+            )
+        else:
+            import random
+            import asyncio
+            total_epochs = job.total_epochs or 10
+            
+            train_losses = []
+            train_accuracies = []
+            val_losses = []
+            val_accuracies = []
+            
+            for epoch in range(total_epochs):
+                await asyncio.sleep(2)
+                
+                train_loss = 2.0 * (0.9 ** epoch) + random.uniform(0, 0.1)
+                train_acc = min(95, 60 + epoch * 3 + random.uniform(-2, 2))
+                val_loss = train_loss * 1.1 + random.uniform(-0.05, 0.05)
+                val_acc = train_acc - 5 + random.uniform(-2, 2)
+                
+                train_acc = max(0, min(100, train_acc))
+                val_acc = max(0, min(100, val_acc))
+                
+                train_losses.append(round(train_loss, 4))
+                train_accuracies.append(round(train_acc, 2))
+                val_losses.append(round(val_loss, 4))
+                val_accuracies.append(round(val_acc, 2))
+                
+                job.current_epoch = epoch + 1
+                job.metrics = json.dumps({
+                    "loss": train_losses,
+                    "accuracy": train_accuracies,
+                    "val_loss": val_losses,
+                    "val_accuracy": val_accuracies
+                })
+                db.commit()
+                
+                print(f"[INFO] Job {job_id} - Epoch {epoch + 1}/{total_epochs}: "
+                      f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
+                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+            
+            best_val_acc = max(val_accuracies)
+            best_epoch = val_accuracies.index(best_val_acc) + 1
+            
+            test_results = None
+            if job.test_dataset_id:
+                print(f"[INFO] Evaluating on test dataset {job.test_dataset_id}")
+                test_loss = val_losses[-1] * 1.05 + random.uniform(-0.02, 0.02)
+                test_acc = best_val_acc - 3 + random.uniform(-1, 1)
+                test_acc = max(0, min(100, test_acc))
+                
+                test_results = {
+                    "test_loss": round(test_loss, 4),
+                    "test_accuracy": round(test_acc, 2),
+                    "test_dataset_id": job.test_dataset_id
+                }
+                print(f"[INFO] Test Results - Loss: {test_loss:.4f}, Accuracy: {test_acc:.2f}%")
+            
+            results = {
+                "train_losses": train_losses,
+                "train_accuracies": train_accuracies,
+                "val_losses": val_losses,
+                "val_accuracies": val_accuracies,
+                "best_val_accuracy": best_val_acc,
+                "best_epoch": best_epoch,
+                "test_results": test_results
+            }
+        
+        job.metrics = json.dumps({
+            "loss": results["train_losses"],
+            "accuracy": results["train_accuracies"],
+            "val_loss": results["val_losses"],
+            "val_accuracy": results["val_accuracies"]
+        })
+        
+        best_metrics = {
+            "val_accuracy": results["best_val_accuracy"],
+            "best_epoch": results["best_epoch"]
+        }
+        
+        if results.get("test_results"):
+            best_metrics["test_accuracy"] = results["test_results"]["test_accuracy"]
+            best_metrics["test_loss"] = results["test_results"]["test_loss"]
+            best_metrics["test_dataset_id"] = results["test_results"]["test_dataset_id"]
+        
+        job.best_metrics = json.dumps(best_metrics)
+        
+        job.status = "completed"
+        job.completed_at = datetime.utcnow()
+        
+        if not train_imu_model:
+            try:
+                from sqlalchemy import text
+                try:
+                    db.execute(text("""
+                        CREATE TABLE IF NOT EXISTS trained_model (
+                            id SERIAL PRIMARY KEY,
+                            user_id INTEGER NOT NULL,
+                            job_id VARCHAR(255),
+                            name VARCHAR(255) NOT NULL,
+                            architecture VARCHAR(50),
+                            accuracy FLOAT,
+                            size_bytes BIGINT,
+                            model_data BYTEA,
+                            config TEXT,
+                            is_pinned BOOLEAN DEFAULT FALSE,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
+                    db.commit()
+                    print(f"[INFO] Ensured trained_model table exists")
+                except Exception as table_error:
+                    print(f"[WARNING] Could not create trained_model table: {table_error}")
+                
+                existing_models = db.query(TrainedModel).filter(
+                    TrainedModel.user_id == job.user_id,
+                    TrainedModel.is_pinned == False
+                ).order_by(TrainedModel.created_at.desc()).all()
+                
+                if len(existing_models) >= 10:
+                    models_to_delete = existing_models[9:]
+                    for old_model in models_to_delete:
+                        db.delete(old_model)
+                        print(f"[INFO] Deleted old model {old_model.name} to maintain 10-model limit")
+                
+                model_name = f"MockModel_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                trained_model = TrainedModel(
+                    user_id=job.user_id,
+                    job_id=job_id,
+                    name=model_name,
+                    architecture=job.model_type,
+                    accuracy=float(results["best_val_accuracy"]),
+                    size_bytes=random.randint(1000000, 50000000),
+                    config=json.dumps({
+                        "training_results": {
+                            "total_epochs": total_epochs,
+                            "best_epoch": results["best_epoch"],
+                            "final_train_loss": results["train_losses"][-1],
+                            "final_val_loss": results["val_losses"][-1],
+                            "final_train_acc": results["train_accuracies"][-1],
+                            "final_val_acc": results["val_accuracies"][-1],
+                            "best_val_acc": results["best_val_accuracy"],
+                            "test_results": results.get("test_results")
+                        }
+                    })
+                )
+                db.add(trained_model)
+                db.commit()
+                print(f"[INFO] Created mock model {model_name} with {results['best_val_accuracy']:.1f}% accuracy for job {job_id}")
+            except Exception as e:
+                print(f"[ERROR] Failed to create trained model: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        
+        db.commit()
+        
+        print(f"[INFO] Training job {job_id} completed successfully")
+        
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"[ERROR] Training job {job_id} failed: {str(e)}\n{error_details}")
+        
+        job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+        if job:
+            job.status = "failed"
+            job.error_message = str(e)
+            job.completed_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/train/cloud", response_model=Dict[str, Any])
+async def start_cloud_training(
+    request: CloudTrainingRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Start a cloud training job with a labeled dataset."""
+    try:
+        dataset = db.query(TrainingDataset).filter(
+            TrainingDataset.id == request.dataset_id,
+            TrainingDataset.user_id == current_user.userId
+        ).first()
+        
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        if not dataset.files or len(dataset.files) == 0:
+            raise HTTPException(status_code=400, detail="Dataset has no files")
+        
+        labels = set(f.label for f in dataset.files)
+        if len(labels) < 2:
+            raise HTTPException(status_code=400, detail="Dataset needs at least 2 different labels for classification")
+        
+        job_id = str(uuid.uuid4())
+        config = {
+            "model_type": request.model_type,
+            "epochs": request.epochs,
+            "batch_size": request.batch_size,
+            "learning_rate": request.learning_rate,
+            "validation_split": request.validation_split,
+            "model_name": request.model_name,
+            "num_classes": len(labels),
+            "labels": list(labels)
+        }
+        
+        job = TrainingJob(
+            job_id=job_id,
+            user_id=current_user.userId,
+            dataset_id=request.dataset_id,
+            test_dataset_id=request.test_dataset_id,
+            model_type=request.model_type,
+            training_mode="cloud",
+            config=json.dumps(config),
+            status="pending",
+            total_epochs=request.epochs
+        )
+        db.add(job)
+        db.commit()
+        
+        import os
+        db_url = os.environ.get("DATABASE_URL", "postgresql+psycopg2://lms_user:lms_password@localhost:5432/thoth")
+        
+        print(f"[INFO] Starting background training task for job {job_id}")
+        background_tasks.add_task(run_cloud_training, job_id, db_url)
+        print(f"[INFO] Background task added for job {job_id}")
+        
+        return {
+            "success": True,
+            "message": f"Cloud training job started",
+            "job": {
+                "job_id": job_id,
+                "dataset_id": request.dataset_id,
+                "dataset_name": dataset.name,
+                "model_type": request.model_type,
+                "epochs": request.epochs,
+                "num_classes": len(labels),
+                "labels": list(labels),
+                "status": "pending"
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to start training: {str(e)}")
+
+
+@router.get("/train/jobs", response_model=Dict[str, Any])
+async def list_training_jobs(
+    status: Optional[str] = Query(None, description="Filter by status"),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """List all training jobs for the current user."""
+    try:
+        query = db.query(TrainingJob).filter(TrainingJob.user_id == current_user.userId)
+        
+        if status:
+            query = query.filter(TrainingJob.status == status)
+        
+        jobs = query.order_by(TrainingJob.created_at.desc()).all()
+        
+        return {
+            "success": True,
+            "jobs": [j.to_dict() for j in jobs],
+            "total": len(jobs)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list jobs: {str(e)}")
+
+
+@router.get("/train/jobs/{job_id}", response_model=Dict[str, Any])
+async def get_training_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Get details of a specific training job."""
+    try:
+        job = db.query(TrainingJob).filter(
+            TrainingJob.job_id == job_id,
+            TrainingJob.user_id == current_user.userId
+        ).first()
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+        
+        return {
+            "success": True,
+            "job": job.to_dict()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get job: {str(e)}")
+
+
+@router.post("/train/jobs/{job_id}/cancel", response_model=StandardResponse)
+async def cancel_training_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Cancel a running training job."""
+    try:
+        job = db.query(TrainingJob).filter(
+            TrainingJob.job_id == job_id,
+            TrainingJob.user_id == current_user.userId
+        ).first()
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+        
+        if job.status not in ["pending", "running"]:
+            raise HTTPException(status_code=400, detail=f"Cannot cancel job with status '{job.status}'")
+        
+        job.status = "cancelled"
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Training job cancelled"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
+
+
+@router.delete("/train/jobs/{job_id}", response_model=StandardResponse)
+async def delete_training_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Delete a specific training job."""
+    try:
+        job = db.query(TrainingJob).filter(
+            TrainingJob.job_id == job_id,
+            TrainingJob.user_id == current_user.userId
+        ).first()
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+        
+        db.delete(job)
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Training job deleted successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete job: {str(e)}")
+
+
+@router.get("/models", response_model=Dict[str, Any])
+async def list_trained_models(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """List all trained models for the current user."""
+    try:
+        from sqlalchemy import text
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS trained_model (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    job_id VARCHAR(255),
+                    name VARCHAR(255) NOT NULL,
+                    architecture VARCHAR(50),
+                    accuracy FLOAT,
+                    size_bytes BIGINT,
+                    model_data BYTEA,
+                    config TEXT,
+                    is_pinned BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            db.commit()
+        except Exception as table_error:
+            print(f"[WARNING] Could not ensure trained_model table exists: {table_error}")
+        
+        models = db.query(TrainedModel).filter(
+            TrainedModel.user_id == current_user.userId
+        ).order_by(TrainedModel.created_at.desc()).all()
+        
+        return {
+            "success": True,
+            "models": [m.to_dict() for m in models],
+            "total": len(models)
+        }
+    except Exception as e:
+        print(f"[ERROR] Failed to list models: {str(e)}")
+        return {
+            "success": True,
+            "models": [],
+            "total": 0
+        }
+
+
+@router.delete("/models/{model_id}", response_model=StandardResponse)
+async def delete_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Delete a trained model."""
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        db.delete(model)
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Model deleted successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
+
+
+@router.post("/models/{model_id}/pin", response_model=StandardResponse)
+async def pin_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Pin a trained model to prevent auto-deletion."""
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        model.is_pinned = True
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Model pinned successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to pin model: {str(e)}")
+
+
+@router.post("/models/{model_id}/unpin", response_model=StandardResponse)
+async def unpin_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Unpin a trained model to allow auto-deletion."""
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        model.is_pinned = False
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Model unpinned successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to unpin model: {str(e)}")
+
+
+class RenameModelRequest(BaseModel):
+    """Request to rename a trained model."""
+    name: str
+
+
+@router.put("/models/{model_id}/rename", response_model=StandardResponse)
+async def rename_model(
+    model_id: int,
+    request: RenameModelRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Rename a trained model."""
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        if not request.name or len(request.name.strip()) == 0:
+            raise HTTPException(status_code=400, detail="Model name cannot be empty")
+        
+        model.name = request.name.strip()
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message="Model renamed successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to rename model: {str(e)}")
+
+
+# ============================================================================
+# DATASET DETAIL ENDPOINTS (catch-all routes must come last)
+# ============================================================================
 
 @router.get("/{dataset_id}", response_model=Dict[str, Any])
 async def get_dataset(
@@ -332,586 +907,3 @@ async def delete_dataset(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to delete dataset: {str(e)}")
-
-
-# ============================================================================
-# CLOUD TRAINING ENDPOINTS
-# ============================================================================
-
-async def run_cloud_training(job_id: str, db_url: str):
-    """Run actual cloud training for IMU model in background."""
-    print(f"[INFO] Background task started for job {job_id}")
-    
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    
-    try:
-        from train_imu import run_cloud_training as train_imu_model
-        print(f"[INFO] Successfully imported train_imu for job {job_id}")
-    except ImportError as e:
-        print(f"[ERROR] Failed to import train_imu for job {job_id}: {e}")
-        # Fall back to mock training for now
-        train_imu_model = None
-    
-    engine = create_engine(db_url)
-    SessionLocal = sessionmaker(bind=engine)
-    db = SessionLocal()
-    
-    try:
-        # Get job details
-        job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
-        if not job:
-            return
-        
-        # Update status to running
-        job.status = "running"
-        job.started_at = datetime.utcnow()
-        db.commit()
-        
-        # Load config
-        config = json.loads(job.config) if job.config else {}
-        
-        # Run training
-        if train_imu_model:
-            # Run the actual IMU training
-            results = await train_imu_model(
-                job_id=job_id,
-                dataset_id=job.dataset_id,
-                model_type=job.model_type,
-                config=config,
-                db=db
-            )
-        else:
-            # Mock training as fallback with realistic delays
-            import random
-            import asyncio
-            total_epochs = job.total_epochs or 10
-            
-            # Simulate training with delays
-            train_losses = []
-            train_accuracies = []
-            val_losses = []
-            val_accuracies = []
-            
-            for epoch in range(total_epochs):
-                # Simulate epoch training time
-                await asyncio.sleep(2)  # 2 seconds per epoch
-                
-                # Generate realistic metrics
-                train_loss = 2.0 * (0.9 ** epoch) + random.uniform(0, 0.1)
-                train_acc = min(95, 60 + epoch * 3 + random.uniform(-2, 2))
-                val_loss = train_loss * 1.1 + random.uniform(-0.05, 0.05)
-                val_acc = train_acc - 5 + random.uniform(-2, 2)
-                
-                # Ensure accuracy is within realistic bounds (0-100%)
-                train_acc = max(0, min(100, train_acc))
-                val_acc = max(0, min(100, val_acc))
-                
-                train_losses.append(round(train_loss, 4))
-                train_accuracies.append(round(train_acc, 2))
-                val_losses.append(round(val_loss, 4))
-                val_accuracies.append(round(val_acc, 2))
-                
-                # Update job progress in database
-                job.current_epoch = epoch + 1
-                job.metrics = json.dumps({
-                    "loss": train_losses,
-                    "accuracy": train_accuracies,
-                    "val_loss": val_losses,
-                    "val_accuracy": val_accuracies
-                })
-                db.commit()
-                
-                print(f"[INFO] Job {job_id} - Epoch {epoch + 1}/{total_epochs}: "
-                      f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
-                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
-            
-            # Find best epoch
-            best_val_acc = max(val_accuracies)
-            best_epoch = val_accuracies.index(best_val_acc) + 1
-            
-            # Test dataset evaluation
-            test_results = None
-            if job.test_dataset_id:
-                print(f"[INFO] Evaluating on test dataset {job.test_dataset_id}")
-                # Simulate test evaluation
-                test_loss = val_losses[-1] * 1.05 + random.uniform(-0.02, 0.02)
-                test_acc = best_val_acc - 3 + random.uniform(-1, 1)
-                test_acc = max(0, min(100, test_acc))
-                
-                test_results = {
-                    "test_loss": round(test_loss, 4),
-                    "test_accuracy": round(test_acc, 2),
-                    "test_dataset_id": job.test_dataset_id
-                }
-                print(f"[INFO] Test Results - Loss: {test_loss:.4f}, Accuracy: {test_acc:.2f}%")
-            
-            results = {
-                "train_losses": train_losses,
-                "train_accuracies": train_accuracies,
-                "val_losses": val_losses,
-                "val_accuracies": val_accuracies,
-                "best_val_accuracy": best_val_acc,
-                "best_epoch": best_epoch,
-                "test_results": test_results
-            }
-        
-        # Update job with results
-        job.metrics = json.dumps({
-            "loss": results["train_losses"],
-            "accuracy": results["train_accuracies"],
-            "val_loss": results["val_losses"],
-            "val_accuracy": results["val_accuracies"]
-        })
-        
-        best_metrics = {
-            "val_accuracy": results["best_val_accuracy"],
-            "best_epoch": results["best_epoch"]
-        }
-        
-        # Add test results if available
-        if results.get("test_results"):
-            best_metrics["test_accuracy"] = results["test_results"]["test_accuracy"]
-            best_metrics["test_loss"] = results["test_results"]["test_loss"]
-            best_metrics["test_dataset_id"] = results["test_results"]["test_dataset_id"]
-        
-        job.best_metrics = json.dumps(best_metrics)
-        
-        job.status = "completed"
-        job.completed_at = datetime.utcnow()
-        
-        # Create trained model record
-        if not train_imu_model:  # Only for mock training
-            try:
-                # Try to create table if it doesn't exist
-                from sqlalchemy import text
-                try:
-                    # Create the table if it doesn't exist with is_pinned column
-                    db.execute(text("""
-                        CREATE TABLE IF NOT EXISTS trained_model (
-                            id SERIAL PRIMARY KEY,
-                            user_id INTEGER NOT NULL,
-                            job_id VARCHAR(255),
-                            name VARCHAR(255) NOT NULL,
-                            architecture VARCHAR(50),
-                            accuracy FLOAT,
-                            size_bytes BIGINT,
-                            model_data BYTEA,
-                            config TEXT,
-                            is_pinned BOOLEAN DEFAULT FALSE,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """))
-                    db.commit()
-                    print(f"[INFO] Ensured trained_model table exists")
-                except Exception as table_error:
-                    print(f"[WARNING] Could not create trained_model table: {table_error}")
-                
-                # Check model limit and cleanup old models
-                existing_models = db.query(TrainedModel).filter(
-                    TrainedModel.user_id == job.user_id,
-                    TrainedModel.is_pinned == False
-                ).order_by(TrainedModel.created_at.desc()).all()
-                
-                # If we have 10 or more unpinned models, remove the oldest
-                if len(existing_models) >= 10:
-                    models_to_delete = existing_models[9:]  # Get all models beyond the 10 most recent
-                    for old_model in models_to_delete:
-                        db.delete(old_model)
-                        print(f"[INFO] Deleted old model {old_model.name} to maintain 10-model limit")
-                
-                # Now create the model record
-                model_name = f"MockModel_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-                trained_model = TrainedModel(
-                    user_id=job.user_id,
-                    job_id=job_id,
-                    name=model_name,
-                    architecture=job.model_type,
-                    accuracy=float(results["best_val_accuracy"]),  # Store as float percentage (0-100)
-                    size_bytes=random.randint(1000000, 50000000),  # 1-50 MB
-                    config=json.dumps({
-                        "training_results": {
-                            "total_epochs": total_epochs,
-                            "best_epoch": results["best_epoch"],
-                            "final_train_loss": results["train_losses"][-1],
-                            "final_val_loss": results["val_losses"][-1],
-                            "final_train_acc": results["train_accuracies"][-1],
-                            "final_val_acc": results["val_accuracies"][-1],
-                            "best_val_acc": results["best_val_accuracy"],
-                            "test_results": results.get("test_results")
-                        }
-                    })
-                )
-                db.add(trained_model)
-                db.commit()
-                print(f"[INFO] Created mock model {model_name} with {results['best_val_accuracy']:.1f}% accuracy for job {job_id}")
-            except Exception as e:
-                print(f"[ERROR] Failed to create trained model: {str(e)}")
-                import traceback
-                traceback.print_exc()
-        
-        db.commit()
-        
-        print(f"[INFO] Training job {job_id} completed successfully")
-        
-    except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"[ERROR] Training job {job_id} failed: {str(e)}\n{error_details}")
-        
-        job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
-        if job:
-            job.status = "failed"
-            job.error_message = str(e)
-            job.completed_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
-
-
-@router.post("/train/cloud", response_model=Dict[str, Any])
-async def start_cloud_training(
-    request: CloudTrainingRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Start a cloud training job with a labeled dataset."""
-    try:
-        # Verify dataset exists and has files
-        dataset = db.query(TrainingDataset).filter(
-            TrainingDataset.id == request.dataset_id,
-            TrainingDataset.user_id == current_user.userId
-        ).first()
-        
-        if not dataset:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-        
-        if not dataset.files or len(dataset.files) == 0:
-            raise HTTPException(status_code=400, detail="Dataset has no files")
-        
-        # Check for unique labels
-        labels = set(f.label for f in dataset.files)
-        if len(labels) < 2:
-            raise HTTPException(status_code=400, detail="Dataset needs at least 2 different labels for classification")
-        
-        # Create job
-        job_id = str(uuid.uuid4())
-        config = {
-            "model_type": request.model_type,
-            "epochs": request.epochs,
-            "batch_size": request.batch_size,
-            "learning_rate": request.learning_rate,
-            "validation_split": request.validation_split,
-            "model_name": request.model_name,
-            "num_classes": len(labels),
-            "labels": list(labels)
-        }
-        
-        job = TrainingJob(
-            job_id=job_id,
-            user_id=current_user.userId,
-            dataset_id=request.dataset_id,
-            test_dataset_id=request.test_dataset_id,
-            model_type=request.model_type,
-            training_mode="cloud",
-            config=json.dumps(config),
-            status="pending",
-            total_epochs=request.epochs
-        )
-        db.add(job)
-        db.commit()
-        
-        # Get database URL for background task
-        import os
-        db_url = os.environ.get("DATABASE_URL", "postgresql+psycopg2://lms_user:lms_password@localhost:5432/thoth")
-        
-        # Start training in background
-        print(f"[INFO] Starting background training task for job {job_id}")
-        background_tasks.add_task(run_cloud_training, job_id, db_url)
-        print(f"[INFO] Background task added for job {job_id}")
-        
-        return {
-            "success": True,
-            "message": f"Cloud training job started",
-            "job": {
-                "job_id": job_id,
-                "dataset_id": request.dataset_id,
-                "dataset_name": dataset.name,
-                "model_type": request.model_type,
-                "epochs": request.epochs,
-                "num_classes": len(labels),
-                "labels": list(labels),
-                "status": "pending"
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to start training: {str(e)}")
-
-
-@router.get("/train/jobs", response_model=Dict[str, Any])
-async def list_training_jobs(
-    status: Optional[str] = Query(None, description="Filter by status"),
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """List all training jobs for the current user."""
-    try:
-        query = db.query(TrainingJob).filter(TrainingJob.user_id == current_user.userId)
-        
-        if status:
-            query = query.filter(TrainingJob.status == status)
-        
-        jobs = query.order_by(TrainingJob.created_at.desc()).all()
-        
-        return {
-            "success": True,
-            "jobs": [j.to_dict() for j in jobs],
-            "total": len(jobs)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list jobs: {str(e)}")
-
-
-@router.api_route("/train/jobs/{job_id}", methods=["GET", "DELETE"], response_model=Dict[str, Any])
-async def training_job_detail(request: Request, job_id: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    """Get or delete a specific training job, depending on HTTP method."""
-    try:
-        job = db.query(TrainingJob).filter(
-            TrainingJob.job_id == job_id,
-            TrainingJob.user_id == current_user.userId
-        ).first()
-
-        if not job:
-            raise HTTPException(status_code=404, detail="Training job not found")
-
-        # Branch by HTTP method
-        if request.method == "DELETE":
-            db.delete(job)
-            db.commit()
-            return StandardResponse(success=True, message="Training job deleted successfully").model_dump()
-
-        # GET request
-        return {"success": True, "job": job.to_dict()}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get job: {str(e)}")
-
-
-# -----------------------------
-# Training job cancel endpoint
-# -----------------------------
-@router.post("/train/jobs/{job_id}/cancel", response_model=StandardResponse)
-async def cancel_training_job(
-    job_id: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Cancel a running training job."""
-    try:
-        job = db.query(TrainingJob).filter(
-            TrainingJob.job_id == job_id,
-            TrainingJob.user_id == current_user.userId
-        ).first()
-        
-        if not job:
-            raise HTTPException(status_code=404, detail="Training job not found")
-        
-        if job.status not in ["pending", "running"]:
-            raise HTTPException(status_code=400, detail=f"Cannot cancel job with status '{job.status}'")
-        
-        job.status = "cancelled"
-        job.completed_at = datetime.utcnow()
-        db.commit()
-        
-        return StandardResponse(
-            success=True,
-            message="Training job cancelled"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
-
-
-async def list_trained_models(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """List all trained models for the current user."""
-    try:
-        # Try to create table if it doesn't exist
-        from sqlalchemy import text
-        try:
-            db.execute(text("""
-                CREATE TABLE IF NOT EXISTS trained_model (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    job_id VARCHAR(255),
-                    name VARCHAR(255) NOT NULL,
-                    architecture VARCHAR(50),
-                    accuracy FLOAT,
-                    size_bytes BIGINT,
-                    model_data BYTEA,
-                    config TEXT,
-                    is_pinned BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            db.commit()
-        except Exception as table_error:
-            print(f"[WARNING] Could not ensure trained_model table exists: {table_error}")
-        
-        # Now query the models
-        models = db.query(TrainedModel).filter(
-            TrainedModel.user_id == current_user.userId
-        ).order_by(TrainedModel.created_at.desc()).all()
-        
-        return {
-            "success": True,
-            "models": [m.to_dict() for m in models],
-            "total": len(models)
-        }
-    except Exception as e:
-        print(f"[ERROR] Failed to list models: {str(e)}")
-        # Return empty list on error instead of crashing
-        return {
-            "success": True,
-            "models": [],
-            "total": 0
-        }
-
-
-@router.delete("/models/{model_id}", response_model=StandardResponse)
-async def delete_model(
-    model_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Delete a trained model."""
-    try:
-        model = db.query(TrainedModel).filter(
-            TrainedModel.id == model_id,
-            TrainedModel.user_id == current_user.userId
-        ).first()
-        
-        if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
-        
-        db.delete(model)
-        db.commit()
-        
-        return StandardResponse(
-            success=True,
-            message="Model deleted successfully"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
-
-
-@router.post("/models/{model_id}/pin", response_model=StandardResponse)
-async def pin_model(
-    model_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Pin a trained model to prevent auto-deletion."""
-    try:
-        model = db.query(TrainedModel).filter(
-            TrainedModel.id == model_id,
-            TrainedModel.user_id == current_user.userId
-        ).first()
-        
-        if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
-        
-        model.is_pinned = True
-        db.commit()
-        
-        return StandardResponse(
-            success=True,
-            message="Model pinned successfully"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to pin model: {str(e)}")
-
-
-@router.post("/models/{model_id}/unpin", response_model=StandardResponse)
-async def unpin_model(
-    model_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Unpin a trained model to allow auto-deletion."""
-    try:
-        model = db.query(TrainedModel).filter(
-            TrainedModel.id == model_id,
-            TrainedModel.user_id == current_user.userId
-        ).first()
-        
-        if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
-        
-        model.is_pinned = False
-        db.commit()
-        
-        return StandardResponse(
-            success=True,
-            message="Model unpinned successfully"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to unpin model: {str(e)}")
-
-
-class RenameModelRequest(BaseModel):
-    """Request to rename a trained model."""
-    name: str
-
-
-@router.put("/models/{model_id}/rename", response_model=StandardResponse)
-async def rename_model(
-    model_id: int,
-    request: RenameModelRequest,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Rename a trained model."""
-    try:
-        model = db.query(TrainedModel).filter(
-            TrainedModel.id == model_id,
-            TrainedModel.user_id == current_user.userId
-        ).first()
-        
-        if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
-        
-        if not request.name or len(request.name.strip()) == 0:
-            raise HTTPException(status_code=400, detail="Model name cannot be empty")
-        
-        model.name = request.name.strip()
-        db.commit()
-        
-        return StandardResponse(
-            success=True,
-            message="Model renamed successfully"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to rename model: {str(e)}")
