@@ -363,7 +363,8 @@ class TrainingJob(Base):
     
     # Relationships
     user = relationship("User")
-    dataset = relationship("TrainingDataset")
+    dataset = relationship("TrainingDataset", foreign_keys=[dataset_id])
+    test_dataset = relationship("TrainingDataset", foreign_keys=[test_dataset_id])
     
     def to_dict(self):
         import json
