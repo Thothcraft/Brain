@@ -52,9 +52,7 @@ test_*.py
 tests/
 
 # Development requirements
-requirements.txt
-# Keep only deployment requirements
-!requirements-deploy.txt
+# Keep deployment requirements
 
 # Data files
 data/
