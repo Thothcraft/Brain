@@ -162,17 +162,17 @@ async def run_cloud_training(job_id: str, db_url: str):
                 await asyncio.sleep(2)
                 
                 train_loss = 2.0 * (0.9 ** epoch) + random.uniform(0, 0.1)
-                train_acc = min(95, 60 + epoch * 3 + random.uniform(-2, 2))
+                train_acc = min(0.95, 0.60 + epoch * 0.03 + random.uniform(-0.02, 0.02))
                 val_loss = train_loss * 1.1 + random.uniform(-0.05, 0.05)
-                val_acc = train_acc - 5 + random.uniform(-2, 2)
+                val_acc = train_acc - 0.05 + random.uniform(-0.02, 0.02)
                 
-                train_acc = max(0, min(100, train_acc))
-                val_acc = max(0, min(100, val_acc))
+                train_acc = max(0, min(1.0, train_acc))
+                val_acc = max(0, min(1.0, val_acc))
                 
                 train_losses.append(round(train_loss, 4))
-                train_accuracies.append(round(train_acc, 2))
+                train_accuracies.append(round(train_acc, 4))
                 val_losses.append(round(val_loss, 4))
-                val_accuracies.append(round(val_acc, 2))
+                val_accuracies.append(round(val_acc, 4))
                 
                 job.current_epoch = epoch + 1
                 job.metrics = json.dumps({
@@ -184,8 +184,8 @@ async def run_cloud_training(job_id: str, db_url: str):
                 db.commit()
                 
                 print(f"[INFO] Job {job_id} - Epoch {epoch + 1}/{total_epochs}: "
-                      f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
-                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+                      f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc*100:.2f}%, "
+                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc*100:.2f}%")
             
             best_val_acc = max(val_accuracies)
             best_epoch = val_accuracies.index(best_val_acc) + 1
@@ -194,15 +194,15 @@ async def run_cloud_training(job_id: str, db_url: str):
             if job.test_dataset_id:
                 print(f"[INFO] Evaluating on test dataset {job.test_dataset_id}")
                 test_loss = val_losses[-1] * 1.05 + random.uniform(-0.02, 0.02)
-                test_acc = best_val_acc - 3 + random.uniform(-1, 1)
-                test_acc = max(0, min(100, test_acc))
+                test_acc = best_val_acc - 0.03 + random.uniform(-0.01, 0.01)
+                test_acc = max(0, min(1.0, test_acc))
                 
                 test_results = {
                     "test_loss": round(test_loss, 4),
-                    "test_accuracy": round(test_acc, 2),
+                    "test_accuracy": round(test_acc, 4),
                     "test_dataset_id": job.test_dataset_id
                 }
-                print(f"[INFO] Test Results - Loss: {test_loss:.4f}, Accuracy: {test_acc:.2f}%")
+                print(f"[INFO] Test Results - Loss: {test_loss:.4f}, Accuracy: {test_acc*100:.2f}%")
             
             results = {
                 "train_losses": train_losses,
@@ -684,6 +684,48 @@ async def rename_model(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to rename model: {str(e)}")
+
+
+@router.get("/models/{model_id}/download")
+async def download_model(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Download a trained model."""
+    from fastapi.responses import Response
+    try:
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        # If model_data exists, return it
+        if model.model_data:
+            return Response(
+                content=model.model_data,
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename={model.name}.pth"
+                }
+            )
+        else:
+            # Return mock model file for now
+            mock_model_data = b"Mock model weights data"
+            return Response(
+                content=mock_model_data,
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename={model.name}.pth"
+                }
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download model: {str(e)}")
 
 
 # ============================================================================
