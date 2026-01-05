@@ -192,8 +192,8 @@ async def run_cloud_training(job_id: str, db_url: str):
             
             # Generate per-class statistics
             dataset = db.query(TrainingDataset).filter(TrainingDataset.id == job.dataset_id).first()
-            num_classes = len(dataset.labels) if dataset and dataset.labels else 3
-            class_names = dataset.labels if dataset and dataset.labels else [f"Class_{i}" for i in range(num_classes)]
+            class_names = list(set(f.label for f in dataset.files)) if dataset and dataset.files else [f"Class_{i}" for i in range(3)]
+            num_classes = len(class_names)
             
             per_class_metrics = {}
             confusion_matrix = []
