@@ -157,6 +157,7 @@ async def run_cloud_training(job_id: str, db_url: str):
             total_epochs = job.total_epochs or 10
             
             # Bayesian Optimization for hyperparameters
+            bayesian_trials_data = []
             if config.get("use_bayesian_optimization", False):
                 print(f"[INFO] Running Bayesian optimization for job {job_id}")
                 job.status = "optimizing"
@@ -165,6 +166,7 @@ async def run_cloud_training(job_id: str, db_url: str):
                 best_lr = config.get("learning_rate", 0.001)
                 best_batch_size = config.get("batch_size", 32)
                 best_val_acc = 0.0
+                best_trial_idx = 0
                 
                 trials = config.get("bayesian_trials", 20)
                 for trial in range(min(trials, 10)):  # Limit to 10 trials for demo
@@ -175,22 +177,40 @@ async def run_cloud_training(job_id: str, db_url: str):
                     # Quick validation (simulate 3 epochs)
                     trial_val_acc = 0.60 + random.uniform(0, 0.15) + (0.05 if trial_lr < 0.01 else 0)
                     trial_val_acc = max(0, min(1.0, trial_val_acc))
+                    trial_train_acc = trial_val_acc + random.uniform(0, 0.05)
+                    trial_train_acc = max(0, min(1.0, trial_train_acc))
+                    
+                    # Store trial data
+                    bayesian_trials_data.append({
+                        "trial": trial + 1,
+                        "learning_rate": round(trial_lr, 6),
+                        "batch_size": trial_batch_size,
+                        "train_accuracy": round(trial_train_acc, 4),
+                        "val_accuracy": round(trial_val_acc, 4),
+                        "is_best": False
+                    })
                     
                     if trial_val_acc > best_val_acc:
                         best_val_acc = trial_val_acc
                         best_lr = trial_lr
                         best_batch_size = trial_batch_size
+                        best_trial_idx = trial
                     
                     await asyncio.sleep(1)
                     print(f"[INFO] Bayesian trial {trial+1}/{trials}: lr={trial_lr:.6f}, batch={trial_batch_size}, val_acc={trial_val_acc:.4f}")
                 
+                # Mark best trial
+                if bayesian_trials_data:
+                    bayesian_trials_data[best_trial_idx]["is_best"] = True
+                
                 # Update config with optimized hyperparameters
                 config["learning_rate"] = best_lr
                 config["batch_size"] = best_batch_size
+                config["bayesian_trials_results"] = bayesian_trials_data
                 job.config = json.dumps(config)
                 job.status = "running"
                 db.commit()
-                print(f"[INFO] Bayesian optimization complete. Best: lr={best_lr:.6f}, batch={best_batch_size}")
+                print(f"[INFO] Bayesian optimization complete. Best: lr={best_lr:.6f}, batch={best_batch_size}, trial={best_trial_idx+1}")
             
             train_losses = []
             train_accuracies = []
