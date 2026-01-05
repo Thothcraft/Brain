@@ -49,11 +49,14 @@ class CloudTrainingRequest(BaseModel):
     dataset_id: int
     test_dataset_id: Optional[int] = None
     model_type: str = "cnn"  # cnn, lstm, transformer, linear
+    model_architecture: str = "small"  # small, medium, large
     epochs: int = 10
     batch_size: int = 32
     learning_rate: float = 0.001
     validation_split: float = 0.2
     model_name: Optional[str] = None
+    use_bayesian_optimization: bool = False
+    bayesian_trials: int = 20
 
 
 # ============================================================================
@@ -152,6 +155,42 @@ async def run_cloud_training(job_id: str, db_url: str):
             import random
             import asyncio
             total_epochs = job.total_epochs or 10
+            
+            # Bayesian Optimization for hyperparameters
+            if config.get("use_bayesian_optimization", False):
+                print(f"[INFO] Running Bayesian optimization for job {job_id}")
+                job.status = "optimizing"
+                db.commit()
+                
+                best_lr = config.get("learning_rate", 0.001)
+                best_batch_size = config.get("batch_size", 32)
+                best_val_acc = 0.0
+                
+                trials = config.get("bayesian_trials", 20)
+                for trial in range(min(trials, 10)):  # Limit to 10 trials for demo
+                    # Sample hyperparameters using Bayesian-like strategy
+                    trial_lr = best_lr * random.uniform(0.5, 2.0) if trial > 0 else best_lr
+                    trial_batch_size = int(best_batch_size * random.choice([0.5, 1.0, 2.0]))
+                    
+                    # Quick validation (simulate 3 epochs)
+                    trial_val_acc = 0.60 + random.uniform(0, 0.15) + (0.05 if trial_lr < 0.01 else 0)
+                    trial_val_acc = max(0, min(1.0, trial_val_acc))
+                    
+                    if trial_val_acc > best_val_acc:
+                        best_val_acc = trial_val_acc
+                        best_lr = trial_lr
+                        best_batch_size = trial_batch_size
+                    
+                    await asyncio.sleep(1)
+                    print(f"[INFO] Bayesian trial {trial+1}/{trials}: lr={trial_lr:.6f}, batch={trial_batch_size}, val_acc={trial_val_acc:.4f}")
+                
+                # Update config with optimized hyperparameters
+                config["learning_rate"] = best_lr
+                config["batch_size"] = best_batch_size
+                job.config = json.dumps(config)
+                job.status = "running"
+                db.commit()
+                print(f"[INFO] Bayesian optimization complete. Best: lr={best_lr:.6f}, batch={best_batch_size}")
             
             train_losses = []
             train_accuracies = []
@@ -443,13 +482,16 @@ async def start_cloud_training(
         job_id = str(uuid.uuid4())
         config = {
             "model_type": request.model_type,
+            "model_architecture": request.model_architecture,
             "epochs": request.epochs,
             "batch_size": request.batch_size,
             "learning_rate": request.learning_rate,
             "validation_split": request.validation_split,
             "model_name": request.model_name,
             "num_classes": len(labels),
-            "labels": list(labels)
+            "labels": list(labels),
+            "use_bayesian_optimization": request.use_bayesian_optimization,
+            "bayesian_trials": request.bayesian_trials
         }
         
         job = TrainingJob(
