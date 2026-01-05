@@ -37,6 +37,21 @@ class UpdatePipelineRequest(BaseModel):
 
 
 # ============================================================================
+# IN-MEMORY STORAGE (temporary until database table is created)
+# ============================================================================
+_pipelines_store: Dict[int, Dict[str, Any]] = {
+    1: {
+        "id": 1,
+        "name": "IMU Preprocessing",
+        "description": "Standard IMU data preprocessing pipeline",
+        "blocks": [],
+        "connections": [],
+        "created_at": datetime.utcnow().isoformat()
+    }
+}
+_next_pipeline_id = 2
+
+# ============================================================================
 # PIPELINE ENDPOINTS
 # ============================================================================
 
@@ -47,19 +62,7 @@ async def list_pipelines(
 ):
     """List all processing pipelines for the current user."""
     try:
-        # For now, return mock data since we don't have a Pipeline table yet
-        # In production, you'd query from database
-        pipelines = [
-            {
-                "id": 1,
-                "name": "IMU Preprocessing",
-                "description": "Standard IMU data preprocessing pipeline",
-                "blocks": [],
-                "connections": [],
-                "created_at": datetime.utcnow().isoformat()
-            }
-        ]
-        
+        pipelines = list(_pipelines_store.values())
         return {
             "success": True,
             "pipelines": pipelines
@@ -75,9 +78,20 @@ async def create_pipeline(
     current_user = Depends(get_current_user)
 ):
     """Create a new processing pipeline."""
+    global _next_pipeline_id
     try:
-        # For now, return success
-        # In production, you'd create a Pipeline record in database
+        pipeline_id = _next_pipeline_id
+        _next_pipeline_id += 1
+        
+        _pipelines_store[pipeline_id] = {
+            "id": pipeline_id,
+            "name": request.name,
+            "description": request.description or "",
+            "blocks": [],
+            "connections": [],
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
         return StandardResponse(
             success=True,
             message=f"Pipeline '{request.name}' created successfully"
@@ -95,12 +109,19 @@ async def update_pipeline(
 ):
     """Update a processing pipeline."""
     try:
-        # For now, return success
-        # In production, you'd update the Pipeline record
+        if pipeline_id not in _pipelines_store:
+            raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
+        
+        # Update blocks and connections
+        _pipelines_store[pipeline_id]["blocks"] = request.blocks
+        _pipelines_store[pipeline_id]["connections"] = request.connections
+        
         return StandardResponse(
             success=True,
             message="Pipeline updated successfully"
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update pipeline: {str(e)}")
 
