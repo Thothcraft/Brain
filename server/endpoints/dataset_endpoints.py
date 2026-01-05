@@ -276,69 +276,70 @@ async def run_cloud_training(job_id: str, db_url: str):
         job.status = "completed"
         job.completed_at = datetime.utcnow()
         
-        if not train_imu_model:
+        # Save trained model (for both mock and real training)
+        try:
+            from sqlalchemy import text
             try:
-                from sqlalchemy import text
-                try:
-                    db.execute(text("""
-                        CREATE TABLE IF NOT EXISTS trained_model (
-                            id SERIAL PRIMARY KEY,
-                            user_id INTEGER NOT NULL,
-                            job_id VARCHAR(255),
-                            name VARCHAR(255) NOT NULL,
-                            architecture VARCHAR(50),
-                            accuracy FLOAT,
-                            size_bytes BIGINT,
-                            model_data BYTEA,
-                            config TEXT,
-                            is_pinned BOOLEAN DEFAULT FALSE,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """))
-                    db.commit()
-                    print(f"[INFO] Ensured trained_model table exists")
-                except Exception as table_error:
-                    print(f"[WARNING] Could not create trained_model table: {table_error}")
-                
-                existing_models = db.query(TrainedModel).filter(
-                    TrainedModel.user_id == job.user_id,
-                    TrainedModel.is_pinned == False
-                ).order_by(TrainedModel.created_at.desc()).all()
-                
-                if len(existing_models) >= 10:
-                    models_to_delete = existing_models[9:]
-                    for old_model in models_to_delete:
-                        db.delete(old_model)
-                        print(f"[INFO] Deleted old model {old_model.name} to maintain 10-model limit")
-                
-                model_name = f"MockModel_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-                trained_model = TrainedModel(
-                    user_id=job.user_id,
-                    job_id=job_id,
-                    name=model_name,
-                    architecture=job.model_type,
-                    accuracy=float(results["best_val_accuracy"]),
-                    size_bytes=random.randint(1000000, 50000000),
-                    config=json.dumps({
-                        "training_results": {
-                            "total_epochs": total_epochs,
-                            "best_epoch": results["best_epoch"],
-                            "final_train_loss": results["train_losses"][-1],
-                            "final_val_loss": results["val_losses"][-1],
-                            "final_train_acc": results["train_accuracies"][-1],
-                            "final_val_acc": results["val_accuracies"][-1],
-                            "best_val_acc": results["best_val_accuracy"],
-                            "test_results": results.get("test_results")
-                        }
-                    })
-                )
-                db.add(trained_model)
+                db.execute(text("""
+                    CREATE TABLE IF NOT EXISTS trained_model (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        job_id VARCHAR(255),
+                        name VARCHAR(255) NOT NULL,
+                        architecture VARCHAR(50),
+                        accuracy FLOAT,
+                        size_bytes BIGINT,
+                        model_data BYTEA,
+                        config TEXT,
+                        is_pinned BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
                 db.commit()
-                print(f"[INFO] Created mock model {model_name} with {results['best_val_accuracy']:.1f}% accuracy for job {job_id}")
-            except Exception as e:
-                print(f"[ERROR] Failed to create trained model: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                print(f"[INFO] Ensured trained_model table exists")
+            except Exception as table_error:
+                print(f"[WARNING] Could not create trained_model table: {table_error}")
+            
+            existing_models = db.query(TrainedModel).filter(
+                TrainedModel.user_id == job.user_id,
+                TrainedModel.is_pinned == False
+            ).order_by(TrainedModel.created_at.desc()).all()
+            
+            if len(existing_models) >= 10:
+                models_to_delete = existing_models[9:]
+                for old_model in models_to_delete:
+                    db.delete(old_model)
+                    print(f"[INFO] Deleted old model {old_model.name} to maintain 10-model limit")
+            
+            # Use custom name from config if provided
+            model_name = config.get("model_name") or f"{job.model_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            trained_model = TrainedModel(
+                user_id=job.user_id,
+                job_id=job_id,
+                name=model_name,
+                architecture=job.model_type,
+                accuracy=float(results["best_val_accuracy"]),
+                size_bytes=random.randint(1000000, 50000000) if not train_imu_model else None,
+                config=json.dumps({
+                    "training_results": {
+                        "total_epochs": job.total_epochs,
+                        "best_epoch": results["best_epoch"],
+                        "final_train_loss": results["train_losses"][-1],
+                        "final_val_loss": results["val_losses"][-1],
+                        "final_train_acc": results["train_accuracies"][-1],
+                        "final_val_acc": results["val_accuracies"][-1],
+                        "best_val_acc": results["best_val_accuracy"],
+                        "test_results": results.get("test_results")
+                    }
+                })
+            )
+            db.add(trained_model)
+            db.commit()
+            print(f"[INFO] Created trained model {model_name} with {results['best_val_accuracy']*100:.2f}% accuracy for job {job_id}")
+        except Exception as e:
+            print(f"[ERROR] Failed to create trained model: {str(e)}")
+            import traceback
+            traceback.print_exc()
         
         db.commit()
         
