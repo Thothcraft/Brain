@@ -47,6 +47,7 @@ router.include_router(network_router)     # /network/* (WiFi configuration)
 router.include_router(training_router)    # /training/*, /federated/* (ML training)
 router.include_router(curriculum_router)  # /curriculum/* (Education content)
 router.include_router(dataset_router)     # /datasets/* (Training datasets and cloud training)
+router.include_router(processing_router)  # /processing/* (Data processing pipelines)
 
 # ============================================================================
 # MODULAR ENDPOINTS LOADED
