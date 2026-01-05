@@ -29,6 +29,7 @@ from server.endpoints.network_endpoints import router as network_router
 from server.endpoints.training_endpoints import router as training_router
 from server.endpoints.curriculum_endpoints import router as curriculum_router
 from server.endpoints.dataset_endpoints import router as dataset_router
+from server.endpoints.processing_endpoints import router as processing_router
 
 # Create main router
 router = APIRouter()
