@@ -117,45 +117,95 @@ async def list_datasets(
 def run_cloud_training(job_id: str, db_url: str):
     """Run real PyTorch training for IMU model in background."""
     import asyncio
+    import traceback
+    import sys
     
-    print(f"[INFO] Background task started for job {job_id}")
-    
-    # Create new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    print(f"[TRAINING-DEBUG] ========================================")
+    print(f"[TRAINING-DEBUG] run_cloud_training CALLED for job {job_id}")
+    print(f"[TRAINING-DEBUG] db_url: {db_url[:50]}...")
+    print(f"[TRAINING-DEBUG] Thread: {__import__('threading').current_thread().name}")
+    print(f"[TRAINING-DEBUG] ========================================")
+    sys.stdout.flush()
     
     try:
+        # Create new event loop for this thread
+        print(f"[TRAINING-DEBUG] Creating new event loop...")
+        sys.stdout.flush()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        print(f"[TRAINING-DEBUG] Event loop created: {loop}")
+        sys.stdout.flush()
+        
+        print(f"[TRAINING-DEBUG] Starting run_until_complete...")
+        sys.stdout.flush()
         loop.run_until_complete(_run_cloud_training_async(job_id, db_url))
+        print(f"[TRAINING-DEBUG] run_until_complete finished successfully")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"[TRAINING-ERROR] Exception in run_cloud_training: {e}")
+        print(f"[TRAINING-ERROR] Traceback: {traceback.format_exc()}")
+        sys.stdout.flush()
     finally:
+        print(f"[TRAINING-DEBUG] Closing event loop...")
+        sys.stdout.flush()
         loop.close()
+        print(f"[TRAINING-DEBUG] Event loop closed")
+        sys.stdout.flush()
 
 
 async def _run_cloud_training_async(job_id: str, db_url: str):
     """Async implementation of cloud training."""
+    import traceback
+    import sys
+    
+    print(f"[TRAINING-DEBUG] _run_cloud_training_async started for job {job_id}")
+    sys.stdout.flush()
+    
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from server.ml_training import run_full_training
     
+    print(f"[TRAINING-DEBUG] Imports successful")
+    sys.stdout.flush()
+    
+    print(f"[TRAINING-DEBUG] Creating database engine...")
+    sys.stdout.flush()
     engine = create_engine(db_url)
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
+    print(f"[TRAINING-DEBUG] Database session created")
+    sys.stdout.flush()
     
     try:
+        print(f"[TRAINING-DEBUG] Querying job {job_id}...")
+        sys.stdout.flush()
         job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
         if not job:
-            print(f"[ERROR] Job {job_id} not found")
+            print(f"[TRAINING-ERROR] Job {job_id} not found in database!")
+            sys.stdout.flush()
             return
         
+        print(f"[TRAINING-DEBUG] Job found: dataset_id={job.dataset_id}, model_type={job.model_type}")
+        sys.stdout.flush()
+        
+        print(f"[TRAINING-DEBUG] Setting job status to 'running'...")
+        sys.stdout.flush()
         job.status = "running"
         job.started_at = datetime.utcnow()
         db.commit()
+        print(f"[TRAINING-DEBUG] Job status updated to 'running'")
+        sys.stdout.flush()
         
         config = json.loads(job.config) if job.config else {}
+        print(f"[TRAINING-DEBUG] Config loaded: {list(config.keys())}")
+        sys.stdout.flush()
         
         # Define update callback for progress tracking
         async def update_callback(status, epoch, total, metrics):
             nonlocal job, db
             try:
+                print(f"[TRAINING-DEBUG] Update callback: status={status}, epoch={epoch}")
+                sys.stdout.flush()
                 job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
                 if job:
                     job.status = status
@@ -163,10 +213,18 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
                         job.current_epoch = epoch
                     db.commit()
             except Exception as e:
-                print(f"[WARNING] Failed to update job status: {e}")
+                print(f"[TRAINING-WARNING] Failed to update job status: {e}")
+                sys.stdout.flush()
         
         # Run real PyTorch training
-        print(f"[INFO] Starting real PyTorch training for job {job_id}")
+        print(f"[TRAINING-DEBUG] ========================================")
+        print(f"[TRAINING-DEBUG] CALLING run_full_training...")
+        print(f"[TRAINING-DEBUG] job_id={job_id}")
+        print(f"[TRAINING-DEBUG] dataset_id={job.dataset_id}")
+        print(f"[TRAINING-DEBUG] model_type={job.model_type}")
+        print(f"[TRAINING-DEBUG] ========================================")
+        sys.stdout.flush()
+        
         results = await run_full_training(
             job_id=job_id,
             dataset_id=job.dataset_id,
@@ -364,11 +422,26 @@ async def start_cloud_training(
         db.commit()
         
         import os
+        import sys
         db_url = os.environ.get("DATABASE_URL", "postgresql+psycopg2://lms_user:lms_password@localhost:5432/thoth")
         
-        print(f"[INFO] Starting background training task for job {job_id}")
+        print(f"[TRAINING-DEBUG] ========================================")
+        print(f"[TRAINING-DEBUG] start_cloud_training endpoint called")
+        print(f"[TRAINING-DEBUG] job_id: {job_id}")
+        print(f"[TRAINING-DEBUG] dataset_id: {request.dataset_id}")
+        print(f"[TRAINING-DEBUG] model_type: {request.model_type}")
+        print(f"[TRAINING-DEBUG] use_bayesian_optimization: {request.use_bayesian_optimization}")
+        print(f"[TRAINING-DEBUG] db_url: {db_url[:50]}...")
+        print(f"[TRAINING-DEBUG] background_tasks object: {background_tasks}")
+        print(f"[TRAINING-DEBUG] ========================================")
+        sys.stdout.flush()
+        
+        print(f"[TRAINING-DEBUG] Adding background task...")
+        sys.stdout.flush()
         background_tasks.add_task(run_cloud_training, job_id, db_url)
-        print(f"[INFO] Background task added for job {job_id}")
+        print(f"[TRAINING-DEBUG] Background task ADDED for job {job_id}")
+        print(f"[TRAINING-DEBUG] background_tasks.tasks count: {len(background_tasks.tasks) if hasattr(background_tasks, 'tasks') else 'N/A'}")
+        sys.stdout.flush()
         
         return {
             "success": True,
