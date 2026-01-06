@@ -114,10 +114,24 @@ async def list_datasets(
 # CLOUD TRAINING ENDPOINTS (must be before /{dataset_id} catch-all)
 # ============================================================================
 
-async def run_cloud_training(job_id: str, db_url: str):
+def run_cloud_training(job_id: str, db_url: str):
     """Run real PyTorch training for IMU model in background."""
+    import asyncio
+    
     print(f"[INFO] Background task started for job {job_id}")
     
+    # Create new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(_run_cloud_training_async(job_id, db_url))
+    finally:
+        loop.close()
+
+
+async def _run_cloud_training_async(job_id: str, db_url: str):
+    """Async implementation of cloud training."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from server.ml_training import run_full_training
