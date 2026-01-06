@@ -184,35 +184,58 @@ class IMUDataset(Dataset):
 def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
     """Parse IMU JSON file and extract windows of data.
     
-    Expected JSON format:
-    {
-        "samples": [
-            {"accel_x": float, "accel_y": float, "accel_z": float,
-             "gyro_x": float, "gyro_y": float, "gyro_z": float, "timestamp": int},
-            ...
-        ]
-    }
-    or array format:
-    [
-        {"accel_x": float, ...},
-        ...
-    ]
+    Supports multiple formats:
+    1. Single JSON object with samples array:
+       {"samples": [{"accel_x": float, ...}, ...]}
+    2. JSON array:
+       [{"accel_x": float, ...}, ...]
+    3. JSONL (newline-delimited JSON):
+       {"accel_x": float, ...}
+       {"accel_x": float, ...}
     
     Returns list of windows, each shape (window_size, 6)
     """
     try:
-        data = json.loads(content.decode('utf-8'))
+        text_content = content.decode('utf-8').strip()
+        samples = []
         
-        # Handle different JSON structures
-        if isinstance(data, dict):
-            samples = data.get('samples', data.get('data', []))
-        elif isinstance(data, list):
-            samples = data
-        else:
-            logger.warning(f"Unknown IMU data format: {type(data)}")
-            return []
+        # Try parsing as single JSON first
+        try:
+            data = json.loads(text_content)
+            
+            # Handle different JSON structures
+            if isinstance(data, dict):
+                samples = data.get('samples', data.get('data', []))
+                # If no samples/data key, treat the dict itself as a single sample
+                if not samples and any(k in data for k in ['accel_x', 'ax', 'accel_y', 'ay']):
+                    samples = [data]
+            elif isinstance(data, list):
+                samples = data
+            else:
+                logger.warning(f"Unknown IMU data format: {type(data)}")
+                return []
+        except json.JSONDecodeError:
+            # Try JSONL format (one JSON object per line)
+            logger.info("Trying JSONL format...")
+            lines = text_content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        samples.append(obj)
+                    elif isinstance(obj, list):
+                        samples.extend(obj)
+                except json.JSONDecodeError:
+                    continue
+            
+            if samples:
+                logger.info(f"Parsed {len(samples)} samples from JSONL format")
         
         if not samples:
+            logger.warning("No samples found in IMU file")
             return []
         
         # Extract 6-axis IMU data
@@ -231,6 +254,8 @@ def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
             except (KeyError, TypeError, ValueError) as e:
                 continue
         
+        logger.info(f"Extracted {len(imu_data)} IMU samples")
+        
         if len(imu_data) < window_size:
             logger.warning(f"Not enough samples ({len(imu_data)}) for window size {window_size}")
             return []
@@ -244,13 +269,13 @@ def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
             window = imu_array[start:start + window_size]
             windows.append(window)
         
+        logger.info(f"Created {len(windows)} windows of size {window_size}")
         return windows
         
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse IMU JSON: {e}")
-        return []
     except Exception as e:
         logger.error(f"Error parsing IMU file: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []
 
 
