@@ -127,6 +127,7 @@ def run_cloud_training(job_id: str, db_url: str):
     print(f"[TRAINING-DEBUG] ========================================")
     sys.stdout.flush()
     
+    loop = None
     try:
         # Create new event loop for this thread
         print(f"[TRAINING-DEBUG] Creating new event loop...")
@@ -142,15 +143,37 @@ def run_cloud_training(job_id: str, db_url: str):
         print(f"[TRAINING-DEBUG] run_until_complete finished successfully")
         sys.stdout.flush()
     except Exception as e:
-        print(f"[TRAINING-ERROR] Exception in run_cloud_training: {e}")
-        print(f"[TRAINING-ERROR] Traceback: {traceback.format_exc()}")
+        error_msg = str(e)
+        error_traceback = traceback.format_exc()
+        print(f"[TRAINING-ERROR] Exception in run_cloud_training: {error_msg}")
+        print(f"[TRAINING-ERROR] Traceback: {error_traceback}")
+        sys.stdout.flush()
+        
+        # Mark job as failed in database
+        try:
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+            engine = create_engine(db_url)
+            SessionLocal = sessionmaker(bind=engine)
+            db = SessionLocal()
+            job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+            if job and job.status in ["pending", "running"]:
+                job.status = "failed"
+                job.error_message = f"Training crashed: {error_msg}"
+                job.completed_at = datetime.utcnow()
+                db.commit()
+                print(f"[TRAINING-DEBUG] Job {job_id} marked as failed in database")
+            db.close()
+        except Exception as db_error:
+            print(f"[TRAINING-ERROR] Failed to update job status in DB: {db_error}")
         sys.stdout.flush()
     finally:
-        print(f"[TRAINING-DEBUG] Closing event loop...")
-        sys.stdout.flush()
-        loop.close()
-        print(f"[TRAINING-DEBUG] Event loop closed")
-        sys.stdout.flush()
+        if loop:
+            print(f"[TRAINING-DEBUG] Closing event loop...")
+            sys.stdout.flush()
+            loop.close()
+            print(f"[TRAINING-DEBUG] Event loop closed")
+            sys.stdout.flush()
 
 
 async def _run_cloud_training_async(job_id: str, db_url: str):
