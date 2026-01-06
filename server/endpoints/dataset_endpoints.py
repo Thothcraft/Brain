@@ -115,20 +115,12 @@ async def list_datasets(
 # ============================================================================
 
 async def run_cloud_training(job_id: str, db_url: str):
-    """Run actual cloud training for IMU model in background."""
+    """Run real PyTorch training for IMU model in background."""
     print(f"[INFO] Background task started for job {job_id}")
     
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    
-    # Try to import real ML training module
-    try:
-        from server.ml_training import run_full_training
-        use_real_training = True
-        print(f"[INFO] Using real PyTorch training for job {job_id}")
-    except ImportError as e:
-        print(f"[WARNING] Real training not available, using simulation: {e}")
-        use_real_training = False
+    from server.ml_training import run_full_training
     
     engine = create_engine(db_url)
     SessionLocal = sessionmaker(bind=engine)
@@ -137,6 +129,7 @@ async def run_cloud_training(job_id: str, db_url: str):
     try:
         job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
         if not job:
+            print(f"[ERROR] Job {job_id} not found")
             return
         
         job.status = "running"
@@ -145,244 +138,38 @@ async def run_cloud_training(job_id: str, db_url: str):
         
         config = json.loads(job.config) if job.config else {}
         
-        # Get class names from dataset
-        dataset = db.query(TrainingDataset).filter(TrainingDataset.id == job.dataset_id).first()
-        class_names = list(set(f.label for f in dataset.files)) if dataset and dataset.files else ["walking", "sitting", "standing", "running"]
+        # Define update callback for progress tracking
+        async def update_callback(status, epoch, total, metrics):
+            nonlocal job, db
+            try:
+                job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+                if job:
+                    job.status = status
+                    if epoch > 0:
+                        job.current_epoch = epoch
+                    db.commit()
+            except Exception as e:
+                print(f"[WARNING] Failed to update job status: {e}")
         
-        if use_real_training:
-            # Use real PyTorch training
-            async def update_callback(status, epoch, total, metrics):
-                job.status = status
-                if epoch > 0:
-                    job.current_epoch = epoch
-                db.commit()
-            
-            results = await run_full_training(
-                job_id=job_id,
-                dataset_id=job.dataset_id,
-                model_type=job.model_type,
-                config=config,
-                class_names=class_names,
-                update_callback=update_callback
-            )
-            
-            # Store Bayesian trials if available
-            if results.get('bayesian_trials_data'):
-                config['bayesian_trials_results'] = results['bayesian_trials_data']
-                job.config = json.dumps(config)
-            
-            # Store model bytes
-            model_bytes = results.get('model_bytes')
-        else:
-            # Fallback to simulation
-            import random
-            import asyncio
-            total_epochs = job.total_epochs or 10
-            model_bytes = None
-            
-            # Bayesian Optimization for hyperparameters
-            bayesian_trials_data = []
-            if config.get("use_bayesian_optimization", False):
-                print(f"[INFO] Running Bayesian optimization for job {job_id}")
-                job.status = "optimizing"
-                db.commit()
-                
-                best_lr = config.get("learning_rate", 0.001)
-                best_batch_size = config.get("batch_size", 32)
-                best_val_acc = 0.0
-                best_trial_idx = 0
-                
-                trials = config.get("bayesian_trials", 20)
-                for trial in range(min(trials, 10)):  # Limit to 10 trials for demo
-                    # Sample hyperparameters using Bayesian-like strategy
-                    trial_lr = best_lr * random.uniform(0.5, 2.0) if trial > 0 else best_lr
-                    trial_batch_size = int(best_batch_size * random.choice([0.5, 1.0, 2.0]))
-                    
-                    # Quick validation (simulate 3 epochs with delay)
-                    await asyncio.sleep(3)  # Simulate actual training time
-                    trial_val_acc = 0.60 + random.uniform(0, 0.15) + (0.05 if trial_lr < 0.01 else 0)
-                    trial_val_acc = max(0, min(1.0, trial_val_acc))
-                    trial_train_acc = trial_val_acc + random.uniform(0, 0.05)
-                    trial_train_acc = max(0, min(1.0, trial_train_acc))
-                    
-                    # Store trial data
-                    bayesian_trials_data.append({
-                        "trial": trial + 1,
-                        "learning_rate": round(trial_lr, 6),
-                        "batch_size": trial_batch_size,
-                        "train_accuracy": round(trial_train_acc, 4),
-                        "val_accuracy": round(trial_val_acc, 4),
-                        "is_best": False
-                    })
-                    
-                    if trial_val_acc > best_val_acc:
-                        best_val_acc = trial_val_acc
-                        best_lr = trial_lr
-                        best_batch_size = trial_batch_size
-                        best_trial_idx = trial
-                    
-                    print(f"[INFO] Bayesian trial {trial+1}/{trials}: lr={trial_lr:.6f}, batch={trial_batch_size}, val_acc={trial_val_acc:.4f}")
-                
-                # Mark best trial
-                if bayesian_trials_data:
-                    bayesian_trials_data[best_trial_idx]["is_best"] = True
-                
-                # Update config with optimized hyperparameters
-                config["learning_rate"] = best_lr
-                config["batch_size"] = best_batch_size
-                config["bayesian_trials_results"] = bayesian_trials_data
-                job.config = json.dumps(config)
-                job.status = "running"
-                db.commit()
-                print(f"[INFO] Bayesian optimization complete. Best: lr={best_lr:.6f}, batch={best_batch_size}, trial={best_trial_idx+1}")
-            
-            train_losses = []
-            train_accuracies = []
-            val_losses = []
-            val_accuracies = []
-            
-            for epoch in range(total_epochs):
-                await asyncio.sleep(2)
-                
-                train_loss = 2.0 * (0.9 ** epoch) + random.uniform(0, 0.1)
-                train_acc = min(0.95, 0.60 + epoch * 0.03 + random.uniform(-0.02, 0.02))
-                val_loss = train_loss * 1.1 + random.uniform(-0.05, 0.05)
-                val_acc = train_acc - 0.05 + random.uniform(-0.02, 0.02)
-                
-                train_acc = max(0, min(1.0, train_acc))
-                val_acc = max(0, min(1.0, val_acc))
-                
-                train_losses.append(round(train_loss, 4))
-                train_accuracies.append(round(train_acc, 4))
-                val_losses.append(round(val_loss, 4))
-                val_accuracies.append(round(val_acc, 4))
-                
-                job.current_epoch = epoch + 1
-                job.metrics = json.dumps({
-                    "loss": train_losses,
-                    "accuracy": train_accuracies,
-                    "val_loss": val_losses,
-                    "val_accuracy": val_accuracies
-                })
-                db.commit()
-                
-                print(f"[INFO] Job {job_id} - Epoch {epoch + 1}/{total_epochs}: "
-                      f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc*100:.2f}%, "
-                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc*100:.2f}%")
-            
-            best_val_acc = max(val_accuracies)
-            best_epoch = val_accuracies.index(best_val_acc) + 1
-            
-            # Generate per-class statistics
-            dataset = db.query(TrainingDataset).filter(TrainingDataset.id == job.dataset_id).first()
-            class_names = list(set(f.label for f in dataset.files)) if dataset and dataset.files else [f"Class_{i}" for i in range(3)]
-            num_classes = len(class_names)
-            
-            per_class_metrics = {}
-            confusion_matrix = []
-            roc_curves = {}
-            pr_curves = {}
-            
-            for i, class_name in enumerate(class_names):
-                # Generate realistic per-class metrics
-                base_acc = best_val_acc
-                class_acc = base_acc + random.uniform(-0.05, 0.05)
-                class_acc = max(0, min(1.0, class_acc))
-                
-                precision = round(class_acc + random.uniform(-0.03, 0.03), 4)
-                recall = round(class_acc + random.uniform(-0.03, 0.03), 4)
-                
-                per_class_metrics[class_name] = {
-                    "precision": max(0, min(1.0, precision)),
-                    "recall": max(0, min(1.0, recall)),
-                    "f1_score": round(2 * (precision * recall) / (precision + recall + 0.0001), 4),
-                    "support": random.randint(50, 200)
-                }
-                
-                # Generate ROC curve data (FPR, TPR points)
-                roc_points = []
-                for threshold in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
-                    fpr = round((1 - threshold) * (1 - class_acc) + random.uniform(-0.05, 0.05), 4)
-                    tpr = round(threshold * class_acc + (1 - threshold) * 0.5 + random.uniform(-0.05, 0.05), 4)
-                    fpr = max(0, min(1.0, fpr))
-                    tpr = max(0, min(1.0, tpr))
-                    roc_points.append({"fpr": fpr, "tpr": tpr})
-                
-                # Calculate AUC (approximate)
-                auc = round(class_acc + random.uniform(-0.05, 0.05), 4)
-                auc = max(0, min(1.0, auc))
-                roc_curves[class_name] = {"points": roc_points, "auc": auc}
-                
-                # Generate Precision-Recall curve data
-                pr_points = []
-                for threshold in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
-                    p = round(precision + random.uniform(-0.1, 0.1), 4)
-                    r = round(recall * (1 - threshold * 0.3) + random.uniform(-0.05, 0.05), 4)
-                    p = max(0, min(1.0, p))
-                    r = max(0, min(1.0, r))
-                    pr_points.append({"precision": p, "recall": r})
-                pr_curves[class_name] = {"points": pr_points}
-                
-                # Generate confusion matrix row
-                row = [0] * num_classes
-                total_samples = per_class_metrics[class_name]["support"]
-                correct = int(total_samples * class_acc)
-                row[i] = correct
-                remaining = total_samples - correct
-                for j in range(num_classes):
-                    if j != i and remaining > 0:
-                        row[j] = random.randint(0, remaining // (num_classes - 1))
-                        remaining -= row[j]
-                if remaining > 0:
-                    row[(i + 1) % num_classes] += remaining
-                confusion_matrix.append(row)
-            
-            test_results = None
-            if job.test_dataset_id:
-                print(f"[INFO] Evaluating on test dataset {job.test_dataset_id}")
-                test_loss = val_losses[-1] * 1.05 + random.uniform(-0.02, 0.02)
-                test_acc = best_val_acc - 0.03 + random.uniform(-0.01, 0.01)
-                test_acc = max(0, min(1.0, test_acc))
-                
-                test_results = {
-                    "test_loss": round(test_loss, 4),
-                    "test_accuracy": round(test_acc, 4),
-                    "test_dataset_id": job.test_dataset_id
-                }
-                print(f"[INFO] Test Results - Loss: {test_loss:.4f}, Accuracy: {test_acc*100:.2f}%")
-            
-            # Generate model architecture summary
-            model_architecture = {
-                "layers": [
-                    {"type": "Input", "shape": f"({random.choice([64, 128, 256])},)", "params": 0},
-                    {"type": "Dense", "units": 128, "activation": "relu", "params": random.randint(8000, 16000)},
-                    {"type": "Dropout", "rate": 0.3, "params": 0},
-                    {"type": "Dense", "units": 64, "activation": "relu", "params": random.randint(4000, 8000)},
-                    {"type": "Dropout", "rate": 0.2, "params": 0},
-                    {"type": "Dense", "units": num_classes, "activation": "softmax", "params": random.randint(100, 500)}
-                ],
-                "total_params": random.randint(15000, 30000),
-                "trainable_params": random.randint(15000, 30000),
-                "optimizer": config.get("optimizer", "adam"),
-                "learning_rate": config.get("learning_rate", 0.001),
-                "batch_size": config.get("batch_size", 32)
-            }
-            
-            results = {
-                "train_losses": train_losses,
-                "train_accuracies": train_accuracies,
-                "val_losses": val_losses,
-                "val_accuracies": val_accuracies,
-                "best_val_accuracy": best_val_acc,
-                "best_epoch": best_epoch,
-                "per_class_metrics": per_class_metrics,
-                "confusion_matrix": confusion_matrix,
-                "class_names": class_names,
-                "roc_curves": roc_curves,
-                "pr_curves": pr_curves,
-                "model_architecture": model_architecture,
-                "test_results": test_results
-            }
+        # Run real PyTorch training
+        print(f"[INFO] Starting real PyTorch training for job {job_id}")
+        results = await run_full_training(
+            job_id=job_id,
+            dataset_id=job.dataset_id,
+            db_session=db,
+            model_type=job.model_type,
+            config=config,
+            update_callback=update_callback
+        )
+        
+        # Store Bayesian trials if available
+        if results.get('bayesian_trials_data'):
+            config['bayesian_trials_results'] = results['bayesian_trials_data']
+            job.config = json.dumps(config)
+        
+        # Store model bytes
+        model_bytes = results.get('model_bytes')
+        class_names = results.get('class_names', [])
         
         job.metrics = json.dumps({
             "loss": results["train_losses"],
@@ -453,46 +240,13 @@ async def run_cloud_training(job_id: str, db_url: str):
             # Use custom name from config if provided
             model_name = config.get("model_name") or f"{job.model_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
             
-            # Get model bytes (real weights or generate synthetic)
-            actual_model_bytes = None
-            actual_size_bytes = 0
+            # Get real model bytes from training
+            if not model_bytes:
+                raise ValueError("No model weights returned from training")
             
-            if 'model_bytes' in dir() and model_bytes:
-                # Real model weights from PyTorch training
-                actual_model_bytes = model_bytes
-                actual_size_bytes = len(model_bytes)
-                print(f"[INFO] Saving real model weights: {actual_size_bytes} bytes")
-            else:
-                # Generate synthetic model weights for simulation
-                import struct
-                import io
-                
-                # Create a realistic-sized model file (~2-10 MB)
-                model_architecture = results.get("model_architecture", {})
-                total_params = model_architecture.get("total_params", 50000)
-                
-                # Each parameter is a 32-bit float (4 bytes)
-                buffer = io.BytesIO()
-                
-                # Write header
-                buffer.write(b'THOTH_MODEL_V1\x00\x00')  # 16 bytes header
-                buffer.write(struct.pack('I', total_params))  # num params
-                buffer.write(struct.pack('I', len(class_names)))  # num classes
-                buffer.write(struct.pack('f', results["best_val_accuracy"]))  # accuracy
-                
-                # Write random weights (simulating trained parameters)
-                import numpy as np
-                weights = np.random.randn(total_params).astype(np.float32)
-                buffer.write(weights.tobytes())
-                
-                # Write class names
-                for name in class_names:
-                    name_bytes = name.encode('utf-8')[:32].ljust(32, b'\x00')
-                    buffer.write(name_bytes)
-                
-                actual_model_bytes = buffer.getvalue()
-                actual_size_bytes = len(actual_model_bytes)
-                print(f"[INFO] Generated synthetic model weights: {actual_size_bytes} bytes ({total_params} params)")
+            actual_model_bytes = model_bytes
+            actual_size_bytes = len(model_bytes)
+            print(f"[INFO] Saving real model weights: {actual_size_bytes} bytes")
             
             trained_model = TrainedModel(
                 user_id=job.user_id,

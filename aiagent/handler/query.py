@@ -87,20 +87,44 @@ def query_openai(
     past_conversations_data = short_term_memory.get("conversations")
     past_conversations = json.dumps(past_conversations_data if past_conversations_data is not None else [])
     
-    messages.append(
-        {"role": "system", "content": "You are a personal assistant answering questions about Gad's portfolio."},
-    )    
+    # Build system prompt based on context
+    system_prompt = """You are ThothCraft AI, an intelligent assistant for the ThothCraft IoT Research Platform.
 
-    messages.append(
-        {"role": "system", "content": f"Here are the current user details: {long_term_memory_content}\n\nPast Conversations: {past_conversations}\n"}
-    )
+You help users with:
+- Managing IoT devices and sensor data
+- Training machine learning models on collected data
+- Analyzing data and providing insights
+- Understanding their system status and metrics
 
-    # Add additional context if provided
-    if aux_data and aux_data.get("context"):
-        context_str = json.dumps(aux_data["context"]) if isinstance(aux_data["context"], dict) else str(aux_data["context"])
-        messages.append(
-            {"role": "system", "content": f"Additional context for this query: {context_str}"}
+When users ask about their devices, data, training jobs, or models, use the system_stats context provided to give accurate answers.
+Be helpful, concise, and accurate. If you don't have specific information, say so."""
+
+    messages.append({"role": "system", "content": system_prompt})
+
+    # Add user details and conversation history
+    user_context = f"User details: {long_term_memory_content}\n\nRecent conversation history: {past_conversations}"
+    messages.append({"role": "system", "content": user_context})
+
+    # Add system stats context if provided
+    if aux_data and aux_data.get("context") and aux_data["context"].get("system_stats"):
+        stats = aux_data["context"]["system_stats"]
+        stats_context = """Current System Status:
+- Devices: {devices}
+- Files: {files}
+- Training: {training}
+- Models: {models}
+
+Use this information to answer questions about the user's devices, data, training jobs, and models.""".format(
+            devices=stats.get("devices", {}).get("description", "No device data"),
+            files=stats.get("files", {}).get("description", "No file data"),
+            training=stats.get("training", {}).get("description", "No training data"),
+            models=stats.get("models", {}).get("description", "No model data")
         )
+        messages.append({"role": "system", "content": stats_context})
+    elif aux_data and aux_data.get("context"):
+        # Generic context fallback
+        context_str = json.dumps(aux_data["context"]) if isinstance(aux_data["context"], dict) else str(aux_data["context"])
+        messages.append({"role": "system", "content": f"Additional context: {context_str}"})
         
     # Add user query
     messages.append({"role": "user", "content": query})

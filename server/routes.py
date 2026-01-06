@@ -30,6 +30,7 @@ from server.endpoints.training_endpoints import router as training_router
 from server.endpoints.curriculum_endpoints import router as curriculum_router
 from server.endpoints.dataset_endpoints import router as dataset_router
 from server.endpoints.processing_endpoints import router as processing_router
+from server.endpoints.activity_endpoints import router as activity_router
 
 # Create main router
 router = APIRouter()
@@ -48,6 +49,7 @@ router.include_router(training_router)    # /training/*, /federated/* (ML traini
 router.include_router(curriculum_router)  # /curriculum/* (Education content)
 router.include_router(dataset_router)     # /datasets/* (Training datasets and cloud training)
 router.include_router(processing_router)  # /processing/* (Data processing pipelines)
+router.include_router(activity_router)    # /activity/* (Activity feed and stats)
 
 # ============================================================================
 # MODULAR ENDPOINTS LOADED
