@@ -933,6 +933,39 @@ async def run_full_training(
     
     logger.info(f"Model created: {model.get_architecture_summary()['total_params']} parameters")
     
+    # Import TrainingJob for progress updates
+    from server.db import TrainingJob
+    import json as json_module
+    
+    # Track metrics for real-time updates
+    running_metrics = {
+        'loss': [],
+        'accuracy': [],
+        'val_loss': [],
+        'val_accuracy': []
+    }
+    
+    # Create a callback to log epoch progress and update database
+    def epoch_callback(epoch, total_epochs, train_loss, train_acc, val_loss, val_acc):
+        logger.info(f"Epoch {epoch}/{total_epochs}: train_loss={train_loss:.4f}, train_acc={train_acc:.4f}, val_loss={val_loss:.4f}, val_acc={val_acc:.4f}")
+        
+        # Update running metrics
+        running_metrics['loss'].append(round(train_loss, 4))
+        running_metrics['accuracy'].append(round(train_acc, 4))
+        running_metrics['val_loss'].append(round(val_loss, 4))
+        running_metrics['val_accuracy'].append(round(val_acc, 4))
+        
+        # Update job progress in database
+        try:
+            job = db_session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+            if job:
+                job.current_epoch = epoch
+                job.metrics = json_module.dumps(running_metrics)
+                db_session.commit()
+                logger.info(f"Updated job {job_id} progress: epoch {epoch}/{total_epochs}")
+        except Exception as e:
+            logger.warning(f"Failed to update job progress: {e}")
+    
     # Train model in thread pool
     def sync_train():
         return train_model(
@@ -941,8 +974,11 @@ async def run_full_training(
             val_loader=val_loader,
             num_epochs=config.get('epochs', 10),
             learning_rate=config.get('learning_rate', 0.001),
-            device=device
+            device=device,
+            callback=epoch_callback
         )
+    
+    logger.info(f"Starting training for {config.get('epochs', 10)} epochs...")
     
     # Run training in thread pool to not block async
     loop = asyncio.get_event_loop()
