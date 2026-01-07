@@ -148,7 +148,9 @@ def start_scheduler():
             trigger=IntervalTrigger(seconds=30),
             id='auto_disconnect_job',
             name='Auto disconnect stale devices',
-            replace_existing=True
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True  # Combine missed runs into one
         )
         
         scheduler.start()
