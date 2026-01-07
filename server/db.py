@@ -29,14 +29,28 @@ print(f"[DB] Using DATABASE_URL: {DATABASE_URL}")
 
 # SQLAlchemy setup
 Base = declarative_base()
+
+# Configure engine with connection pooling optimized for Supabase/cloud PostgreSQL
+# - pool_pre_ping: Test connections before use to detect stale connections
+# - pool_recycle: Recycle connections after 300 seconds to prevent SSL timeouts
+# - pool_size: Keep pool small to avoid connection limits
+# - connect_args: Set connection timeout and keepalives
 engine = create_engine(
     DATABASE_URL,
-    pool_size=20,
-    max_overflow=30,
-    pool_timeout=60,
-    pool_pre_ping=True
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_pre_ping=True,
+    pool_recycle=300,  # Recycle connections every 5 minutes
+    connect_args={
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5
+    }
 )
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 def get_db():
     """Dependency to get database session."""
