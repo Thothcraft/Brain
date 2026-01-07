@@ -89,8 +89,9 @@ def send_status(message: str = "", to_phone_number: str = ""):
 
 def auto_disconnect_stale_devices():
     """Mark devices as offline if they haven't sent a heartbeat recently."""
-    db = SessionLocal()
+    db = None
     try:
+        db = SessionLocal()
         # Check for devices that haven't been seen in the last 5 minutes
         stale_time = datetime.utcnow() - timedelta(minutes=5)
         
@@ -117,10 +118,18 @@ def auto_disconnect_stale_devices():
         
     except Exception as e:
         logger.error(f"Error in auto_disconnect_stale_devices: {e}")
-        db.rollback()
+        if db:
+            try:
+                db.rollback()
+            except:
+                pass
         return 0
     finally:
-        db.close()
+        if db:
+            try:
+                db.close()
+            except:
+                pass
 
 
 def start_scheduler():

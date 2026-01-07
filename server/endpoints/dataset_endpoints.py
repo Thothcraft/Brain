@@ -55,8 +55,20 @@ class CloudTrainingRequest(BaseModel):
     learning_rate: float = 0.001
     validation_split: float = 0.2
     model_name: Optional[str] = None
+    window_size: int = 128  # Window size for time series data
+    # Bayesian optimization settings
     use_bayesian_optimization: bool = False
     bayesian_trials: int = 20
+    bayesian_epochs_per_trial: int = 3
+    bayesian_lr_min: float = 0.00001
+    bayesian_lr_max: float = 0.01
+    bayesian_lr_scale: str = "log"  # 'log' or 'linear'
+    bayesian_batch_sizes: List[int] = [16, 32, 64, 128]
+    bayesian_weight_decay_min: float = 0.0
+    bayesian_weight_decay_max: float = 0.01
+    bayesian_optimizers: List[str] = ["adam", "adamw", "sgd"]
+    bayesian_exploration_rate: float = 0.3
+    bayesian_search_architecture: bool = False  # Whether to search architecture sizes
 
 
 # ============================================================================
@@ -424,10 +436,22 @@ async def start_cloud_training(
             "learning_rate": request.learning_rate,
             "validation_split": request.validation_split,
             "model_name": request.model_name,
+            "window_size": request.window_size,
             "num_classes": len(labels),
             "labels": list(labels),
+            # Bayesian optimization settings
             "use_bayesian_optimization": request.use_bayesian_optimization,
-            "bayesian_trials": request.bayesian_trials
+            "bayesian_trials": request.bayesian_trials,
+            "bayesian_epochs_per_trial": request.bayesian_epochs_per_trial,
+            "bayesian_lr_min": request.bayesian_lr_min,
+            "bayesian_lr_max": request.bayesian_lr_max,
+            "bayesian_lr_scale": request.bayesian_lr_scale,
+            "bayesian_batch_sizes": request.bayesian_batch_sizes,
+            "bayesian_weight_decay_min": request.bayesian_weight_decay_min,
+            "bayesian_weight_decay_max": request.bayesian_weight_decay_max,
+            "bayesian_optimizers": request.bayesian_optimizers,
+            "bayesian_exploration_rate": request.bayesian_exploration_rate,
+            "bayesian_search_architecture": request.bayesian_search_architecture
         }
         
         job = TrainingJob(
