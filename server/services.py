@@ -89,9 +89,20 @@ def send_status(message: str = "", to_phone_number: str = ""):
 
 def auto_disconnect_stale_devices():
     """Mark devices as offline if they haven't sent a heartbeat recently."""
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError, DBAPIError
+    
     db = None
     try:
         db = SessionLocal()
+        
+        # Quick connection test with timeout
+        try:
+            db.execute(text("SELECT 1"))
+        except (OperationalError, DBAPIError) as conn_err:
+            logger.warning(f"Database connection test failed, skipping this run: {conn_err}")
+            return 0
+        
         # Check for devices that haven't been seen in the last 5 minutes
         stale_time = datetime.utcnow() - timedelta(minutes=5)
         
@@ -114,8 +125,16 @@ def auto_disconnect_stale_devices():
             db.commit()
             logger.info(f"Marked {len(stale_devices)} devices as offline")
         
-        return len(stale_devices)
+        return len(stale_devices) if stale_devices else 0
         
+    except (OperationalError, DBAPIError) as db_err:
+        logger.warning(f"Database error in auto_disconnect_stale_devices (will retry): {db_err}")
+        if db:
+            try:
+                db.rollback()
+            except:
+                pass
+        return 0
     except Exception as e:
         logger.error(f"Error in auto_disconnect_stale_devices: {e}")
         if db:

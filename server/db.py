@@ -32,22 +32,22 @@ Base = declarative_base()
 
 # Configure engine with connection pooling optimized for Supabase/cloud PostgreSQL
 # - pool_pre_ping: Test connections before use to detect stale connections
-# - pool_recycle: Recycle connections after 300 seconds to prevent SSL timeouts
+# - pool_recycle: Recycle connections frequently to prevent SSL timeouts
 # - pool_size: Keep pool small to avoid connection limits
 # - connect_args: Set connection timeout and keepalives
 engine = create_engine(
     DATABASE_URL,
-    pool_size=5,
-    max_overflow=10,
-    pool_timeout=30,
+    pool_size=3,
+    max_overflow=7,
+    pool_timeout=20,
     pool_pre_ping=True,
-    pool_recycle=300,  # Recycle connections every 5 minutes
+    pool_recycle=60,  # Recycle connections every 60 seconds (aggressive for Supabase)
     connect_args={
-        "connect_timeout": 10,
+        "connect_timeout": 5,
         "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5
+        "keepalives_idle": 10,
+        "keepalives_interval": 5,
+        "keepalives_count": 3
     }
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
