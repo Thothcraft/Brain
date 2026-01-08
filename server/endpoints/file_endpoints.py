@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request, status, UploadFile, File as FastAPIFile, Form
 from sqlalchemy.orm import Session
 
 from server.db import get_db
@@ -266,6 +266,103 @@ async def upload_file_simple(
         log_error(f"Error uploading file: {str(e)}\n{error_details}")
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
+
+@router.post("/upload-multipart", response_model=FileUploadResponse)
+async def upload_file_multipart(
+    file: UploadFile = FastAPIFile(...),
+    device_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    fastapi_request: Request = None
+) -> Dict[str, Any]:
+    """Upload a file using multipart form data.
+    
+    Purpose: Store files uploaded from web browser with progress support
+    
+    Args:
+        file: The uploaded file (multipart form data)
+        device_id: Optional device identifier
+        
+    Returns:
+        FileUploadResponse: Upload confirmation with file_id and size
+    """
+    try:
+        log_request_start(
+            "/file/upload-multipart", 
+            "POST", 
+            fastapi_request, 
+            remote_addr=None, 
+            user_id=current_user.userId
+        )
+        
+        # Read file content
+        content_bytes = await file.read()
+        filename = file.filename or "unnamed_file"
+        
+        # Basic security check on filename
+        if '..' in filename or '/' in filename or '\\' in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename - no path separators allowed")
+        
+        # Check for dangerous extensions
+        dangerous_extensions = ['.exe', '.bat', '.cmd', '.scr', '.pif', '.com']
+        if any(filename.lower().endswith(ext) for ext in dangerous_extensions):
+            raise HTTPException(status_code=400, detail="File type not allowed")
+        
+        # Check file size (limit to 100MB for multipart uploads)
+        if len(content_bytes) > 104_857_600:  # 100MB
+            raise HTTPException(status_code=413, detail="File too large (max 100MB)")
+        
+        # Generate unique filename
+        timestamp = int(time.time())
+        if device_id:
+            unique_filename = f"file_{device_id}_{timestamp}_{filename}"
+        else:
+            unique_filename = f"file_user_{timestamp}_{filename}"
+        
+        # Determine content type
+        content_type = file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        
+        # Create file metadata
+        file_metadata = {
+            "original_filename": filename,
+            "content_type": content_type,
+            "upload_timestamp": datetime.now().isoformat(),
+            "device_id": device_id,
+            "user_id": current_user.userId,
+            "upload_method": "multipart"
+        }
+        
+        # Save file
+        db_file = File(
+            userId=current_user.userId,
+            filename=unique_filename,
+            content=content_bytes,
+            size=len(content_bytes),
+            content_type=content_type,
+            uploaded_at=datetime.now(),
+            file_hash=json.dumps(file_metadata)
+        )
+        db.add(db_file)
+        db.commit()
+        db.refresh(db_file)
+        
+        log_response(200, f"File uploaded (multipart): {filename} ({len(content_bytes)} bytes)", "/file/upload-multipart")
+        return {
+            "success": True,
+            "file_id": db_file.fileId,
+            "filename": filename,
+            "size": len(content_bytes),
+            "message": "File uploaded successfully"
+        }
+        
+    except HTTPException as he:
+        log_error(f"HTTPException in multipart file upload: {str(he.detail)}")
+        raise
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        log_error(f"Error uploading file (multipart): {str(e)}\n{error_details}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
 
 @router.get("/{file_id}")
