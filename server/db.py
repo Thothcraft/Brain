@@ -39,15 +39,16 @@ engine = create_engine(
     DATABASE_URL,
     pool_size=3,
     max_overflow=7,
-    pool_timeout=20,
+    pool_timeout=30,
     pool_pre_ping=True,
-    pool_recycle=60,  # Recycle connections every 60 seconds (aggressive for Supabase)
+    pool_recycle=300,  # Recycle connections every 5 minutes
     connect_args={
-        "connect_timeout": 5,
+        "connect_timeout": 30,  # Increased for large file uploads
         "keepalives": 1,
-        "keepalives_idle": 10,
-        "keepalives_interval": 5,
-        "keepalives_count": 3
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+        "options": "-c statement_timeout=120000"  # 2 minute statement timeout
     }
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

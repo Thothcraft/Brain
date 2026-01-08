@@ -286,6 +286,9 @@ async def upload_file_multipart(
     Returns:
         FileUploadResponse: Upload confirmation with file_id and size
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
         log_request_start(
             "/file/upload-multipart", 
@@ -295,9 +298,8 @@ async def upload_file_multipart(
             user_id=current_user.userId
         )
         
-        # Read file content
-        content_bytes = await file.read()
         filename = file.filename or "unnamed_file"
+        logger.info(f"Starting multipart upload: {filename}")
         
         # Basic security check on filename
         if '..' in filename or '/' in filename or '\\' in filename:
@@ -308,9 +310,23 @@ async def upload_file_multipart(
         if any(filename.lower().endswith(ext) for ext in dangerous_extensions):
             raise HTTPException(status_code=400, detail="File type not allowed")
         
-        # Check file size (limit to 100MB for multipart uploads)
-        if len(content_bytes) > 104_857_600:  # 100MB
-            raise HTTPException(status_code=413, detail="File too large (max 100MB)")
+        # Read file content in chunks to avoid memory issues
+        logger.info(f"Reading file content: {filename}")
+        chunks = []
+        total_size = 0
+        chunk_size = 1024 * 1024  # 1MB chunks
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total_size += len(chunk)
+            # Check size limit during read
+            if total_size > 104_857_600:  # 100MB
+                raise HTTPException(status_code=413, detail="File too large (max 100MB)")
+        
+        content_bytes = b''.join(chunks)
+        logger.info(f"File read complete: {filename} ({len(content_bytes)} bytes)")
         
         # Generate unique filename
         timestamp = int(time.time())
@@ -332,7 +348,8 @@ async def upload_file_multipart(
             "upload_method": "multipart"
         }
         
-        # Save file
+        # Save file to database
+        logger.info(f"Saving to database: {filename}")
         db_file = File(
             userId=current_user.userId,
             filename=unique_filename,
@@ -343,7 +360,15 @@ async def upload_file_multipart(
             file_hash=json.dumps(file_metadata)
         )
         db.add(db_file)
-        db.commit()
+        
+        try:
+            db.commit()
+            logger.info(f"Database commit successful: {filename}")
+        except Exception as db_error:
+            db.rollback()
+            logger.error(f"Database commit failed: {db_error}")
+            raise HTTPException(status_code=500, detail=f"Database error: {str(db_error)}")
+        
         db.refresh(db_file)
         
         log_response(200, f"File uploaded (multipart): {filename} ({len(content_bytes)} bytes)", "/file/upload-multipart")
