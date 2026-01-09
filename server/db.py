@@ -37,18 +37,18 @@ Base = declarative_base()
 # - connect_args: Set connection timeout and keepalives
 engine = create_engine(
     DATABASE_URL,
-    pool_size=3,
-    max_overflow=7,
-    pool_timeout=30,
+    pool_size=10,  # Increased base connections
+    max_overflow=20,  # Increased overflow for parallel requests
+    pool_timeout=60,  # Increased timeout
     pool_pre_ping=True,
-    pool_recycle=300,  # Recycle connections every 5 minutes
+    pool_recycle=600,  # Recycle connections every 10 minutes
     connect_args={
-        "connect_timeout": 30,  # Increased for large file uploads
+        "connect_timeout": 60,  # Increased for large file uploads
         "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5,
-        "options": "-c statement_timeout=120000"  # 2 minute statement timeout
+        "keepalives_idle": 60,
+        "keepalives_interval": 30,
+        "keepalives_count": 10,
+        "options": "-c statement_timeout=300000"  # 5 minute statement timeout
     }
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

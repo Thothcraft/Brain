@@ -632,6 +632,7 @@ async def list_trained_models(
 ):
     """List all trained models for the current user."""
     try:
+        # Only select necessary columns, exclude model_data to avoid loading large binaries
         from sqlalchemy import text
         try:
             db.execute(text("""
@@ -653,14 +654,40 @@ async def list_trained_models(
         except Exception as table_error:
             print(f"[WARNING] Could not ensure trained_model table exists: {table_error}")
         
-        models = db.query(TrainedModel).filter(
+        # Query only necessary columns, exclude model_data
+        models = db.query(
+            TrainedModel.id,
+            TrainedModel.job_id,
+            TrainedModel.name,
+            TrainedModel.architecture,
+            TrainedModel.accuracy,
+            TrainedModel.size_bytes,
+            TrainedModel.config,
+            TrainedModel.is_pinned,
+            TrainedModel.created_at
+        ).filter(
             TrainedModel.user_id == current_user.userId
         ).order_by(TrainedModel.created_at.desc()).all()
         
+        # Convert to dict manually since we're not loading the full model
+        model_list = []
+        for m in models:
+            model_list.append({
+                "id": m.id,
+                "job_id": m.job_id,
+                "name": m.name,
+                "architecture": m.architecture,
+                "accuracy": m.accuracy,
+                "size_bytes": m.size_bytes,
+                "config": m.config,
+                "is_pinned": m.is_pinned,
+                "created_at": m.created_at.isoformat() if m.created_at else None
+            })
+        
         return {
             "success": True,
-            "models": [m.to_dict() for m in models],
-            "total": len(models)
+            "models": model_list,
+            "total": len(model_list)
         }
     except Exception as e:
         print(f"[ERROR] Failed to list models: {str(e)}")
