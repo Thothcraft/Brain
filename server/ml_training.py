@@ -18,12 +18,25 @@ from torch.utils.data import DataLoader, TensorDataset, Dataset
 import numpy as np
 import io
 import json
+import pickle
+import traceback
+import sys
 from typing import Dict, List, Any, Optional, Tuple, Callable
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support, roc_curve, auc, precision_recall_curve
-from sklearn.preprocessing import label_binarize
+from sklearn.preprocessing import label_binarize, StandardScaler
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Configure detailed logging for debugging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
 
 
 # ============================================================================
@@ -741,6 +754,172 @@ def load_model_from_bytes(model_bytes: bytes) -> Tuple[Dict, Dict]:
     return checkpoint['model_state_dict'], checkpoint.get('config', {})
 
 
+async def train_ml_model(
+    job_id: str,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    class_names: List[str],
+    model_type: str,
+    config: Dict[str, Any],
+    db_session,
+    update_callback: Optional[Callable] = None
+) -> Dict[str, Any]:
+    """Train traditional ML model (AdaBoost, KNN, SVC).
+    
+    Args:
+        job_id: Job identifier
+        X_train, y_train: Training data
+        X_val, y_val: Validation data
+        class_names: List of class names
+        model_type: 'adaboost', 'knn', or 'svc'
+        config: Model configuration
+        db_session: Database session
+        update_callback: Progress callback
+        
+    Returns:
+        Training results dictionary
+    """
+    import asyncio
+    from server.ml_models import MLModelWrapper, get_default_ml_config
+    
+    logger.info("="*80)
+    logger.info(f"ML MODEL TRAINING: {model_type}")
+    logger.info("="*80)
+    
+    try:
+        # Get model-specific config
+        ml_config = get_default_ml_config(model_type)
+        ml_config.update(config.get('ml_params', {}))
+        
+        logger.info(f"ML Config: {ml_config}")
+        
+        # Create ML model wrapper
+        logger.debug("Creating ML model wrapper...")
+        model_wrapper = MLModelWrapper(model_type, ml_config)
+        logger.info(f"✓ {model_type} model initialized")
+        
+        # Train model in thread pool
+        logger.info("Starting ML model training...")
+        loop = asyncio.get_event_loop()
+        
+        def sync_train():
+            return model_wrapper.fit(X_train, y_train, X_val, y_val)
+        
+        metrics = await loop.run_in_executor(None, sync_train)
+        logger.info(f"✓ Training complete")
+        logger.info(f"  Train accuracy: {metrics['train_accuracy']:.4f}")
+        if 'val_accuracy' in metrics:
+            logger.info(f"  Val accuracy: {metrics['val_accuracy']:.4f}")
+        
+        # Compute detailed metrics
+        logger.info("Computing detailed metrics...")
+        
+        def compute_ml_metrics():
+            val_preds = model_wrapper.predict(X_val)
+            val_probs = model_wrapper.predict_proba(X_val)
+            
+            return compute_metrics_from_predictions(
+                y_val, val_preds, val_probs, class_names
+            )
+        
+        detailed_metrics = await loop.run_in_executor(None, compute_ml_metrics)
+        logger.info(f"✓ Metrics computed")
+        
+        # Save model
+        logger.info("Serializing model...")
+        model_bytes = model_wrapper.save_to_bytes()
+        logger.info(f"✓ Model saved: {len(model_bytes)} bytes")
+        
+        # Get model info
+        model_info = model_wrapper.get_model_info()
+        
+        return {
+            'train_accuracies': [metrics['train_accuracy']],
+            'val_accuracies': [metrics.get('val_accuracy', 0.0)],
+            'train_losses': [0.0],  # ML models don't have loss
+            'val_losses': [0.0],
+            'best_val_accuracy': metrics.get('val_accuracy', metrics['train_accuracy']),
+            'best_epoch': 1,
+            'per_class_metrics': detailed_metrics['per_class_metrics'],
+            'confusion_matrix': detailed_metrics['confusion_matrix'],
+            'class_names': class_names,
+            'roc_curves': detailed_metrics['roc_curves'],
+            'pr_curves': detailed_metrics['pr_curves'],
+            'model_architecture': model_info,
+            'model_bytes': model_bytes,
+            'bayesian_trials_data': [],
+            'bayesian_config': None,
+            'num_train_samples': len(X_train),
+            'num_val_samples': len(X_val),
+            'model_type': model_type
+        }
+        
+    except Exception as e:
+        logger.error(f"✗ ML MODEL TRAINING FAILED")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        logger.error(f"Traceback:")
+        logger.error(traceback.format_exc())
+        raise RuntimeError(f"ML model training failed: {e}") from e
+
+
+def compute_metrics_from_predictions(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_probs: np.ndarray,
+    class_names: List[str]
+) -> Dict[str, Any]:
+    """Compute metrics from predictions (for ML models)."""
+    num_classes = len(class_names)
+    
+    # Confusion matrix
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
+    
+    # Per-class metrics
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true, y_pred, labels=list(range(num_classes)), zero_division=0
+    )
+    
+    per_class_metrics = {}
+    for i, class_name in enumerate(class_names):
+        per_class_metrics[class_name] = {
+            'precision': round(float(precision[i]), 4),
+            'recall': round(float(recall[i]), 4),
+            'f1_score': round(float(f1[i]), 4),
+            'support': int(support[i])
+        }
+    
+    # ROC curves
+    roc_curves = {}
+    pr_curves = {}
+    
+    y_bin = label_binarize(y_true, classes=list(range(num_classes)))
+    if num_classes == 2:
+        y_bin = np.hstack([1 - y_bin, y_bin])
+    
+    for i, class_name in enumerate(class_names):
+        fpr, tpr, _ = roc_curve(y_bin[:, i], y_probs[:, i])
+        roc_auc = auc(fpr, tpr)
+        
+        indices = np.linspace(0, len(fpr) - 1, min(20, len(fpr)), dtype=int)
+        roc_points = [{'fpr': round(float(fpr[j]), 4), 'tpr': round(float(tpr[j]), 4)} for j in indices]
+        roc_curves[class_name] = {'points': roc_points, 'auc': round(float(roc_auc), 4)}
+        
+        prec, rec, _ = precision_recall_curve(y_bin[:, i], y_probs[:, i])
+        indices = np.linspace(0, len(prec) - 1, min(20, len(prec)), dtype=int)
+        pr_points = [{'precision': round(float(prec[j]), 4), 'recall': round(float(rec[j]), 4)} for j in indices]
+        pr_curves[class_name] = {'points': pr_points}
+    
+    return {
+        'confusion_matrix': cm.tolist(),
+        'per_class_metrics': per_class_metrics,
+        'roc_curves': roc_curves,
+        'pr_curves': pr_curves
+    }
+
+
 def compute_metrics(
     model: nn.Module,
     data_loader: DataLoader,
@@ -833,12 +1012,14 @@ async def run_full_training(
 ) -> Dict[str, Any]:
     """Run full training pipeline with real data from database.
     
+    Supports both DL models (CNN-LSTM) and ML models (AdaBoost, KNN, SVC).
+    
     Args:
         job_id: Unique job identifier
         dataset_id: ID of the training dataset
         db_session: SQLAlchemy database session
-        model_type: Type of model to train
-        config: Training configuration
+        model_type: Type of model - 'dl_cnn_lstm', 'adaboost', 'knn', 'svc'
+        config: Training configuration with model-specific parameters
         update_callback: Async callback for progress updates
         
     Returns:
@@ -846,8 +1027,24 @@ async def run_full_training(
     """
     import asyncio
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    logger.info(f"Starting training job {job_id} on device: {device}")
+    logger.info("="*80)
+    logger.info(f"TRAINING JOB START: {job_id}")
+    logger.info(f"Model Type: {model_type}")
+    logger.info(f"Dataset ID: {dataset_id}")
+    logger.info(f"Config: {config}")
+    logger.info("="*80)
+    
+    try:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        logger.info(f"Device: {device} (CUDA available: {torch.cuda.is_available()})")
+        
+        if torch.cuda.is_available():
+            logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
+            logger.info(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    except Exception as e:
+        logger.error(f"Error checking device: {e}")
+        logger.error(traceback.format_exc())
+        device = 'cpu'
     
     # Get window size from config (default 128)
     window_size = config.get('window_size', 128)
@@ -855,83 +1052,164 @@ async def run_full_training(
     validation_split = config.get('validation_split', 0.2)
     
     # Load real data from database
-    logger.info(f"Loading dataset {dataset_id} from database...")
-    X, y, class_names = load_dataset_from_db(db_session, dataset_id, window_size)
-    num_classes = len(class_names)
-    
-    logger.info(f"Loaded {len(X)} samples with {num_classes} classes: {class_names}")
-    logger.info(f"Data shape: {X.shape} (batch, window_size={window_size}, channels=6)")
+    try:
+        logger.info(f"Loading dataset {dataset_id} from database...")
+        logger.debug(f"Window size: {window_size}")
+        
+        X, y, class_names = load_dataset_from_db(db_session, dataset_id, window_size)
+        num_classes = len(class_names)
+        
+        logger.info(f"✓ Dataset loaded successfully")
+        logger.info(f"  Samples: {len(X)}")
+        logger.info(f"  Classes: {num_classes} - {class_names}")
+        logger.info(f"  Shape: {X.shape} (samples, window_size={window_size}, channels={X.shape[2]})")
+        logger.info(f"  Data type: {X.dtype}")
+        logger.info(f"  Data range: [{X.min():.4f}, {X.max():.4f}]")
+        logger.info(f"  Label distribution: {np.bincount(y)}")
+        
+    except Exception as e:
+        logger.error(f"✗ FAILED to load dataset {dataset_id}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise RuntimeError(f"Dataset loading failed: {e}") from e
     
     # Normalize data (z-score normalization per channel)
-    X_mean = X.mean(axis=(0, 1), keepdims=True)
-    X_std = X.std(axis=(0, 1), keepdims=True) + 1e-8
-    X = (X - X_mean) / X_std
+    try:
+        logger.debug("Normalizing data...")
+        X_mean = X.mean(axis=(0, 1), keepdims=True)
+        X_std = X.std(axis=(0, 1), keepdims=True) + 1e-8
+        X = (X - X_mean) / X_std
+        
+        logger.info(f"✓ Data normalized")
+        logger.debug(f"  Mean: {X_mean.flatten()}")
+        logger.debug(f"  Std: {X_std.flatten()}")
+        logger.debug(f"  Normalized range: [{X.min():.4f}, {X.max():.4f}]")
+        
+    except Exception as e:
+        logger.error(f"✗ Normalization failed: {e}")
+        logger.error(traceback.format_exc())
+        raise
     
     # Shuffle and split data
-    indices = np.random.permutation(len(X))
-    X, y = X[indices], y[indices]
+    try:
+        logger.debug("Shuffling and splitting data...")
+        indices = np.random.permutation(len(X))
+        X, y = X[indices], y[indices]
+        
+        split_idx = int(len(X) * (1 - validation_split))
+        X_train, X_val = X[:split_idx], X[split_idx:]
+        y_train, y_val = y[:split_idx], y[split_idx:]
+        
+        logger.info(f"✓ Data split complete")
+        logger.info(f"  Train: {len(X_train)} samples ({len(X_train)/len(X)*100:.1f}%)")
+        logger.info(f"  Val: {len(X_val)} samples ({len(X_val)/len(X)*100:.1f}%)")
+        logger.info(f"  Train label dist: {np.bincount(y_train)}")
+        logger.info(f"  Val label dist: {np.bincount(y_val)}")
+        
+    except Exception as e:
+        logger.error(f"✗ Data splitting failed: {e}")
+        logger.error(traceback.format_exc())
+        raise
     
-    split_idx = int(len(X) * (1 - validation_split))
-    X_train, X_val = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
+    # Determine if using ML or DL model
+    is_ml_model = model_type in ['adaboost', 'knn', 'svc']
+    is_dl_model = model_type in ['dl_cnn_lstm', 'cnn_lstm', 'deep_learning']
     
-    logger.info(f"Train samples: {len(X_train)}, Validation samples: {len(X_val)}")
+    logger.info(f"Model category: {'ML' if is_ml_model else 'DL' if is_dl_model else 'UNKNOWN'}")
     
-    # Bayesian optimization
+    if is_ml_model:
+        logger.info(f"Training ML model: {model_type}")
+        return await train_ml_model(
+            job_id, X_train, y_train, X_val, y_val, class_names, 
+            model_type, config, db_session, update_callback
+        )
+    
+    # Deep Learning path (existing code)
+    logger.info("Training Deep Learning model: CNN-LSTM")
+    
+    # Bayesian optimization (DL only)
     bayesian_trials_data = []
     bayesian_config_used = None
     if config.get('use_bayesian_optimization', False):
-        logger.info("Running Bayesian hyperparameter optimization...")
-        if update_callback:
-            await update_callback('optimizing', 0, 0, None)
-        
-        # Create Bayesian config from user settings
-        bayesian_config = BayesianOptimizationConfig.from_dict(config)
-        bayesian_config_used = bayesian_config.to_dict()
-        
-        # Run optimization in thread pool
-        loop = asyncio.get_event_loop()
-        best_params, bayesian_trials_data = await loop.run_in_executor(
-            None,
-            lambda: run_bayesian_optimization(
-                X_train, y_train, X_val, y_val,
-                num_classes=num_classes,
-                config=bayesian_config,
-                device=device
+        try:
+            logger.info("Running Bayesian hyperparameter optimization...")
+            if update_callback:
+                await update_callback('optimizing', 0, 0, None)
+            
+            # Create Bayesian config from user settings
+            bayesian_config = BayesianOptimizationConfig.from_dict(config)
+            bayesian_config_used = bayesian_config.to_dict()
+            
+            # Run optimization in thread pool
+            loop = asyncio.get_event_loop()
+            best_params, bayesian_trials_data = await loop.run_in_executor(
+                None,
+                lambda: run_bayesian_optimization(
+                    X_train, y_train, X_val, y_val,
+                    num_classes=num_classes,
+                    config=bayesian_config,
+                    device=device
+                )
             )
-        )
-        
-        if best_params:
-            config['learning_rate'] = best_params['learning_rate']
-            config['batch_size'] = best_params['batch_size']
-            config['weight_decay'] = best_params.get('weight_decay', 0.0)
-            architecture_size = best_params.get('architecture_size', architecture_size)
-            logger.info(f"Best hyperparameters: {best_params}")
+            
+            if best_params:
+                config['learning_rate'] = best_params['learning_rate']
+                config['batch_size'] = best_params['batch_size']
+                config['weight_decay'] = best_params.get('weight_decay', 0.0)
+                architecture_size = best_params.get('architecture_size', architecture_size)
+                logger.info(f"✓ Best hyperparameters found: {best_params}")
+        except Exception as e:
+            logger.error(f"✗ Bayesian optimization failed: {e}")
+            logger.error(traceback.format_exc())
+            logger.warning("Continuing with default hyperparameters")
     
     # Create data loaders
-    batch_size = config.get('batch_size', 32)
-    X_train_t = torch.FloatTensor(X_train)
-    y_train_t = torch.LongTensor(y_train)
-    X_val_t = torch.FloatTensor(X_val)
-    y_val_t = torch.LongTensor(y_val)
-    
-    train_dataset = TensorDataset(X_train_t, y_train_t)
-    val_dataset = TensorDataset(X_val_t, y_val_t)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    try:
+        batch_size = config.get('batch_size', 32)
+        logger.debug(f"Creating data loaders with batch_size={batch_size}")
+        
+        X_train_t = torch.FloatTensor(X_train)
+        y_train_t = torch.LongTensor(y_train)
+        X_val_t = torch.FloatTensor(X_val)
+        y_val_t = torch.LongTensor(y_val)
+        
+        train_dataset = TensorDataset(X_train_t, y_train_t)
+        val_dataset = TensorDataset(X_val_t, y_val_t)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size)
+        
+        logger.info(f"✓ Data loaders created")
+        logger.debug(f"  Train batches: {len(train_loader)}")
+        logger.debug(f"  Val batches: {len(val_loader)}")
+    except Exception as e:
+        logger.error(f"✗ Failed to create data loaders: {e}")
+        logger.error(traceback.format_exc())
+        raise
     
     # Create model
-    seq_length = X_train.shape[1]
-    input_channels = X_train.shape[2]
-    
-    model = IMUClassifier(
-        input_channels=input_channels,
-        seq_length=seq_length,
-        num_classes=num_classes,
-        architecture_size=architecture_size
-    )
-    
-    logger.info(f"Model created: {model.get_architecture_summary()['total_params']} parameters")
+    try:
+        seq_length = X_train.shape[1]
+        input_channels = X_train.shape[2]
+        
+        logger.debug(f"Creating model: seq_length={seq_length}, channels={input_channels}, classes={num_classes}")
+        
+        model = IMUClassifier(
+            input_channels=input_channels,
+            seq_length=seq_length,
+            num_classes=num_classes,
+            architecture_size=architecture_size
+        )
+        
+        total_params = model.get_architecture_summary()['total_params']
+        logger.info(f"✓ Model created: {total_params:,} parameters")
+        logger.debug(f"  Architecture: {architecture_size}")
+        logger.debug(f"  Input shape: ({seq_length}, {input_channels})")
+        logger.debug(f"  Output classes: {num_classes}")
+    except Exception as e:
+        logger.error(f"✗ Model creation failed: {e}")
+        logger.error(traceback.format_exc())
+        raise
     
     # Import TrainingJob for progress updates
     from server.db import TrainingJob
