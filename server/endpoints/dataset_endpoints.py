@@ -514,24 +514,35 @@ async def start_cloud_training(
 @router.get("/train/jobs", response_model=Dict[str, Any])
 async def list_training_jobs(
     status: Optional[str] = Query(None, description="Filter by status"),
+    limit: int = Query(50, ge=1, le=200, description="Maximum jobs to return"),
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """List all training jobs for the current user."""
     try:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[JOBS] Starting jobs query for user {current_user.userId}, status={status}, limit={limit}")
+        
         query = db.query(TrainingJob).filter(TrainingJob.user_id == current_user.userId)
         
         if status:
             query = query.filter(TrainingJob.status == status)
         
-        jobs = query.order_by(TrainingJob.created_at.desc()).all()
+        jobs = query.order_by(TrainingJob.created_at.desc()).limit(limit).all()
+        
+        logger.info(f"[JOBS] Query returned {len(jobs)} jobs")
         
         return {
             "success": True,
             "jobs": [j.to_dict() for j in jobs],
-            "total": len(jobs)
+            "total": len(jobs),
+            "limit": limit
         }
     except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"[JOBS] Error listing jobs: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to list jobs: {str(e)}")
 
 
@@ -632,29 +643,48 @@ async def list_trained_models(
 ):
     """List all trained models for the current user."""
     try:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[MODELS] Starting models query for user {current_user.userId}")
+        
         # Only select necessary columns, exclude model_data to avoid loading large binaries
         from sqlalchemy import text
+        
+        # Use a separate connection for table creation to avoid transaction conflicts
         try:
-            db.execute(text("""
-                CREATE TABLE IF NOT EXISTS trained_model (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    job_id VARCHAR(255),
-                    name VARCHAR(255) NOT NULL,
-                    architecture VARCHAR(50),
-                    accuracy FLOAT,
-                    size_bytes BIGINT,
-                    model_data BYTEA,
-                    config TEXT,
-                    is_pinned BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            # Check if table exists first
+            table_check = db.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'trained_model'
                 )
-            """))
-            db.commit()
+            """)).scalar()
+            
+            if not table_check:
+                logger.info("[MODELS] Creating trained_model table")
+                db.execute(text("""
+                    CREATE TABLE trained_model (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        job_id VARCHAR(255),
+                        name VARCHAR(255) NOT NULL,
+                        architecture VARCHAR(50),
+                        accuracy FLOAT,
+                        size_bytes BIGINT,
+                        model_data BYTEA,
+                        config TEXT,
+                        is_pinned BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                db.commit()
+                logger.info("[MODELS] Table created successfully")
         except Exception as table_error:
-            print(f"[WARNING] Could not ensure trained_model table exists: {table_error}")
+            logger.error(f"[MODELS] Table creation error: {table_error}")
+            db.rollback()
         
         # Query only necessary columns, exclude model_data
+        logger.info("[MODELS] Executing models query")
         models = db.query(
             TrainedModel.id,
             TrainedModel.job_id,
@@ -667,7 +697,9 @@ async def list_trained_models(
             TrainedModel.created_at
         ).filter(
             TrainedModel.user_id == current_user.userId
-        ).order_by(TrainedModel.created_at.desc()).all()
+        ).order_by(TrainedModel.created_at.desc()).limit(50).all()  # Add limit to prevent large result sets
+        
+        logger.info(f"[MODELS] Query returned {len(models)} models")
         
         # Convert to dict manually since we're not loading the full model
         model_list = []

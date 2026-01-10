@@ -93,14 +93,19 @@ def auto_disconnect_stale_devices():
     from sqlalchemy.exc import OperationalError, DBAPIError
     
     db = None
+    start_time = datetime.utcnow()
+    logger.info(f"[SERVICE] Starting auto_disconnect_stale_devices at {start_time}")
+    
     try:
+        # Use a fresh connection with timeout
         db = SessionLocal()
         
         # Quick connection test with timeout
         try:
-            db.execute(text("SELECT 1"))
+            result = db.execute(text("SELECT 1"))
+            logger.info("[SERVICE] Database connection test passed")
         except (OperationalError, DBAPIError) as conn_err:
-            logger.warning(f"Database connection test failed, skipping this run: {conn_err}")
+            logger.warning(f"[SERVICE] Database connection test failed, skipping this run: {conn_err}")
             return 0
         
         # Check for devices that haven't been seen in the last 5 minutes
@@ -112,6 +117,8 @@ def auto_disconnect_stale_devices():
             Device.online == True
         ).all()
         
+        logger.info(f"[SERVICE] Found {len(stale_devices)} stale devices")
+        
         if stale_devices:
             for device in stale_devices:
                 device.online = False
@@ -120,23 +127,31 @@ def auto_disconnect_stale_devices():
                 if hasattr(device, 'updated_at'):
                     device.updated_at = datetime.utcnow()
                 
-                logger.info(f"Marked device {getattr(device, 'id', 'unknown')} as offline")
+                logger.info(f"[SERVICE] Marked device {getattr(device, 'id', 'unknown')} as offline")
             
-            db.commit()
-            logger.info(f"Marked {len(stale_devices)} devices as offline")
+            try:
+                db.commit()
+                logger.info(f"[SERVICE] Successfully marked {len(stale_devices)} devices as offline")
+            except Exception as commit_err:
+                logger.error(f"[SERVICE] Failed to commit device updates: {commit_err}")
+                db.rollback()
+                return 0
         
+        duration = (datetime.utcnow() - start_time).total_seconds()
+        logger.info(f"[SERVICE] Completed auto_disconnect_stale_devices in {duration:.2f}s")
         return len(stale_devices) if stale_devices else 0
         
     except (OperationalError, DBAPIError) as db_err:
-        logger.warning(f"Database error in auto_disconnect_stale_devices (will retry): {db_err}")
+        logger.warning(f"[SERVICE] Database error in auto_disconnect_stale_devices: {db_err}")
         if db:
             try:
                 db.rollback()
-            except:
-                pass
+                logger.info("[SERVICE] Database rollback completed")
+            except Exception as rollback_err:
+                logger.error(f"[SERVICE] Failed to rollback: {rollback_err}")
         return 0
     except Exception as e:
-        logger.error(f"Error in auto_disconnect_stale_devices: {e}")
+        logger.error(f"[SERVICE] Unexpected error in auto_disconnect_stale_devices: {e}")
         if db:
             try:
                 db.rollback()
@@ -147,6 +162,7 @@ def auto_disconnect_stale_devices():
         if db:
             try:
                 db.close()
+                logger.info("[SERVICE] Database connection closed")
             except:
                 pass
 

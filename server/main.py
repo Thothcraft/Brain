@@ -13,12 +13,17 @@ import os
 import json
 from server.routes import router
 from server.services import start_scheduler
+from server.logging_config import setup_logging, get_logger, log_performance, log_request_details
 from server.utils.logging_utils import (
     log_request_start, 
     log_response,
     log_error,
     log_request_payload
 )
+
+# Setup enhanced logging
+setup_logging()
+logger = get_logger(__name__)
 
 # Create logs directory if it doesn't exist
 log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
