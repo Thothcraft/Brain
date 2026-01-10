@@ -25,7 +25,6 @@ LOGGING_CONFIG = {
             "style": "{"
         },
         "json": {
-            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
             "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d"
         }
     },
@@ -63,7 +62,7 @@ LOGGING_CONFIG = {
         "file_api": {
             "class": "logging.handlers.RotatingFileHandler",
             "level": "INFO",
-            "formatter": "json",
+            "formatter": "detailed",
             "filename": log_dir / "api.log",
             "maxBytes": 10485760,  # 10MB
             "backupCount": 5,
@@ -81,7 +80,7 @@ LOGGING_CONFIG = {
         "file_performance": {
             "class": "logging.handlers.RotatingFileHandler",
             "level": "INFO",
-            "formatter": "json",
+            "formatter": "detailed",
             "filename": log_dir / "performance.log",
             "maxBytes": 10485760,  # 10MB
             "backupCount": 5,
@@ -179,12 +178,7 @@ def log_performance(func_name: str = None):
                 execution_time = time.time() - start_time
                 
                 logger.info(
-                    f"PERFORMANCE: {func_name or func.__name__} executed in {execution_time:.3f}s",
-                    extra={
-                        "function": func_name or func.__name__,
-                        "execution_time": execution_time,
-                        "status": "success"
-                    }
+                    f"PERFORMANCE: {func_name or func.__name__} executed in {execution_time:.3f}s"
                 )
                 
                 return result
@@ -193,13 +187,7 @@ def log_performance(func_name: str = None):
                 execution_time = time.time() - start_time
                 
                 logger.error(
-                    f"PERFORMANCE: {func_name or func.__name__} failed after {execution_time:.3f}s - {str(e)}",
-                    extra={
-                        "function": func_name or func.__name__,
-                        "execution_time": execution_time,
-                        "status": "error",
-                        "error": str(e)
-                    }
+                    f"PERFORMANCE: {func_name or func.__name__} failed after {execution_time:.3f}s - {str(e)}"
                 )
                 
                 raise
@@ -260,14 +248,10 @@ def log_request_details(request, response=None, error=None):
             "status_code": response.status_code,
             "response_time": getattr(response, 'response_time', None)
         })
-        logger.info(f"Request completed: {request.method} {request.url} - {response.status_code}", extra=log_data)
+        logger.info(f"Request completed: {request.method} {request.url} - {response.status_code}")
     
     elif error:
-        log_data.update({
-            "error": str(error),
-            "error_type": type(error).__name__
-        })
-        logger.error(f"Request failed: {request.method} {request.url} - {str(error)}", extra=log_data)
+        logger.error(f"Request failed: {request.method} {request.url} - {str(error)}")
     
     else:
-        logger.info(f"Request started: {request.method} {request.url}", extra=log_data)
+        logger.info(f"Request started: {request.method} {request.url}")

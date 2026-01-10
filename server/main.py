@@ -21,9 +21,23 @@ from server.utils.logging_utils import (
     log_request_payload
 )
 
-# Setup enhanced logging
-setup_logging()
-logger = get_logger(__name__)
+# Setup enhanced logging with fallback
+try:
+    setup_logging()
+    logger = get_logger(__name__)
+    logger.info("Enhanced logging configured successfully")
+except Exception as e:
+    # Fallback to basic logging if enhanced setup fails
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler('logs/basic.log')
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Enhanced logging failed, using basic logging: {str(e)}")
 
 # Create logs directory if it doesn't exist
 log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
