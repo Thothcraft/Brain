@@ -14,6 +14,10 @@ from server.db import get_db
 from server.auth import get_current_user
 from server.db import User, File, DeviceFile, Device
 from server.utils.logging_utils import log_request_start, log_response, log_error
+from server.utils.error_handler import (
+    APIError, handle_api_error, file_error, validation_error, 
+    not_found_error, ErrorCode
+)
 from .models import FileUploadSimpleRequest, FileUploadResponse, PaginatedResponse
 
 router = APIRouter(prefix="/file", tags=["files"])
@@ -475,15 +479,23 @@ async def delete_file_simple(
         ).first()
         
         if not file_record:
-            raise HTTPException(status_code=404, detail="File not found")
+            raise handle_api_error(not_found_error("File", str(file_id)))
         
         # Extract original filename for logging
         parts = file_record.filename.split('_', 3)
         original_filename = parts[-1] if len(parts) >= 4 else file_record.filename
         
         # Delete the file
-        db.delete(file_record)
-        db.commit()
+        try:
+            db.delete(file_record)
+            db.commit()
+        except Exception as db_error:
+            db.rollback()
+            raise handle_api_error(file_error(
+                ErrorCode.FILE_DELETE_FAILED,
+                f"Failed to delete file '{original_filename}'",
+                {"file_id": file_id, "db_error": str(db_error)}
+            ))
         
         log_response(200, f"File deleted: {original_filename} (ID: {file_id})", f"/file/{file_id}")
         return {
@@ -492,9 +504,9 @@ async def delete_file_simple(
             "file_id": file_id
         }
         
-    except HTTPException as he:
-        log_error(f"HTTPException in file deletion: {str(he.detail)}")
-        raise
+    except APIError as ae:
+        log_error(f"APIError in file deletion: {ae.message}")
+        raise handle_api_error(ae)
     except Exception as e:
         log_error(f"Error deleting file: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete file")
