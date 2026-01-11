@@ -60,8 +60,15 @@ async def list_files(
         if content_type:
             query = query.filter(File.content_type == content_type)
         
-        # Get files with pagination
-        files = query.order_by(File.uploaded_at.desc()).offset(offset).limit(limit + 1).all()
+        # Get files with pagination - exclude content column for performance
+        files = query.with_entities(
+            File.fileId,
+            File.filename,
+            File.size,
+            File.content_type,
+            File.uploaded_at,
+            File.file_hash
+        ).order_by(File.uploaded_at.desc()).offset(offset).limit(limit + 1).all()
         
         has_more = len(files) > limit
         if has_more:
@@ -69,9 +76,12 @@ async def list_files(
         
         file_list = []
         for file in files:
+            # file is now a tuple: (file_id, filename, size, content_type, uploaded_at, file_hash)
+            file_id, filename, size, content_type, uploaded_at, file_hash = file
+            
             # Extract original filename from stored filename
-            parts = file.filename.split('_', 3)
-            original_filename = parts[-1] if len(parts) >= 4 else file.filename
+            parts = filename.split('_', 3)
+            original_filename = parts[-1] if len(parts) >= 4 else filename
             
             # Extract device_id from filename
             extracted_device_id = None
@@ -80,18 +90,18 @@ async def list_files(
             
             # Try to parse metadata from file_hash field
             metadata = {}
-            if file.file_hash:
+            if file_hash:
                 try:
-                    metadata = json.loads(file.file_hash)
+                    metadata = json.loads(file_hash)
                 except (json.JSONDecodeError, TypeError):
                     pass
             
             file_info = {
-                "file_id": file.fileId,
+                "file_id": file_id,
                 "filename": original_filename,
-                "size": file.size,
-                "content_type": file.content_type,
-                "uploaded_at": file.uploaded_at.isoformat(),
+                "size": size,
+                "content_type": content_type,
+                "uploaded_at": uploaded_at.isoformat(),
                 "device_id": extracted_device_id,
                 "on_cloud": True,  # Files in this list are always on cloud
                 "metadata": metadata
