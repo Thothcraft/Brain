@@ -177,15 +177,16 @@ def start_scheduler():
     try:
         scheduler = BackgroundScheduler()
         
-        # Add device status check job (every 30 seconds)
+        # Add device status check job (every 2 minutes to reduce database load)
         scheduler.add_job(
             auto_disconnect_stale_devices,
-            trigger=IntervalTrigger(seconds=30),
+            trigger=IntervalTrigger(seconds=120),  # Increased from 30 to 120 seconds
             id='auto_disconnect_job',
             name='Auto disconnect stale devices',
             replace_existing=True,
             max_instances=1,
-            coalesce=True  # Combine missed runs into one
+            coalesce=True,  # Combine missed runs into one
+            misfire_grace_time=30  # Allow 30 seconds grace time for missed runs
         )
         
         scheduler.start()

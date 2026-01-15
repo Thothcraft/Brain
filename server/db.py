@@ -42,18 +42,18 @@ Base = declarative_base()
 # - connect_args: Set connection timeout and keepalives
 engine = create_engine(
     DATABASE_URL,
-    pool_size=10,  # Increased for better concurrency
-    max_overflow=20,  # Increased overflow for peak loads
-    pool_timeout=60,  # Increased timeout for complex queries
+    pool_size=5,  # Reduced to prevent pool exhaustion
+    max_overflow=10,  # Reduced overflow
+    pool_timeout=30,  # Reduced timeout
     pool_pre_ping=True,
-    pool_recycle=1800,  # Increased to 30 minutes to reduce connection churn
+    pool_recycle=300,  # Reduced to 5 minutes for more frequent recycling
     connect_args={
-        "connect_timeout": 60,  # Increased timeout
+        "connect_timeout": 30,  # Reduced timeout
         "keepalives": 1,
-        "keepalives_idle": 60,  # Increased idle time
-        "keepalives_interval": 30,  # Increased interval
-        "keepalives_count": 10,  # More retry attempts
-        "options": "-c statement_timeout=300000"  # 5 minute statement timeout
+        "keepalives_idle": 30,  # Reduced idle time
+        "keepalives_interval": 15,  # Reduced interval
+        "keepalives_count": 5,  # Reduced retry attempts
+        "options": "-c statement_timeout=60000"  # Reduced to 1 minute statement timeout
     }
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
@@ -64,8 +64,8 @@ db_logger = logging.getLogger('database')
 
 def get_db():
     """Dependency to get database session with retry logic."""
-    max_retries = 3
-    retry_delay = 1  # seconds
+    max_retries = 2  # Reduced from 3 to fail faster
+    retry_delay = 0.5  # Reduced from 1 to retry faster
     
     for attempt in range(max_retries):
         db = SessionLocal()
@@ -73,19 +73,14 @@ def get_db():
             # Test the connection
             db.execute(text("SELECT 1"))
             yield db
-            db.commit()
             return
         except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
-            db_logger.warning(f"Database session attempt {attempt + 1} failed: {e}")
-            try:
-                db.rollback()
-            except:
-                pass
+            db_logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
             db.close()
             if attempt < max_retries - 1:
-                time.sleep(retry_delay * (2 ** attempt))
+                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
             else:
-                db_logger.error(f"All {max_retries} database session attempts failed")
+                db_logger.error(f"All {max_retries} database connection attempts failed")
                 raise
         finally:
             try:
@@ -96,8 +91,8 @@ def get_db():
 @contextmanager
 def get_db_session():
     """Context manager for database sessions with automatic cleanup."""
-    max_retries = 3
-    retry_delay = 1
+    max_retries = 2  # Reduced from 3
+    retry_delay = 0.5  # Reduced from 1
     
     for attempt in range(max_retries):
         db = SessionLocal()

@@ -20,7 +20,7 @@ logger = logging.getLogger('db_health_monitor')
 class DatabaseHealthMonitor:
     """Monitors database health and performs automatic recovery."""
     
-    def __init__(self, check_interval: int = 60, max_failures: int = 3):
+    def __init__(self, check_interval: int = 120, max_failures: int = 3):  # Increased from 60 to 120 seconds
         self.check_interval = check_interval  # seconds
         self.max_failures = max_failures
         self.failure_count = 0
