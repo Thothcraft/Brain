@@ -336,8 +336,10 @@ async def upload_file_multipart(
             chunks.append(chunk)
             total_size += len(chunk)
             # Check size limit during read
-            if total_size > 104_857_600:  # 100MB
-                raise HTTPException(status_code=413, detail="File too large (max 100MB)")
+            max_size = current_user.max_file_size if hasattr(current_user, 'max_file_size') else 104_857_600  # Default 100MB
+            if total_size > max_size:
+                max_size_mb = max_size / (1024 * 1024)
+                raise HTTPException(status_code=413, detail=f"File too large (max {max_size_mb:.1f}MB)")
         
         content_bytes = b''.join(chunks)
         logger.info(f"File read complete: {filename} ({len(content_bytes)} bytes)")

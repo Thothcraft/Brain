@@ -83,8 +83,7 @@ class DatabaseHealthMonitor:
                     'pool_size': pool.size(),
                     'pool_checked_in': pool.checkedin(),
                     'pool_checked_out': pool.checkedout(),
-                    'pool_overflow': pool.overflow(),
-                    'pool_invalid': pool.invalid()
+                    'pool_overflow': pool.overflow()
                 })
             
             # Reset failure count on success
