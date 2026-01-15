@@ -8,10 +8,13 @@ It handles the communication between Thoth devices and the Brain server.
 import json
 import time
 import logging
+import os
+import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 import uuid as uuid_lib
 from ipaddress import ip_address, IPv4Address
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session
@@ -68,6 +71,98 @@ def get_client_ip(request: Request) -> str:
     
     return ip if validate_ip_address(ip) else None
 
+
+def _scan_device_files(device_uuid: str, data_path: str = None) -> List[Dict[str, Any]]:
+    """Scan device data directory for files and return file information.
+    
+    Args:
+        device_uuid: Device UUID for identification
+        data_path: Path to scan (defaults to thoth/data if None)
+    
+    Returns:
+        List of file information dictionaries
+    """
+    if not data_path:
+        # Default to thoth/data relative to current working directory
+        data_path = os.path.join("thoth", "data")
+    
+    files = []
+    
+    try:
+        if not os.path.exists(data_path):
+            logger.warning(f"Data directory not found: {data_path}")
+            return files
+        
+        # Scan for files in the data directory
+        for file_path in Path(data_path).iterdir():
+            if file_path.is_file():
+                try:
+                    stat = file_path.stat()
+                    
+                    # Determine file type
+                    file_type = 'other'
+                    filename = file_path.name.lower()
+                    if filename.startswith('imu_'):
+                        file_type = 'imu'
+                    elif filename.startswith('csi_'):
+                        file_type = 'csi'
+                    elif filename.startswith('mfcw_'):
+                        file_type = 'mfcw'
+                    elif filename.startswith('img_'):
+                        file_type = 'img'
+                    elif filename.startswith('vid_'):
+                        file_type = 'vid'
+                    elif filename.endswith('.json'):
+                        file_type = 'json'
+                    elif filename.endswith('.csv'):
+                        file_type = 'csv'
+                    
+                    file_info = {
+                        'name': file_path.name,
+                        'size': stat.st_size,
+                        'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                        'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        'type': file_type,
+                        'path': str(file_path)
+                    }
+                    files.append(file_info)
+                    
+                except Exception as e:
+                    logger.error(f"Error scanning file {file_path}: {e}")
+                    continue
+        
+        logger.info(f"Scanned {len(files)} files in {data_path}")
+        
+    except Exception as e:
+        logger.error(f"Error scanning device files: {e}")
+    
+    return files
+
+def _auto_sync_device_files(device_id: int, user_id: int, device_uuid: str, db: Session, data_path: str = None):
+    """Automatically sync files from device data directory.
+    
+    Args:
+        device_id: Internal device ID
+        user_id: User ID who owns the device
+        device_uuid: Device UUID string
+        db: Database session
+        data_path: Path to scan (defaults to thoth/data if None)
+    """
+    try:
+        # Scan files
+        scanned_files = _scan_device_files(device_uuid, data_path)
+        
+        if not scanned_files:
+            logger.info(f"No files found to sync for device {device_uuid}")
+            return
+        
+        # Store files using existing function
+        _store_device_files(device_id, user_id, device_uuid, scanned_files, db)
+        
+        logger.info(f"Auto-synced {len(scanned_files)} files for device {device_uuid}")
+        
+    except Exception as e:
+        logger.error(f"Error auto-syncing device files: {e}")
 
 def _get_pending_uploads(device_id: int, db: Session) -> list:
     """Get list of files that have been requested for upload to cloud.
@@ -264,6 +359,9 @@ async def register_device(
                 # Store files pushed from device (if provided)
                 if request.files:
                     _store_device_files(existing_device.deviceId, current_user.userId, device_uuid, request.files, db)
+                else:
+                    # Auto-scan files if none provided
+                    _auto_sync_device_files(existing_device.deviceId, current_user.userId, device_uuid, db)
                 
                 # Get pending upload requests for this device
                 pending_uploads = _get_pending_uploads(existing_device.deviceId, db)
@@ -301,6 +399,9 @@ async def register_device(
             # Store files pushed from device (if provided)
             if request.files:
                 _store_device_files(new_device.deviceId, current_user.userId, device_uuid, request.files, db)
+            else:
+                # Auto-scan files if none provided
+                _auto_sync_device_files(new_device.deviceId, current_user.userId, device_uuid, db)
             
             logger.info(f"New device registered: {device_uuid} for user {current_user.userId}")
             log_response(201, "Device registered successfully", "/device/register")
@@ -570,6 +671,129 @@ async def delete_device(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete device: {str(e)}"
+        )
+
+
+@router.post("/{device_uuid}/sync-files", response_model=StandardResponse)
+async def sync_device_files(
+    device_uuid: str,
+    data_path: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Manually sync files from device data directory.
+    
+    This endpoint scans the device's data directory and updates the file registry.
+    If no data_path is provided, it defaults to 'thoth/data'.
+    
+    Args:
+        device_uuid: The unique device identifier
+        data_path: Optional custom path to scan (defaults to thoth/data)
+        current_user: Authenticated user
+        db: Database session
+        
+    Returns:
+        StandardResponse: Sync result with file count
+    """
+    try:
+        log_request_start("POST", f"/device/{device_uuid}/sync-files", current_user.userId)
+        
+        # Find the device
+        device = db.query(Device).filter(
+            Device.device_uuid == device_uuid,
+            Device.userId == current_user.userId
+        ).first()
+        
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or access denied"
+            )
+        
+        # Perform auto-sync
+        _auto_sync_device_files(device.deviceId, current_user.userId, device_uuid, db, data_path)
+        
+        # Get updated file count
+        from server.db import DeviceFile
+        file_count = db.query(DeviceFile).filter(
+            DeviceFile.device_id == device.deviceId,
+            DeviceFile.on_device == True
+        ).count()
+        
+        log_response(200, {"success": True, "files_synced": file_count}, f"/device/{device_uuid}/sync-files")
+        
+        return {
+            "success": True,
+            "message": f"Files synced successfully for device {device_uuid}",
+            "data": {
+                "device_uuid": device_uuid,
+                "files_synced": file_count,
+                "data_path": data_path or "thoth/data"
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error syncing device files: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to sync device files: {str(e)}"
+        )
+
+
+@router.get("/scan-files", response_model=Dict[str, Any])
+async def scan_local_files(
+    data_path: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Scan local data directory for files without requiring a device.
+    
+    This endpoint scans the data directory and returns file information.
+    Useful for testing and general file discovery.
+    
+    Args:
+        data_path: Optional custom path to scan (defaults to thoth/data)
+        current_user: Authenticated user
+        
+    Returns:
+        Dict with file information
+    """
+    try:
+        log_request_start("GET", "/device/scan-files", current_user.userId)
+        
+        # Use a generic device UUID for scanning
+        scanner_uuid = "file-scanner"
+        
+        # Scan files
+        scanned_files = _scan_device_files(scanner_uuid, data_path)
+        
+        # Organize files by type
+        files_by_type = {}
+        for file_info in scanned_files:
+            file_type = file_info['type']
+            if file_type not in files_by_type:
+                files_by_type[file_type] = []
+            files_by_type[file_type].append(file_info)
+        
+        log_response(200, {"files_found": len(scanned_files)}, "/device/scan-files")
+        
+        return {
+            "success": True,
+            "message": f"Scanned {len(scanned_files)} files",
+            "data": {
+                "total_files": len(scanned_files),
+                "data_path": data_path or "thoth/data",
+                "files_by_type": files_by_type,
+                "all_files": scanned_files
+            }
+        }
+        
+    except Exception as e:
+        log_error(f"Error scanning local files: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to scan local files: {str(e)}"
         )
 
 
