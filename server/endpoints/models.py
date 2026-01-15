@@ -277,6 +277,7 @@ class HealthCheckResponse(BaseModel):
 class StandardResponse(BaseModel):
     success: bool
     message: str
+    data: Optional[Dict[str, Any]] = None
 
 class DeviceResponse(StandardResponse):
     device_id: str

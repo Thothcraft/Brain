@@ -13,7 +13,7 @@ from typing import Dict, Optional
 from sqlalchemy.exc import SQLAlchemyError, OperationalError, DisconnectionError
 from sqlalchemy import text
 
-from db import engine, SessionLocal, test_database_connection
+from server.db import engine, SessionLocal, test_database_connection
 
 logger = logging.getLogger('db_health_monitor')
 

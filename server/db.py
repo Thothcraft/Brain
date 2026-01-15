@@ -10,7 +10,8 @@ import logging
 from datetime import datetime
 from contextlib import contextmanager
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, LargeBinary, UniqueConstraint, SmallInteger, BigInteger, Boolean, Float
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError, DisconnectionError, OperationalError
 
 # Load environment variables from .env if present
@@ -70,16 +71,21 @@ def get_db():
         db = SessionLocal()
         try:
             # Test the connection
-            db.execute("SELECT 1")
+            db.execute(text("SELECT 1"))
             yield db
+            db.commit()
             return
         except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
-            db_logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
+            db_logger.warning(f"Database session attempt {attempt + 1} failed: {e}")
+            try:
+                db.rollback()
+            except:
+                pass
             db.close()
             if attempt < max_retries - 1:
-                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                time.sleep(retry_delay * (2 ** attempt))
             else:
-                db_logger.error(f"All {max_retries} database connection attempts failed")
+                db_logger.error(f"All {max_retries} database session attempts failed")
                 raise
         finally:
             try:
@@ -97,7 +103,7 @@ def get_db_session():
         db = SessionLocal()
         try:
             # Test the connection
-            db.execute("SELECT 1")
+            db.execute(text("SELECT 1"))
             yield db
             db.commit()
             return
@@ -130,7 +136,7 @@ def test_database_connection():
     """Test database connectivity and return status."""
     try:
         with get_db_session() as db:
-            result = db.execute("SELECT version(), current_timestamp")
+            result = db.execute(text("SELECT version(), current_timestamp"))
             version, timestamp = result.fetchone()
             return {
                 "status": "connected",
