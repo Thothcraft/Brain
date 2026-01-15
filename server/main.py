@@ -20,6 +20,7 @@ from server.utils.logging_utils import (
     log_error,
     log_request_payload
 )
+from server.startup import lifespan
 
 # Setup enhanced logging with fallback
 try:
@@ -141,7 +142,7 @@ A FastAPI-based backend service
 APP_VERSION = "1.0.0"
 API_PREFIX = "/api"
 
-# Initialize FastAPI with custom OpenAPI configuration
+# Initialize FastAPI with custom OpenAPI configuration and lifespan
 app = FastAPI(
     title=APP_TITLE,
     description=APP_DESCRIPTION,
@@ -149,6 +150,7 @@ app = FastAPI(
     docs_url=None,  # Disable default docs
     redoc_url=None,  # Disable default redoc
     openapi_url=f"{API_PREFIX}/openapi.json",
+    lifespan=lifespan,  # Add lifespan management for database health monitor
     contact={
         "name": "Gad Gad",
         "email": "ggad@uwo.ca"

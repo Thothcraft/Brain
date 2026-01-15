@@ -5,9 +5,13 @@ It includes the User model and database connection configuration.
 """
 
 import os
+import time
+import logging
 from datetime import datetime
+from contextlib import contextmanager
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, LargeBinary, UniqueConstraint, SmallInteger, BigInteger, Boolean, Float
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import SQLAlchemyError, DisconnectionError, OperationalError
 
 # Load environment variables from .env if present
 try:
@@ -37,29 +41,111 @@ Base = declarative_base()
 # - connect_args: Set connection timeout and keepalives
 engine = create_engine(
     DATABASE_URL,
-    pool_size=5,  # Reduced to prevent connection exhaustion
-    max_overflow=10,  # Reduced overflow
-    pool_timeout=30,  # Reduced timeout for faster failure
+    pool_size=10,  # Increased for better concurrency
+    max_overflow=20,  # Increased overflow for peak loads
+    pool_timeout=60,  # Increased timeout for complex queries
     pool_pre_ping=True,
-    pool_recycle=300,  # Recycle connections every 5 minutes
+    pool_recycle=1800,  # Increased to 30 minutes to reduce connection churn
     connect_args={
-        "connect_timeout": 30,  # Reduced timeout
+        "connect_timeout": 60,  # Increased timeout
         "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5,
-        "options": "-c statement_timeout=120000"  # 2 minute statement timeout
+        "keepalives_idle": 60,  # Increased idle time
+        "keepalives_interval": 30,  # Increased interval
+        "keepalives_count": 10,  # More retry attempts
+        "options": "-c statement_timeout=300000"  # 5 minute statement timeout
     }
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
+# Configure logging for database issues
+logging.basicConfig(level=logging.INFO)
+db_logger = logging.getLogger('database')
+
 def get_db():
-    """Dependency to get database session."""
-    db = SessionLocal()
+    """Dependency to get database session with retry logic."""
+    max_retries = 3
+    retry_delay = 1  # seconds
+    
+    for attempt in range(max_retries):
+        db = SessionLocal()
+        try:
+            # Test the connection
+            db.execute("SELECT 1")
+            yield db
+            return
+        except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
+            db_logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
+            db.close()
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+            else:
+                db_logger.error(f"All {max_retries} database connection attempts failed")
+                raise
+        finally:
+            try:
+                db.close()
+            except:
+                pass
+
+@contextmanager
+def get_db_session():
+    """Context manager for database sessions with automatic cleanup."""
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
+        db = SessionLocal()
+        try:
+            # Test the connection
+            db.execute("SELECT 1")
+            yield db
+            db.commit()
+            return
+        except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
+            db_logger.warning(f"Database session attempt {attempt + 1} failed: {e}")
+            try:
+                db.rollback()
+            except:
+                pass
+            db.close()
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (2 ** attempt))
+            else:
+                db_logger.error(f"All {max_retries} database session attempts failed")
+                raise
+        except Exception as e:
+            try:
+                db.rollback()
+            except:
+                pass
+            db.close()
+            raise
+        finally:
+            try:
+                db.close()
+            except:
+                pass
+
+def test_database_connection():
+    """Test database connectivity and return status."""
     try:
-        yield db
-    finally:
-        db.close()
+        with get_db_session() as db:
+            result = db.execute("SELECT version(), current_timestamp")
+            version, timestamp = result.fetchone()
+            return {
+                "status": "connected",
+                "version": version,
+                "timestamp": timestamp.isoformat(),
+                "pool_size": engine.pool.size(),
+                "checked_in": engine.pool.checkedin(),
+                "checked_out": engine.pool.checkedout()
+            }
+    except Exception as e:
+        return {
+            "status": "disconnected",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
 class User(Base):
     """User model representing registered users in the system.
