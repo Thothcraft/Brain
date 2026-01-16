@@ -16,40 +16,58 @@ def create_performance_indexes():
             logger.info("[OPTIMIZE] Creating performance indexes...")
             
             # Index for user_id queries on datasets
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_training_datasets_user_id 
-                ON training_dataset(user_id DESC)
-            """))
+            try:
+                db.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_training_datasets_user_id 
+                    ON training_dataset(user_id DESC)
+                """))
+            except Exception as e:
+                logger.warning(f"[OPTIMIZE] Could not create training_datasets_user_id index: {e}")
             
             # Index for user_id queries on training jobs
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_training_jobs_user_id 
-                ON training_job(user_id DESC, created_at DESC)
-            """))
+            try:
+                db.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_training_jobs_user_id 
+                    ON training_job(user_id DESC, created_at DESC)
+                """))
+            except Exception as e:
+                logger.warning(f"[OPTIMIZE] Could not create training_jobs_user_id index: {e}")
             
             # Index for status queries on training jobs
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_training_jobs_status 
-                ON training_job(status, created_at DESC)
-            """))
+            try:
+                db.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_training_jobs_status 
+                    ON training_job(status, created_at DESC)
+                """))
+            except Exception as e:
+                logger.warning(f"[OPTIMIZE] Could not create training_jobs_status index: {e}")
             
             # Index for user_id queries on trained models
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_trained_models_user_id 
-                ON trained_model(user_id DESC, created_at DESC)
-            """))
+            try:
+                db.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_trained_models_user_id 
+                    ON trained_model(user_id DESC, created_at DESC)
+                """))
+            except Exception as e:
+                logger.warning(f"[OPTIMIZE] Could not create trained_models_user_id index: {e}")
             
             # Index for user_id queries on files
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_files_user_id 
-                ON file(userId DESC, uploaded_at DESC)
-            """))
+            try:
+                db.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_files_user_id 
+                    ON file(userId DESC, uploaded_at DESC)
+                """))
+            except Exception as e:
+                logger.warning(f"[OPTIMIZE] Could not create files_user_id index: {e}")
             
             # Composite index for training jobs (user_id + status)
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_training_jobs_user_status 
-                ON training_job(user_id, status, created_at DESC)
-            """))
+            try:
+                db.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_training_jobs_user_status 
+                    ON training_job(user_id, status, created_at DESC)
+                """))
+            except Exception as e:
+                logger.warning(f"[OPTIMIZE] Could not create training_jobs_user_status index: {e}")
             
             db.commit()
             logger.info("[OPTIMIZE] Performance indexes created successfully")
@@ -65,17 +83,20 @@ def analyze_table_statistics():
         with SessionLocal() as db:
             logger.info("[OPTIMIZE] Updating table statistics...")
             
-            # Update statistics for all relevant tables
+            # Update statistics for all relevant tables (using proper table names)
             tables = [
                 'training_dataset',
                 'training_job', 
                 'trained_model',
                 'file',
-                'user'
+                'users'  # Changed from 'user' to 'users' to avoid SQL keyword conflict
             ]
             
             for table in tables:
-                db.execute(text(f"ANALYZE {table}"))
+                try:
+                    db.execute(text(f"ANALYZE {table}"))
+                except Exception as e:
+                    logger.warning(f"[OPTIMIZE] Could not analyze table {table}: {e}")
             
             db.commit()
             logger.info("[OPTIMIZE] Table statistics updated successfully")

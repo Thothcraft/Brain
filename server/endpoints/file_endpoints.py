@@ -112,11 +112,11 @@ async def list_files(
         return {
             "success": True,
             "files": file_list,
-            "count": len(file_list),
-            "has_more": has_more,
+            "total": len(file_list),
             "pagination": {
                 "limit": limit,
                 "offset": offset,
+                "has_more": has_more,
                 "next_offset": offset + limit if has_more else None
             },
             "operation": "list_files",
@@ -124,7 +124,21 @@ async def list_files(
         }
     except Exception as e:
         log_error(f"Error listing files: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to list files")
+        # Return a consistent error response structure
+        return {
+            "success": False,
+            "files": [],
+            "pagination": {
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "has_more": False,
+                "next_offset": None
+            },
+            "operation": "list_files",
+            "status": "error",
+            "error": str(e)
+        }
 
 
 @router.post("/upload", response_model=FileUploadResponse)

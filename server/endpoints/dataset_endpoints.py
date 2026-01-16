@@ -148,7 +148,15 @@ async def list_datasets(
         import logging
         logger = logging.getLogger(__name__)
         logger.error(f"[DATASETS] Error listing datasets: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list datasets: {str(e)}")
+        # Return a consistent error response structure
+        return {
+            "success": False,
+            "datasets": [],
+            "total": 0,
+            "operation": "list_datasets",
+            "status": "error",
+            "error": str(e)
+        }
 
 
 # ============================================================================
@@ -598,7 +606,16 @@ async def list_training_jobs(
         import logging
         logger = logging.getLogger(__name__)
         logger.error(f"[JOBS] Error listing jobs: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list jobs: {str(e)}")
+        # Return a consistent error response structure
+        return {
+            "success": False,
+            "jobs": [],
+            "total": 0,
+            "limit": limit,
+            "operation": "list_training_jobs",
+            "status": "error",
+            "error": str(e)
+        }
 
 
 @router.get("/train/jobs/{job_id}", response_model=Dict[str, Any])
@@ -749,7 +766,15 @@ async def list_trained_models(
         import logging
         logger = logging.getLogger(__name__)
         logger.error(f"[MODELS] Error listing models: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+        # Return a consistent error response structure
+        return {
+            "success": False,
+            "models": [],
+            "total": 0,
+            "operation": "list_models",
+            "status": "error",
+            "error": str(e)
+        }
 
 
 @router.delete("/models/{model_id}", response_model=StandardResponse)
