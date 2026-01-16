@@ -113,16 +113,34 @@ async def list_datasets(
         logger = logging.getLogger(__name__)
         logger.info(f"[DATASETS] Starting datasets query for user {current_user.userId}")
         
-        datasets = db.query(TrainingDataset).filter(
+        # Optimized query - select only necessary columns
+        datasets = db.query(
+            TrainingDataset.id,
+            TrainingDataset.name,
+            TrainingDataset.description,
+            TrainingDataset.created_at,
+            TrainingDataset.updated_at
+        ).filter(
             TrainingDataset.user_id == current_user.userId
-        ).order_by(TrainingDataset.created_at.desc()).all()
+        ).order_by(TrainingDataset.created_at.desc()).limit(100).all()  # Add limit to prevent large result sets
         
         logger.info(f"[DATASETS] Query completed, found {len(datasets)} datasets")
         
+        # Convert to dict efficiently
+        dataset_list = []
+        for d in datasets:
+            dataset_list.append({
+                "id": d.id,
+                "name": d.name,
+                "description": d.description,
+                "created_at": d.created_at.isoformat() if d.created_at else None,
+                "updated_at": d.updated_at.isoformat() if d.updated_at else None
+            })
+        
         return {
             "success": True,
-            "datasets": [d.to_dict() for d in datasets],
-            "total": len(datasets),
+            "datasets": dataset_list,
+            "total": len(dataset_list),
             "operation": "list_datasets",
             "status": "completed"
         }
@@ -535,7 +553,17 @@ async def list_training_jobs(
         logger = logging.getLogger(__name__)
         logger.info(f"[JOBS] Starting jobs query for user {current_user.userId}, status={status}, limit={limit}")
         
-        query = db.query(TrainingJob).filter(TrainingJob.user_id == current_user.userId)
+        # Optimized query - select only necessary columns
+        query = db.query(
+            TrainingJob.job_id,
+            TrainingJob.dataset_id,
+            TrainingJob.status,
+            TrainingJob.progress,
+            TrainingJob.created_at,
+            TrainingJob.started_at,
+            TrainingJob.completed_at,
+            TrainingJob.error_message
+        ).filter(TrainingJob.user_id == current_user.userId)
         
         if status:
             query = query.filter(TrainingJob.status == status)
@@ -544,10 +572,24 @@ async def list_training_jobs(
         
         logger.info(f"[JOBS] Query completed, returned {len(jobs)} jobs")
         
+        # Convert to dict efficiently
+        job_list = []
+        for j in jobs:
+            job_list.append({
+                "job_id": j.job_id,
+                "dataset_id": j.dataset_id,
+                "status": j.status,
+                "progress": j.progress,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "started_at": j.started_at.isoformat() if j.started_at else None,
+                "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+                "error_message": j.error_message
+            })
+        
         return {
             "success": True,
-            "jobs": [j.to_dict() for j in jobs],
-            "total": len(jobs),
+            "jobs": job_list,
+            "total": len(job_list),
             "limit": limit,
             "operation": "list_training_jobs",
             "status": "completed"

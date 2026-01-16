@@ -13,12 +13,21 @@ from fastapi import FastAPI
 from server.db_health_monitor import start_database_health_monitor, stop_database_health_monitor
 from server.utils.logging_utils import logger
 from server.init_db import initialize_database
+from server.optimize_db import optimize_database
 
 async def async_db_init():
     """Async wrapper for database initialization."""
     try:
         if initialize_database():
             logger.info("Database initialization completed successfully")
+            # Run optimization after initialization
+            try:
+                if optimize_database():
+                    logger.info("Database optimization completed successfully")
+                else:
+                    logger.warning("Database optimization completed with warnings")
+            except Exception as e:
+                logger.warning(f"Database optimization error: {e}")
         else:
             logger.error("Database initialization failed")
     except Exception as e:
