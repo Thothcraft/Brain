@@ -37,7 +37,7 @@ async def get_recent_activity(
     try:
         # Get recent device activity
         devices = db.query(Device).filter(
-            Device.user_id == current_user.userId
+            Device.userId == current_user.userId
         ).all()
         
         for device in devices:
@@ -216,7 +216,7 @@ async def get_activity_stats(
     """
     try:
         # Device stats
-        devices = db.query(Device).filter(Device.user_id == current_user.userId).all()
+        devices = db.query(Device).filter(Device.userId == current_user.userId).all()
         total_devices = len(devices)
         online_devices = sum(1 for d in devices if d.online)
         
