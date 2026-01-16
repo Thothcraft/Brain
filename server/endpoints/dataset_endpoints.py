@@ -566,7 +566,8 @@ async def list_training_jobs(
             TrainingJob.job_id,
             TrainingJob.dataset_id,
             TrainingJob.status,
-            TrainingJob.progress,
+            TrainingJob.current_epoch,
+            TrainingJob.total_epochs,
             TrainingJob.created_at,
             TrainingJob.started_at,
             TrainingJob.completed_at,
@@ -583,11 +584,16 @@ async def list_training_jobs(
         # Convert to dict efficiently
         job_list = []
         for j in jobs:
+            # Calculate progress from current_epoch and total_epochs
+            progress = 0.0
+            if j.total_epochs and j.total_epochs > 0:
+                progress = (j.current_epoch / j.total_epochs) * 100
+            
             job_list.append({
                 "job_id": j.job_id,
                 "dataset_id": j.dataset_id,
                 "status": j.status,
-                "progress": j.progress,
+                "progress": progress,
                 "created_at": j.created_at.isoformat() if j.created_at else None,
                 "started_at": j.started_at.isoformat() if j.started_at else None,
                 "completed_at": j.completed_at.isoformat() if j.completed_at else None,
