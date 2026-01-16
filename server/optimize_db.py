@@ -55,7 +55,7 @@ def create_performance_indexes():
             try:
                 db.execute(text("""
                     CREATE INDEX IF NOT EXISTS idx_files_user_id 
-                    ON file(userId DESC, uploaded_at DESC)
+                    ON file(user_id DESC, uploaded_at DESC)
                 """))
             except Exception as e:
                 logger.warning(f"[OPTIMIZE] Could not create files_user_id index: {e}")
@@ -89,7 +89,7 @@ def analyze_table_statistics():
                 'training_job', 
                 'trained_model',
                 'file',
-                'users'  # Changed from 'user' to 'users' to avoid SQL keyword conflict
+                'user_account'  # Correct table name from db.py
             ]
             
             for table in tables:
