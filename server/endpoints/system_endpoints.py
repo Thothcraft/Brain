@@ -48,17 +48,38 @@ async def health_check() -> Dict[str, Any]:
     try:
         log_request_start("GET", "/health", None)
         
-        # Check database connectivity
-        db_status = test_database_connection()
+        # Quick database connectivity check with timeout
+        db_status = {"status": "unknown"}
+        try:
+            # Use a simple timeout-based check
+            db_status = await asyncio.wait_for(
+                asyncio.to_thread(test_database_connection),
+                timeout=5.0  # 5 second timeout
+            )
+        except asyncio.TimeoutError:
+            db_status = {
+                "status": "timeout",
+                "error": "Database connection timeout",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        except Exception as e:
+            db_status = {
+                "status": "error", 
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }
         
         # Get detailed health monitor status if available
         health_monitor_status = None
         if get_database_health_status:
-            health_monitor_status = get_database_health_status()
+            try:
+                health_monitor_status = get_database_health_status()
+            except Exception as e:
+                logger.warning(f"Health monitor status unavailable: {e}")
         
         # Determine overall health
         overall_status = "healthy"
-        if db_status.get("status") != "connected":
+        if db_status.get("status") not in ["connected"]:
             overall_status = "unhealthy"
         elif health_monitor_status and health_monitor_status.get("failure_count", 0) > 0:
             overall_status = "degraded"
@@ -78,10 +99,14 @@ async def health_check() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         log_error(f"Health check failed: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Service temporarily unavailable"
-        )
+        # Return a basic health response even if detailed checks fail
+        return {
+            "status": "degraded",
+            "timestamp": datetime.utcnow().isoformat(),
+            "version": "1.0.0",
+            "environment": os.getenv("ENVIRONMENT", "development"),
+            "error": str(e)
+        }
 
 @router.get(
     "/",

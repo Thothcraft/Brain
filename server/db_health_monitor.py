@@ -20,7 +20,7 @@ logger = logging.getLogger('db_health_monitor')
 class DatabaseHealthMonitor:
     """Monitors database health and performs automatic recovery."""
     
-    def __init__(self, check_interval: int = 120, max_failures: int = 3):  # Increased from 60 to 120 seconds
+    def __init__(self, check_interval: int = 60, max_failures: int = 3):  # Reduced interval for Pro Plan
         self.check_interval = check_interval  # seconds
         self.max_failures = max_failures
         self.failure_count = 0
@@ -28,6 +28,15 @@ class DatabaseHealthMonitor:
         self.is_running = False
         self.monitor_task = None
         self.status_history = []
+        
+        # Try to load Pro Plan configuration
+        try:
+            from server.pro_config import pro_config
+            self.pro_config = pro_config
+            logger.info("Database health monitor using Pro Plan configuration")
+        except ImportError:
+            self.pro_config = None
+            logger.info("Database health monitor using standard configuration")
         
     async def start_monitoring(self):
         """Start the background health monitoring task."""

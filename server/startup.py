@@ -12,6 +12,17 @@ from fastapi import FastAPI
 
 from server.db_health_monitor import start_database_health_monitor, stop_database_health_monitor
 from server.utils.logging_utils import logger
+from server.init_db import initialize_database
+
+async def async_db_init():
+    """Async wrapper for database initialization."""
+    try:
+        if initialize_database():
+            logger.info("Database initialization completed successfully")
+        else:
+            logger.error("Database initialization failed")
+    except Exception as e:
+        logger.error(f"Async database initialization error: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,6 +33,16 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Starting application...")
+    
+    # Initialize database tables
+    try:
+        logger.info("Initializing database tables...")
+        # Run database initialization in background to avoid blocking startup
+        asyncio.create_task(async_db_init())
+        logger.info("Database initialization scheduled")
+    except Exception as e:
+        logger.error(f"Database initialization error: {e}")
+        # Continue without DB init - don't crash the app
     
     # Start database health monitoring
     try:

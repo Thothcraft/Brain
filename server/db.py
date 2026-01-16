@@ -30,32 +30,41 @@ if not DATABASE_URL:
         pass
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://lms_user:lms_password@localhost:5432/thoth")
 
+# Import Pro Plan configuration
+try:
+    from server.pro_config import pro_config
+    DATABASE_URL = pro_config.get_database_url()
+    print(f"[DB] Using Supabase Pro Plan configuration")
+except ImportError:
+    print(f"[DB] Pro Plan config not available, using standard configuration")
+
 print(f"[DB] Using DATABASE_URL: {DATABASE_URL}")
 
 # SQLAlchemy setup
 Base = declarative_base()
 
-# Configure engine with connection pooling optimized for Supabase/cloud PostgreSQL
-# - pool_pre_ping: Test connections before use to detect stale connections
-# - pool_recycle: Recycle connections frequently to prevent SSL timeouts
-# - pool_size: Keep pool small to avoid connection limits
-# - connect_args: Set connection timeout and keepalives
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=5,  # Reduced to prevent pool exhaustion
-    max_overflow=10,  # Reduced overflow
-    pool_timeout=30,  # Reduced timeout
-    pool_pre_ping=True,
-    pool_recycle=300,  # Reduced to 5 minutes for more frequent recycling
-    connect_args={
-        "connect_timeout": 30,  # Reduced timeout
-        "keepalives": 1,
-        "keepalives_idle": 30,  # Reduced idle time
-        "keepalives_interval": 15,  # Reduced interval
-        "keepalives_count": 5,  # Reduced retry attempts
-        "options": "-c statement_timeout=60000"  # Reduced to 1 minute statement timeout
+# Configure engine with connection pooling optimized for Supabase Pro Plan
+try:
+    from server.pro_config import pro_config
+    engine_kwargs = pro_config.get_engine_kwargs()
+    print(f"[DB] Using Pro Plan engine settings: pool_size={engine_kwargs['pool_size']}, max_overflow={engine_kwargs['max_overflow']}")
+except ImportError:
+    # Fallback to manual configuration
+    engine_kwargs = {
+        "pool_size": 50,  # Increased for Pro Plan - more compute resources available
+        "max_overflow": 100,  # Increased overflow for burst capacity
+        "pool_timeout": 30,  # Reduced timeout since Pro Plan has better performance
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,  # Reduced to 30 minutes - Pro Plan can handle more frequent recycling
+        "connect_args": {
+            "connect_timeout": 30,  # Reduced timeout for better responsiveness
+            "application_name": "thoth_pro",  # Identify connection in Supabase dashboard
+            "options": "-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000"  # Optimized timeouts
+        }
     }
-)
+    print(f"[DB] Using fallback engine settings")
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 # Configure logging for database issues
@@ -64,8 +73,8 @@ db_logger = logging.getLogger('database')
 
 def get_db():
     """Dependency to get database session with retry logic."""
-    max_retries = 2  # Reduced from 3 to fail faster
-    retry_delay = 0.5  # Reduced from 1 to retry faster
+    max_retries = 2  # Increased back to 2 since Pro Plan has better performance
+    retry_delay = 0.1  # Reduced delay for faster response
     
     for attempt in range(max_retries):
         db = SessionLocal()
@@ -78,7 +87,7 @@ def get_db():
             db_logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
             db.close()
             if attempt < max_retries - 1:
-                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                time.sleep(retry_delay)
             else:
                 db_logger.error(f"All {max_retries} database connection attempts failed")
                 raise
@@ -91,8 +100,8 @@ def get_db():
 @contextmanager
 def get_db_session():
     """Context manager for database sessions with automatic cleanup."""
-    max_retries = 2  # Reduced from 3
-    retry_delay = 0.5  # Reduced from 1
+    max_retries = 2  # Increased back to 2 for Pro Plan
+    retry_delay = 0.1  # Reduced delay for faster response
     
     for attempt in range(max_retries):
         db = SessionLocal()
@@ -110,7 +119,7 @@ def get_db_session():
                 pass
             db.close()
             if attempt < max_retries - 1:
-                time.sleep(retry_delay * (2 ** attempt))
+                time.sleep(retry_delay)
             else:
                 db_logger.error(f"All {max_retries} database session attempts failed")
                 raise
@@ -130,17 +139,30 @@ def get_db_session():
 def test_database_connection():
     """Test database connectivity and return status."""
     try:
-        with get_db_session() as db:
-            result = db.execute(text("SELECT version(), current_timestamp"))
-            version, timestamp = result.fetchone()
-            return {
-                "status": "connected",
-                "version": version,
-                "timestamp": timestamp.isoformat(),
-                "pool_size": engine.pool.size(),
-                "checked_in": engine.pool.checkedin(),
-                "checked_out": engine.pool.checkedout()
+        # Create a direct connection for testing (avoiding pool issues)
+        direct_engine = create_engine(
+            DATABASE_URL,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=5,
+            pool_pre_ping=True,
+            connect_args={
+                "connect_timeout": 5,
+                "options": "-c statement_timeout=5000"
             }
+        )
+        
+        with direct_engine.connect() as conn:
+            result = conn.execute(text("SELECT 1"))
+            result.fetchone()
+            
+        return {
+            "status": "connected",
+            "timestamp": datetime.utcnow().isoformat(),
+            "pool_size": engine.pool.size(),
+            "checked_in": engine.pool.checkedin(),
+            "checked_out": engine.pool.checkedout()
+        }
     except Exception as e:
         return {
             "status": "disconnected",

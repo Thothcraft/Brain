@@ -118,7 +118,9 @@ async def list_files(
                 "limit": limit,
                 "offset": offset,
                 "next_offset": offset + limit if has_more else None
-            }
+            },
+            "operation": "list_files",
+            "status": "completed"
         }
     except Exception as e:
         log_error(f"Error listing files: {str(e)}")

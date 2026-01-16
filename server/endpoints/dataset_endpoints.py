@@ -109,16 +109,27 @@ async def list_datasets(
 ):
     """List all datasets for the current user."""
     try:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[DATASETS] Starting datasets query for user {current_user.userId}")
+        
         datasets = db.query(TrainingDataset).filter(
             TrainingDataset.user_id == current_user.userId
         ).order_by(TrainingDataset.created_at.desc()).all()
         
+        logger.info(f"[DATASETS] Query completed, found {len(datasets)} datasets")
+        
         return {
             "success": True,
             "datasets": [d.to_dict() for d in datasets],
-            "total": len(datasets)
+            "total": len(datasets),
+            "operation": "list_datasets",
+            "status": "completed"
         }
     except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"[DATASETS] Error listing datasets: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to list datasets: {str(e)}")
 
 
@@ -531,13 +542,15 @@ async def list_training_jobs(
         
         jobs = query.order_by(TrainingJob.created_at.desc()).limit(limit).all()
         
-        logger.info(f"[JOBS] Query returned {len(jobs)} jobs")
+        logger.info(f"[JOBS] Query completed, returned {len(jobs)} jobs")
         
         return {
             "success": True,
             "jobs": [j.to_dict() for j in jobs],
             "total": len(jobs),
-            "limit": limit
+            "limit": limit,
+            "operation": "list_training_jobs",
+            "status": "completed"
         }
     except Exception as e:
         import logging
@@ -647,43 +660,7 @@ async def list_trained_models(
         logger = logging.getLogger(__name__)
         logger.info(f"[MODELS] Starting models query for user {current_user.userId}")
         
-        # Only select necessary columns, exclude model_data to avoid loading large binaries
-        from sqlalchemy import text
-        
-        # Use a separate connection for table creation to avoid transaction conflicts
-        try:
-            # Check if table exists first
-            table_check = db.execute(text("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'trained_model'
-                )
-            """)).scalar()
-            
-            if not table_check:
-                logger.info("[MODELS] Creating trained_model table")
-                db.execute(text("""
-                    CREATE TABLE trained_model (
-                        id SERIAL PRIMARY KEY,
-                        user_id INTEGER NOT NULL,
-                        job_id VARCHAR(255),
-                        name VARCHAR(255) NOT NULL,
-                        architecture VARCHAR(50),
-                        accuracy FLOAT,
-                        size_bytes BIGINT,
-                        model_data BYTEA,
-                        config TEXT,
-                        is_pinned BOOLEAN DEFAULT FALSE,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """))
-                db.commit()
-                logger.info("[MODELS] Table created successfully")
-        except Exception as table_error:
-            logger.error(f"[MODELS] Table creation error: {table_error}")
-            db.rollback()
-        
-        # Query only necessary columns, exclude model_data
+        # Query only necessary columns, exclude model_data to avoid loading large binaries
         logger.info("[MODELS] Executing models query")
         models = db.query(
             TrainedModel.id,
@@ -697,7 +674,7 @@ async def list_trained_models(
             TrainedModel.created_at
         ).filter(
             TrainedModel.user_id == current_user.userId
-        ).order_by(TrainedModel.created_at.desc()).limit(50).all()  # Add limit to prevent large result sets
+        ).order_by(TrainedModel.created_at.desc()).limit(50).all()
         
         logger.info(f"[MODELS] Query returned {len(models)} models")
         
@@ -709,25 +686,28 @@ async def list_trained_models(
                 "job_id": m.job_id,
                 "name": m.name,
                 "architecture": m.architecture,
-                "accuracy": m.accuracy,
-                "size_bytes": m.size_bytes,
-                "config": m.config,
+                "accuracy": round(m.accuracy, 2) if m.accuracy else None,
+                "size_mb": m.size_bytes / (1024 * 1024) if m.size_bytes else None,
+                "config": json.loads(m.config) if m.config else {},
                 "is_pinned": m.is_pinned,
                 "created_at": m.created_at.isoformat() if m.created_at else None
             })
         
+        logger.info(f"[MODELS] Successfully processed {len(model_list)} models")
+        
         return {
             "success": True,
             "models": model_list,
-            "total": len(model_list)
+            "total": len(model_list),
+            "operation": "list_models",
+            "status": "completed"
         }
+        
     except Exception as e:
-        print(f"[ERROR] Failed to list models: {str(e)}")
-        return {
-            "success": True,
-            "models": [],
-            "total": 0
-        }
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"[MODELS] Error listing models: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
 
 
 @router.delete("/models/{model_id}", response_model=StandardResponse)

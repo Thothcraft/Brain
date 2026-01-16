@@ -379,14 +379,8 @@ async def root():
             "swagger": "/docs",
             "redoc": "/redoc",
             "openapi_schema": "/openapi.json"
-        },
-        "health_check": "/health"
+        }
     }
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    return {"status": "ok"}
 
 # Include API router without prefix
 app.include_router(router, prefix="")
