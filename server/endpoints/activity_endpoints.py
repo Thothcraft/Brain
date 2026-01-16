@@ -168,16 +168,16 @@ async def get_recent_activity(
         # Get recent AI queries
         queries = db.query(QueryModel).filter(
             QueryModel.userId == current_user.userId,
-            QueryModel.timestamp > cutoff_time
-        ).order_by(desc(QueryModel.timestamp)).limit(limit).all()
+            QueryModel.created_at > cutoff_time
+        ).order_by(desc(QueryModel.created_at)).limit(limit).all()
         
         for query in queries:
             activities.append({
                 "type": "query",
                 "action": "asked",
                 "title": "AI Query",
-                "description": query.query[:100] + "..." if len(query.query) > 100 else query.query,
-                "timestamp": query.timestamp.isoformat(),
+                "description": query.query_text[:100] + "..." if len(query.query_text) > 100 else query.query_text,
+                "timestamp": query.created_at.isoformat(),
                 "icon": "message-circle",
                 "color": "indigo"
             })
