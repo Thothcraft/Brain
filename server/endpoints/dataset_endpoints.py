@@ -1096,19 +1096,19 @@ async def add_files_to_dataset(
         added_count = 0
         errors = []
         
-        # Batch query all files at once instead of one by one
-        file_ids = [f.get("file_id") for f in request.files if f.get("file_id")]
+        # Batch query only file IDs (avoid selecting large columns like file.content)
+        file_ids = sorted({f.get("file_id") for f in request.files if f.get("file_id")})
         logger.info(f"[ADD_FILES] Querying {len(file_ids)} files in batch")
         
         query_start = time.time()
-        files_dict = {}
+        existing_file_ids = set()
         if file_ids:
-            files = db.query(File).filter(
+            rows = db.query(File.fileId).filter(
                 File.fileId.in_(file_ids),
                 File.userId == current_user.userId
             ).all()
-            files_dict = {f.fileId: f for f in files}
-        logger.info(f"[ADD_FILES] Batch file query took {(time.time() - query_start)*1000:.2f}ms, found {len(files_dict)} files")
+            existing_file_ids = {r[0] for r in rows}
+        logger.info(f"[ADD_FILES] Batch file-id query took {(time.time() - query_start)*1000:.2f}ms, found {len(existing_file_ids)} files")
         
         # Process files
         dataset_files_to_add = []
@@ -1121,7 +1121,7 @@ async def add_files_to_dataset(
                 continue
             
             # Check if file exists in our batch query results
-            if file_id not in files_dict:
+            if file_id not in existing_file_ids:
                 errors.append(f"File {file_id} not found")
                 logger.warning(f"[ADD_FILES] File {file_id} not found for user {current_user.userId}")
                 continue
