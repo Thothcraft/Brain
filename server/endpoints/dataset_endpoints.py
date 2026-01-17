@@ -18,7 +18,7 @@ import asyncio
 import random
 import logging
 
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, load_only
 
 from ..db import get_db, TrainingDataset, DatasetFile, TrainingJob, TrainedModel, File
 from ..auth import get_current_user
@@ -999,7 +999,13 @@ async def get_dataset(
     """Get dataset details including all files and labels."""
     try:
         dataset = db.query(TrainingDataset).options(
-            selectinload(TrainingDataset.files).selectinload(DatasetFile.file)
+            selectinload(TrainingDataset.files).selectinload(DatasetFile.file).load_only(
+                File.fileId,
+                File.filename,
+                File.size,
+                File.content_type,
+                File.uploaded_at,
+            )
         ).filter(
             TrainingDataset.id == dataset_id,
             TrainingDataset.user_id == current_user.userId,
