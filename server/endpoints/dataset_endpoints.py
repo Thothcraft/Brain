@@ -73,6 +73,9 @@ class CloudTrainingRequest(BaseModel):
     subcarrier_start: int = 5  # CSI: start index for filtering
     subcarrier_end: int = 32  # CSI: end index for filtering
     output_shape: str = "flattened"  # flattened (ML) or sequence (DL)
+
+    # ML-specific hyperparameters (used for knn/svc/adaboost)
+    ml_params: Optional[Dict[str, Any]] = None
     
     # Bayesian optimization settings
     use_bayesian_optimization: bool = False
@@ -504,6 +507,8 @@ async def start_cloud_training(
             "subcarrier_start": request.subcarrier_start,
             "subcarrier_end": request.subcarrier_end,
             "output_shape": request.output_shape,
+            # ML-specific hyperparameters
+            "ml_params": request.ml_params or {},
             # Bayesian optimization settings
             "use_bayesian_optimization": request.use_bayesian_optimization,
             "bayesian_trials": request.bayesian_trials,
