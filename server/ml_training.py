@@ -209,7 +209,7 @@ def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
     Returns list of windows, each shape (window_size, 6)
     """
     try:
-        text_content = content.decode('utf-8').strip()
+        text_content = content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
         samples = []
         
         # Try parsing as single JSON first
@@ -235,6 +235,11 @@ def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
                 line = line.strip()
                 if not line:
                     continue
+
+                # Some exporters add trailing commas; be tolerant.
+                if line.endswith(','):
+                    line = line[:-1].rstrip()
+
                 try:
                     obj = json.loads(line)
                     if isinstance(obj, dict):
@@ -243,28 +248,89 @@ def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
                         samples.extend(obj)
                 except json.JSONDecodeError:
                     continue
-            
+
             if samples:
                 logger.info(f"Parsed {len(samples)} samples from JSONL format")
         
         if not samples:
+            # CSV fallback (common for IMU logs)
+            try:
+                import csv
+                reader = csv.DictReader(io.StringIO(text_content))
+                for row in reader:
+                    samples.append(row)
+            except Exception:
+                samples = []
+
+        if not samples:
             logger.warning("No samples found in IMU file")
             return []
         
+        def _get_nested_xyz(obj: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+            if obj is None:
+                return None, None, None
+            if isinstance(obj, dict):
+                try:
+                    return float(obj.get('x')), float(obj.get('y')), float(obj.get('z'))
+                except Exception:
+                    return None, None, None
+            if isinstance(obj, (list, tuple)) and len(obj) >= 3:
+                try:
+                    return float(obj[0]), float(obj[1]), float(obj[2])
+                except Exception:
+                    return None, None, None
+            return None, None, None
+
         # Extract 6-axis IMU data
         imu_data = []
         for sample in samples:
             try:
+                if not isinstance(sample, dict):
+                    continue
+
+                accel_x = accel_y = accel_z = None
+                gyro_x = gyro_y = gyro_z = None
+
+                # Nested format: {"imu": {"accel": {"x","y","z"}, "gyro": {...}}}
+                if isinstance(sample.get('imu'), dict):
+                    ax, ay, az = _get_nested_xyz(sample['imu'].get('accel'))
+                    gx, gy, gz = _get_nested_xyz(sample['imu'].get('gyro'))
+                    accel_x, accel_y, accel_z = ax, ay, az
+                    gyro_x, gyro_y, gyro_z = gx, gy, gz
+
+                # Alternative nested: {"accel": {"x","y","z"}, "gyro": {...}}
+                if accel_x is None and isinstance(sample.get('accel'), (dict, list, tuple)):
+                    accel_x, accel_y, accel_z = _get_nested_xyz(sample.get('accel'))
+                if gyro_x is None and isinstance(sample.get('gyro'), (dict, list, tuple)):
+                    gyro_x, gyro_y, gyro_z = _get_nested_xyz(sample.get('gyro'))
+
+                # Flat keys (JSON / CSV)
+                if accel_x is None:
+                    accel_x = sample.get('accel_x', sample.get('ax', sample.get('accel.x')))
+                if accel_y is None:
+                    accel_y = sample.get('accel_y', sample.get('ay', sample.get('accel.y')))
+                if accel_z is None:
+                    accel_z = sample.get('accel_z', sample.get('az', sample.get('accel.z')))
+                if gyro_x is None:
+                    gyro_x = sample.get('gyro_x', sample.get('gx', sample.get('gyro.x')))
+                if gyro_y is None:
+                    gyro_y = sample.get('gyro_y', sample.get('gy', sample.get('gyro.y')))
+                if gyro_z is None:
+                    gyro_z = sample.get('gyro_z', sample.get('gz', sample.get('gyro.z')))
+
+                if accel_x is None or accel_y is None or accel_z is None or gyro_x is None or gyro_y is None or gyro_z is None:
+                    continue
+
                 row = [
-                    float(sample.get('accel_x', sample.get('ax', 0))),
-                    float(sample.get('accel_y', sample.get('ay', 0))),
-                    float(sample.get('accel_z', sample.get('az', 0))),
-                    float(sample.get('gyro_x', sample.get('gx', 0))),
-                    float(sample.get('gyro_y', sample.get('gy', 0))),
-                    float(sample.get('gyro_z', sample.get('gz', 0)))
+                    float(accel_x),
+                    float(accel_y),
+                    float(accel_z),
+                    float(gyro_x),
+                    float(gyro_y),
+                    float(gyro_z),
                 ]
                 imu_data.append(row)
-            except (KeyError, TypeError, ValueError) as e:
+            except (KeyError, TypeError, ValueError):
                 continue
         
         logger.info(f"Extracted {len(imu_data)} IMU samples")
