@@ -222,7 +222,6 @@ def parse_csi_file(
         - sequence: each array is shape (window_size, features)
     """
     import math
-    import pandas as pd
     
     try:
         text_content = content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
@@ -255,69 +254,77 @@ def parse_csi_file(
         
         logger.info(f"Parsed {len(csi_rows)} CSI rows")
         
-        # Convert to DataFrame
-        df = pd.DataFrame(csi_rows)
-        
-        # Extract amplitude and phase from complex values
-        # Format: [imag0, real0, imag1, real1, ...]
-        amplitudes_list = []
-        phases_list = []
-        
-        for row in df.values:
-            row_list = row.tolist()
-            n_subcarriers = len(row_list) // 2
-            
-            amplitudes = []
-            phases = []
-            
-            for k in range(n_subcarriers):
-                imag_idx = k * 2
-                real_idx = k * 2 + 1
-                
-                if real_idx < len(row_list):
-                    imag_val = float(row_list[imag_idx])
-                    real_val = float(row_list[real_idx])
-                    
-                    amp = math.sqrt(imag_val**2 + real_val**2)
-                    phase = math.atan2(imag_val, real_val)
-                    
-                    amplitudes.append(amp)
-                    phases.append(phase)
-            
-            amplitudes_list.append(amplitudes)
-            phases_list.append(phases)
-        
-        amp_df = pd.DataFrame(amplitudes_list)
-        phase_df = pd.DataFrame(phases_list)
-        
-        logger.info(f"Extracted amplitude shape: {amp_df.shape}, phase shape: {phase_df.shape}")
+        # Normalize row lengths to avoid NaN padding from ragged rows
+        lengths = [len(r) for r in csi_rows]
+        if not lengths:
+            return [], {"error": "No valid CSI data"}
+
+        # Use the most common length (and force even length for IQ pairs)
+        try:
+            from collections import Counter
+            expected_len = Counter(lengths).most_common(1)[0][0]
+        except Exception:
+            expected_len = int(np.median(lengths))
+
+        expected_len = int(expected_len)
+        expected_len = expected_len - (expected_len % 2)
+        if expected_len <= 0:
+            return [], {"error": "Invalid CSI row length"}
+
+        cleaned_rows = []
+        dropped_rows = 0
+        for r in csi_rows:
+            if len(r) < expected_len:
+                dropped_rows += 1
+                continue
+            rr = r[:expected_len]
+            arr = np.asarray(rr, dtype=np.float32)
+            if not np.isfinite(arr).all():
+                dropped_rows += 1
+                continue
+            cleaned_rows.append(arr)
+
+        if not cleaned_rows:
+            return [], {"error": "No valid CSI rows after cleaning"}
+
+        csi_arr = np.stack(cleaned_rows, axis=0)  # (n_rows, expected_len)
+        n_rows = csi_arr.shape[0]
+        n_subcarriers = expected_len // 2
+        imag = csi_arr[:, 0::2]
+        real = csi_arr[:, 1::2]
+
+        amp_arr = np.sqrt(imag ** 2 + real ** 2)
+        phase_arr = np.arctan2(imag, real)
+
+        logger.info(f"Extracted amplitude shape: {amp_arr.shape}, phase shape: {phase_arr.shape} (dropped_rows={dropped_rows})")
         
         # Apply subcarrier filtering (remove null guard bands)
-        if filter_subcarriers and amp_df.shape[1] > subcarrier_end + 27:
-            # First range: subcarrier_start to subcarrier_end
-            # Second range: subcarrier_end+1 to subcarrier_end+27 (skip guard band)
-            amp_df1 = amp_df.iloc[:, subcarrier_start:subcarrier_end]
-            amp_df2 = amp_df.iloc[:, subcarrier_end+1:subcarrier_end+28]
-            amp_df = pd.concat([amp_df1, amp_df2], axis=1)
-            
-            phase_df1 = phase_df.iloc[:, subcarrier_start:subcarrier_end]
-            phase_df2 = phase_df.iloc[:, subcarrier_end+1:subcarrier_end+28]
-            phase_df = pd.concat([phase_df1, phase_df2], axis=1)
-            
-            logger.info(f"After subcarrier filtering: amp shape {amp_df.shape}")
+        if filter_subcarriers and amp_arr.shape[1] > subcarrier_end + 27:
+            amp_arr1 = amp_arr[:, subcarrier_start:subcarrier_end]
+            amp_arr2 = amp_arr[:, subcarrier_end+1:subcarrier_end+28]
+            amp_arr = np.concatenate([amp_arr1, amp_arr2], axis=1)
+
+            phase_arr1 = phase_arr[:, subcarrier_start:subcarrier_end]
+            phase_arr2 = phase_arr[:, subcarrier_end+1:subcarrier_end+28]
+            phase_arr = np.concatenate([phase_arr1, phase_arr2], axis=1)
+
+            logger.info(f"After subcarrier filtering: amp shape {amp_arr.shape}")
         
         # Combine amplitude and phase if requested
         if include_phase:
-            combined_df = pd.concat([amp_df, phase_df], axis=1)
+            combined_arr = np.concatenate([amp_arr, phase_arr], axis=1)
         else:
-            combined_df = amp_df
-        
-        logger.info(f"Combined data shape: {combined_df.shape}")
+            combined_arr = amp_arr
+
+        if not np.isfinite(combined_arr).all():
+            combined_arr = np.nan_to_num(combined_arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+        logger.info(f"Combined data shape: {combined_arr.shape}")
         
         # Create windows
         windows = []
-        n_rows = len(combined_df)
-        n_features = combined_df.shape[1]
+        n_rows = combined_arr.shape[0]
+        n_features = combined_arr.shape[1]
         
         if n_rows < window_size:
             logger.warning(f"Not enough rows ({n_rows}) for window size {window_size}")
@@ -325,13 +332,11 @@ def parse_csi_file(
         
         # Create non-overlapping windows
         for start in range(0, n_rows - window_size + 1, window_size):
-            window_data = combined_df.iloc[start:start + window_size].values
-            
+            window_data = combined_arr[start:start + window_size]
+
             if output_shape == "flattened":
-                # Flatten for ML models: (window_size * n_features,)
-                windows.append(window_data.flatten().astype(np.float32))
+                windows.append(window_data.reshape(-1).astype(np.float32))
             else:
-                # Keep as sequence for DL models: (window_size, n_features)
                 windows.append(window_data.astype(np.float32))
         
         metadata = {
@@ -342,7 +347,9 @@ def parse_csi_file(
             "include_phase": include_phase,
             "filter_subcarriers": filter_subcarriers,
             "output_shape": output_shape,
-            "final_shape": windows[0].shape if windows else None
+            "final_shape": windows[0].shape if windows else None,
+            "expected_row_len": expected_len,
+            "dropped_rows": dropped_rows
         }
         
         logger.info(f"Created {len(windows)} windows, shape: {metadata['final_shape']}")
@@ -1445,6 +1452,15 @@ async def run_full_training(
         logger.error(traceback.format_exc())
         raise RuntimeError(f"Dataset loading failed: {e}") from e
     
+    # Sanitize non-finite values before any downstream processing
+    try:
+        non_finite_count = int((~np.isfinite(X)).sum())
+        if non_finite_count > 0:
+            logger.warning(f"Dataset contains non-finite values: {non_finite_count}. Replacing with 0.")
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    except Exception as e:
+        logger.warning(f"Failed to sanitize non-finite values: {e}")
+
     # Normalize data (z-score normalization)
     try:
         logger.debug("Normalizing data...")
