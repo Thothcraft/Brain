@@ -17,6 +17,8 @@ import json
 import asyncio
 import random
 
+from sqlalchemy.orm import selectinload
+
 from ..db import get_db, TrainingDataset, DatasetFile, TrainingJob, TrainedModel, File
 from ..auth import get_current_user
 from .models import StandardResponse
@@ -560,18 +562,25 @@ async def list_training_jobs(
         import logging
         logger = logging.getLogger(__name__)
         logger.info(f"[JOBS] Starting jobs query for user {current_user.userId}, status={status}, limit={limit}")
-        
-        # Optimized query - select only necessary columns
+
         query = db.query(
             TrainingJob.job_id,
             TrainingJob.dataset_id,
+            TrainingDataset.name.label("dataset_name"),
+            TrainingJob.model_type,
+            TrainingJob.training_mode,
             TrainingJob.status,
             TrainingJob.current_epoch,
             TrainingJob.total_epochs,
+            TrainingJob.metrics,
+            TrainingJob.best_metrics,
             TrainingJob.created_at,
             TrainingJob.started_at,
             TrainingJob.completed_at,
-            TrainingJob.error_message
+            TrainingJob.error_message,
+        ).outerjoin(
+            TrainingDataset,
+            TrainingDataset.id == TrainingJob.dataset_id,
         ).filter(TrainingJob.user_id == current_user.userId)
         
         if status:
@@ -584,20 +593,40 @@ async def list_training_jobs(
         # Convert to dict efficiently
         job_list = []
         for j in jobs:
-            # Calculate progress from current_epoch and total_epochs
             progress = 0.0
             if j.total_epochs and j.total_epochs > 0:
                 progress = (j.current_epoch / j.total_epochs) * 100
-            
+
+            metrics = {}
+            if j.metrics:
+                try:
+                    metrics = json.loads(j.metrics)
+                except Exception:
+                    metrics = {}
+
+            best_metrics = {}
+            if j.best_metrics:
+                try:
+                    best_metrics = json.loads(j.best_metrics)
+                except Exception:
+                    best_metrics = {}
+
             job_list.append({
                 "job_id": j.job_id,
                 "dataset_id": j.dataset_id,
+                "dataset_name": j.dataset_name,
+                "model_type": j.model_type,
+                "training_mode": j.training_mode,
                 "status": j.status,
+                "current_epoch": j.current_epoch,
+                "total_epochs": j.total_epochs,
                 "progress": progress,
+                "metrics": metrics,
+                "best_metrics": best_metrics,
                 "created_at": j.created_at.isoformat() if j.created_at else None,
                 "started_at": j.started_at.isoformat() if j.started_at else None,
                 "completed_at": j.completed_at.isoformat() if j.completed_at else None,
-                "error_message": j.error_message
+                "error_message": j.error_message,
             })
         
         return {
@@ -966,15 +995,16 @@ async def get_dataset(
 ):
     """Get dataset details including all files and labels."""
     try:
-        dataset = db.query(TrainingDataset).filter(
+        dataset = db.query(TrainingDataset).options(
+            selectinload(TrainingDataset.files).selectinload(DatasetFile.file)
+        ).filter(
             TrainingDataset.id == dataset_id,
-            TrainingDataset.user_id == current_user.userId
+            TrainingDataset.user_id == current_user.userId,
         ).first()
         
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
         
-        # Get files with their details
         files_with_details = []
         for df in dataset.files:
             file_info = df.to_dict()
