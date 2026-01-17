@@ -1010,18 +1010,42 @@ async def add_files_to_dataset(
     current_user = Depends(get_current_user)
 ):
     """Add files with labels to a dataset."""
+    import time
+    start_time = time.time()
+    logger.info(f"[ADD_FILES] Starting to add {len(request.files)} files to dataset {dataset_id} for user {current_user.userId}")
+    
     try:
+        # Query dataset
+        query_start = time.time()
         dataset = db.query(TrainingDataset).filter(
             TrainingDataset.id == dataset_id,
             TrainingDataset.user_id == current_user.userId
         ).first()
+        logger.info(f"[ADD_FILES] Dataset query took {(time.time() - query_start)*1000:.2f}ms")
         
         if not dataset:
+            logger.warning(f"[ADD_FILES] Dataset {dataset_id} not found for user {current_user.userId}")
             raise HTTPException(status_code=404, detail="Dataset not found")
         
         added_count = 0
         errors = []
         
+        # Batch query all files at once instead of one by one
+        file_ids = [f.get("file_id") for f in request.files if f.get("file_id")]
+        logger.info(f"[ADD_FILES] Querying {len(file_ids)} files in batch")
+        
+        query_start = time.time()
+        files_dict = {}
+        if file_ids:
+            files = db.query(File).filter(
+                File.fileId.in_(file_ids),
+                File.userId == current_user.userId
+            ).all()
+            files_dict = {f.fileId: f for f in files}
+        logger.info(f"[ADD_FILES] Batch file query took {(time.time() - query_start)*1000:.2f}ms, found {len(files_dict)} files")
+        
+        # Process files
+        dataset_files_to_add = []
         for file_entry in request.files:
             file_id = file_entry.get("file_id")
             label = file_entry.get("label")
@@ -1030,31 +1054,39 @@ async def add_files_to_dataset(
                 errors.append(f"Missing file_id or label in entry")
                 continue
             
-            # Verify file exists and belongs to user
-            file = db.query(File).filter(
-                File.fileId == file_id,
-                File.userId == current_user.userId
-            ).first()
-            
-            if not file:
+            # Check if file exists in our batch query results
+            if file_id not in files_dict:
                 errors.append(f"File {file_id} not found")
+                logger.warning(f"[ADD_FILES] File {file_id} not found for user {current_user.userId}")
                 continue
             
-            # Always add new entry - allow same file with different labels
+            # Prepare dataset file entry
             dataset_file = DatasetFile(
                 dataset_id=dataset_id,
                 file_id=file_id,
                 label=label
             )
-            db.add(dataset_file)
-            
+            dataset_files_to_add.append(dataset_file)
             added_count += 1
         
+        # Bulk add all dataset files
+        if dataset_files_to_add:
+            logger.info(f"[ADD_FILES] Adding {len(dataset_files_to_add)} dataset file entries")
+            add_start = time.time()
+            db.bulk_save_objects(dataset_files_to_add)
+            logger.info(f"[ADD_FILES] Bulk add took {(time.time() - add_start)*1000:.2f}ms")
+        
+        # Commit transaction
+        commit_start = time.time()
         db.commit()
+        logger.info(f"[ADD_FILES] Commit took {(time.time() - commit_start)*1000:.2f}ms")
+        
+        total_time = (time.time() - start_time) * 1000
+        logger.info(f"[ADD_FILES] Successfully added {added_count} files to dataset {dataset_id} in {total_time:.2f}ms")
         
         return {
             "success": True,
-            "message": f"Added/updated {added_count} files to dataset",
+            "message": f"Added {added_count} files to dataset",
             "added_count": added_count,
             "errors": errors if errors else None
         }
@@ -1063,7 +1095,7 @@ async def add_files_to_dataset(
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"[ERROR] Failed to add files: {str(e)}\n{error_details}")
+        logger.error(f"[ADD_FILES] Failed to add files to dataset {dataset_id}: {str(e)}\n{error_details}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to add files: {str(e)}")
 
