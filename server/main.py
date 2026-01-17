@@ -263,6 +263,25 @@ ALLOWED_ORIGINS = [
 ]
 
 # --------------------------------------------------
+# Enhanced CORS middleware - MUST BE ADDED FIRST
+# --------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,  # Use specific origins to allow credentials
+    allow_credentials=True,  # Allow credentials with specific origins
+    allow_methods=["*"],  # Allow all methods including OPTIONS
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=[
+        "Content-Range",
+        "X-Total-Count",
+        "Link",
+        "X-Request-Id",
+        "X-Response-Time",
+    ],
+    max_age=600,  # 10 minutes
+)
+
+# --------------------------------------------------
 # Global logging middleware
 # --------------------------------------------------
 from time import perf_counter
@@ -351,25 +370,6 @@ async def global_logging_middleware(request: Request, call_next):
             traceback.format_exc()
         )
         raise
-
-# --------------------------------------------------
-# Enhanced CORS middleware
-# --------------------------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,  # Use specific origins to allow credentials
-    allow_credentials=True,  # Allow credentials with specific origins
-    allow_methods=["*"],  # Allow all methods including OPTIONS
-    allow_headers=["*"],  # Allow all headers
-    expose_headers=[
-        "Content-Range",
-        "X-Total-Count",
-        "Link",
-        "X-Request-Id",
-        "X-Response-Time",
-    ],
-    max_age=600,  # 10 minutes
-)
 
 # Root endpoint
 @app.get("/")
