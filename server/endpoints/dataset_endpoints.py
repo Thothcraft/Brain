@@ -1006,17 +1006,47 @@ async def get_dataset(
             raise HTTPException(status_code=404, detail="Dataset not found")
         
         files_with_details = []
-        for df in dataset.files:
-            file_info = df.to_dict()
-            if df.file:
-                file_info["size"] = df.file.size
-                file_info["content_type"] = df.file.content_type
-            files_with_details.append(file_info)
+        for df in dataset.files or []:
+            try:
+                file_info = df.to_dict() if hasattr(df, "to_dict") else {
+                    "id": getattr(df, "id", None),
+                    "dataset_id": getattr(df, "dataset_id", None),
+                    "file_id": getattr(df, "file_id", None),
+                    "filename": None,
+                    "label": getattr(df, "label", None),
+                    "created_at": getattr(df, "created_at", None).isoformat() if getattr(df, "created_at", None) else None,
+                }
+
+                if df.file:
+                    file_info["filename"] = df.file.filename
+                    file_info["size"] = df.file.size
+                    file_info["content_type"] = df.file.content_type
+                    file_info["file_missing"] = False
+                else:
+                    file_info["file_missing"] = True
+
+                files_with_details.append(file_info)
+            except Exception as file_err:
+                files_with_details.append({
+                    "id": getattr(df, "id", None),
+                    "dataset_id": getattr(df, "dataset_id", None),
+                    "file_id": getattr(df, "file_id", None),
+                    "filename": None,
+                    "label": getattr(df, "label", None),
+                    "created_at": getattr(df, "created_at", None).isoformat() if getattr(df, "created_at", None) else None,
+                    "file_missing": True,
+                    "error": str(file_err),
+                })
         
         # Calculate label distribution
         label_counts = {}
-        for df in dataset.files:
-            label_counts[df.label] = label_counts.get(df.label, 0) + 1
+        for df in dataset.files or []:
+            try:
+                if df.label is None:
+                    continue
+                label_counts[df.label] = label_counts.get(df.label, 0) + 1
+            except Exception:
+                continue
         
         result = dataset.to_dict()
         result["files"] = files_with_details
@@ -1029,6 +1059,9 @@ async def get_dataset(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"[DATASET] Failed to get dataset {dataset_id} for user {getattr(current_user, 'userId', None)}: {e}\n{error_details}")
         raise HTTPException(status_code=500, detail=f"Failed to get dataset: {str(e)}")
 
 
