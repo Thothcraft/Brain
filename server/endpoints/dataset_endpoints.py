@@ -16,6 +16,7 @@ import uuid
 import json
 import asyncio
 import random
+import logging
 
 from sqlalchemy.orm import selectinload
 
@@ -24,6 +25,8 @@ from ..auth import get_current_user
 from .models import StandardResponse
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
