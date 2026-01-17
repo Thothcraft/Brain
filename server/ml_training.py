@@ -1049,7 +1049,8 @@ async def run_full_training(
     # Get window size from config (default 128)
     window_size = config.get('window_size', 128)
     architecture_size = config.get('model_architecture', 'medium')
-    validation_split = config.get('validation_split', 0.2)
+    validation_split = float(config.get('validation_split', 0.2) or 0.0)
+    test_split = float(config.get('test_split', 0.0) or 0.0)
     
     # Load real data from database
     try:
@@ -1096,16 +1097,34 @@ async def run_full_training(
         logger.debug("Shuffling and splitting data...")
         indices = np.random.permutation(len(X))
         X, y = X[indices], y[indices]
-        
-        split_idx = int(len(X) * (1 - validation_split))
-        X_train, X_val = X[:split_idx], X[split_idx:]
-        y_train, y_val = y[:split_idx], y[split_idx:]
-        
+
+        if validation_split < 0 or test_split < 0 or (validation_split + test_split) >= 1:
+            raise ValueError(f"Invalid splits: validation_split={validation_split}, test_split={test_split}. Must be >=0 and sum < 1")
+
+        n_total = len(X)
+        n_test = int(n_total * test_split)
+        n_val = int(n_total * validation_split)
+        n_train = n_total - n_val - n_test
+
+        if n_train <= 0:
+            raise ValueError(f"Invalid splits result in no training data: total={n_total}, train={n_train}, val={n_val}, test={n_test}")
+
+        X_train = X[:n_train]
+        y_train = y[:n_train]
+        X_val = X[n_train:n_train + n_val] if n_val > 0 else X[:0]
+        y_val = y[n_train:n_train + n_val] if n_val > 0 else y[:0]
+        X_test = X[n_train + n_val:] if n_test > 0 else X[:0]
+        y_test = y[n_train + n_val:] if n_test > 0 else y[:0]
+
         logger.info(f"✓ Data split complete")
         logger.info(f"  Train: {len(X_train)} samples ({len(X_train)/len(X)*100:.1f}%)")
         logger.info(f"  Val: {len(X_val)} samples ({len(X_val)/len(X)*100:.1f}%)")
+        logger.info(f"  Test: {len(X_test)} samples ({len(X_test)/len(X)*100:.1f}%)")
         logger.info(f"  Train label dist: {np.bincount(y_train)}")
-        logger.info(f"  Val label dist: {np.bincount(y_val)}")
+        if len(y_val) > 0:
+            logger.info(f"  Val label dist: {np.bincount(y_val)}")
+        if len(y_test) > 0:
+            logger.info(f"  Test label dist: {np.bincount(y_test)}")
         
     except Exception as e:
         logger.error(f"✗ Data splitting failed: {e}")
@@ -1120,10 +1139,40 @@ async def run_full_training(
     
     if is_ml_model:
         logger.info(f"Training ML model: {model_type}")
-        return await train_ml_model(
-            job_id, X_train, y_train, X_val, y_val, class_names, 
+        ml_results = await train_ml_model(
+            job_id, X_train, y_train,
+            X_val if len(X_val) > 0 else X_train,
+            y_val if len(y_val) > 0 else y_train,
+            class_names,
             model_type, config, db_session, update_callback
         )
+
+        if len(X_test) > 0:
+            try:
+                from server.ml_models import MLModelWrapper, get_default_ml_config
+                ml_config = get_default_ml_config(model_type)
+                ml_config.update(config.get('ml_params', {}))
+                model_wrapper = MLModelWrapper(model_type, ml_config)
+                model_wrapper.fit(X_train, y_train, X_val if len(X_val) > 0 else X_train, y_val if len(y_val) > 0 else y_train)
+                test_preds = model_wrapper.predict(X_test)
+                test_acc = float((test_preds == y_test).mean()) if len(y_test) > 0 else 0.0
+                ml_results['test_results'] = {
+                    'test_accuracy': test_acc,
+                    'test_loss': 0.0,
+                    'test_dataset_id': None
+                }
+            except Exception as test_err:
+                logger.warning(f"Test evaluation for ML model failed: {test_err}")
+
+        ml_results['num_train_samples'] = len(X_train)
+        ml_results['num_val_samples'] = len(X_val)
+        ml_results['num_test_samples'] = len(X_test)
+        ml_results['splits'] = {
+            'train': 1 - validation_split - test_split,
+            'val': validation_split,
+            'test': test_split
+        }
+        return ml_results
     
     # Deep Learning path (existing code)
     logger.info("Training Deep Learning model: CNN-LSTM")
@@ -1178,6 +1227,13 @@ async def run_full_training(
         val_dataset = TensorDataset(X_val_t, y_val_t)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+        test_loader = None
+        if len(X_test) > 0:
+            X_test_t = torch.FloatTensor(X_test)
+            y_test_t = torch.LongTensor(y_test)
+            test_dataset = TensorDataset(X_test_t, y_test_t)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size)
         
         logger.info(f"✓ Data loaders created")
         logger.debug(f"  Train batches: {len(train_loader)}")
@@ -1270,6 +1326,42 @@ async def run_full_training(
         None,
         lambda: compute_metrics(model, val_loader, class_names, device)
     )
+
+    test_results = None
+    if test_loader is not None:
+        try:
+            logger.info("Computing test metrics...")
+            test_metrics = await loop.run_in_executor(
+                None,
+                lambda: compute_metrics(model, test_loader, class_names, device)
+            )
+
+            def compute_test_accuracy_and_loss():
+                model.eval()
+                correct = 0
+                total = 0
+                loss_total = 0.0
+                criterion = nn.CrossEntropyLoss()
+                with torch.no_grad():
+                    for bx, by in test_loader:
+                        bx, by = bx.to(device), by.to(device)
+                        out = model(bx)
+                        loss = criterion(out, by)
+                        loss_total += float(loss.item()) * bx.size(0)
+                        pred = out.argmax(dim=1)
+                        correct += int((pred == by).sum().item())
+                        total += int(by.size(0))
+                return (correct / total) if total > 0 else 0.0, (loss_total / total) if total > 0 else 0.0
+
+            test_acc, test_loss = await loop.run_in_executor(None, compute_test_accuracy_and_loss)
+            test_results = {
+                'test_accuracy': round(float(test_acc), 4),
+                'test_loss': round(float(test_loss), 4),
+                'test_dataset_id': None,
+                'test_metrics': test_metrics
+            }
+        except Exception as test_err:
+            logger.warning(f"Failed to compute test metrics: {test_err}")
     
     # Get model architecture
     model_architecture = model.get_architecture_summary()
@@ -1309,5 +1401,12 @@ async def run_full_training(
         'bayesian_trials_data': bayesian_trials_data,
         'bayesian_config': bayesian_config_used,
         'num_train_samples': len(X_train),
-        'num_val_samples': len(X_val)
+        'num_val_samples': len(X_val),
+        'num_test_samples': len(X_test),
+        'splits': {
+            'train': 1 - validation_split - test_split,
+            'val': validation_split,
+            'test': test_split
+        },
+        'test_results': test_results
     }

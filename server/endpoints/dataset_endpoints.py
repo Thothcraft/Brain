@@ -59,6 +59,7 @@ class CloudTrainingRequest(BaseModel):
     batch_size: int = 32
     learning_rate: float = 0.001
     validation_split: float = 0.2
+    test_split: float = 0.0
     model_name: Optional[str] = None
     window_size: int = 128  # Window size for time series data
     # Bayesian optimization settings
@@ -477,6 +478,7 @@ async def start_cloud_training(
             "batch_size": request.batch_size,
             "learning_rate": request.learning_rate,
             "validation_split": request.validation_split,
+            "test_split": request.test_split,
             "model_name": request.model_name,
             "window_size": request.window_size,
             "num_classes": len(labels),
