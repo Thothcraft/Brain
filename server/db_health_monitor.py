@@ -112,10 +112,14 @@ class DatabaseHealthMonitor:
             
         except Exception as e:
             self.failure_count += 1
+            error_str = str(e)
+            is_ssl_error = "SSL" in error_str or "closed unexpectedly" in error_str
+            
             error_status = {
                 'timestamp': datetime.utcnow().isoformat(),
                 'status': 'unhealthy',
-                'error': str(e),
+                'error': error_str,
+                'error_type': 'ssl_connection' if is_ssl_error else 'general',
                 'failure_count': self.failure_count,
                 'consecutive_failures': self.failure_count
             }
@@ -123,8 +127,11 @@ class DatabaseHealthMonitor:
             self.status_history.append(error_status)
             logger.error(f"Database health check failed (attempt {self.failure_count}/{self.max_failures}): {e}")
             
-            # Attempt recovery if we haven't exceeded max failures
-            if self.failure_count <= self.max_failures:
+            # For SSL errors, immediately attempt recovery
+            if is_ssl_error:
+                logger.warning("SSL connection error detected in health check, forcing immediate recovery")
+                await self._attempt_recovery()
+            elif self.failure_count <= self.max_failures:
                 await self._attempt_recovery()
                 
     async def _attempt_recovery(self):

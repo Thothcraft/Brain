@@ -59,6 +59,11 @@ except ImportError:
         "connect_args": {
             "connect_timeout": 30,  # Reduced timeout for better responsiveness
             "application_name": "thoth_pro",  # Identify connection in Supabase dashboard
+            "sslmode": "require",
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
             "options": "-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000"  # Optimized timeouts
         }
     }
@@ -73,8 +78,8 @@ db_logger = logging.getLogger('database')
 
 def get_db():
     """Dependency to get database session with retry logic."""
-    max_retries = 2  # Increased back to 2 since Pro Plan has better performance
-    retry_delay = 0.1  # Reduced delay for faster response
+    max_retries = 3  # Increased to 3 for better SSL error recovery
+    retry_delay = 0.5  # Increased delay for SSL connection recovery
     
     for attempt in range(max_retries):
         db = SessionLocal()
@@ -86,8 +91,14 @@ def get_db():
         except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
             db_logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
             db.close()
+            
+            # On SSL errors, dispose the engine to force new connections
+            if "SSL" in str(e) or "closed unexpectedly" in str(e):
+                db_logger.info("SSL connection error detected, disposing engine")
+                engine.dispose()
+            
             if attempt < max_retries - 1:
-                time.sleep(retry_delay)
+                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
             else:
                 db_logger.error(f"All {max_retries} database connection attempts failed")
                 raise
@@ -100,8 +111,8 @@ def get_db():
 @contextmanager
 def get_db_session():
     """Context manager for database sessions with automatic cleanup."""
-    max_retries = 2  # Increased back to 2 for Pro Plan
-    retry_delay = 0.1  # Reduced delay for faster response
+    max_retries = 3  # Increased to 3 for better SSL error recovery
+    retry_delay = 0.5  # Increased delay for SSL connection recovery
     
     for attempt in range(max_retries):
         db = SessionLocal()
@@ -118,8 +129,14 @@ def get_db_session():
             except:
                 pass
             db.close()
+            
+            # On SSL errors, dispose the engine to force new connections
+            if "SSL" in str(e) or "closed unexpectedly" in str(e):
+                db_logger.info("SSL connection error detected, disposing engine")
+                engine.dispose()
+            
             if attempt < max_retries - 1:
-                time.sleep(retry_delay)
+                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
             else:
                 db_logger.error(f"All {max_retries} database session attempts failed")
                 raise
@@ -148,6 +165,11 @@ def test_database_connection():
             pool_pre_ping=True,
             connect_args={
                 "connect_timeout": 5,
+                "sslmode": "require",
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
                 "options": "-c statement_timeout=5000"
             }
         )

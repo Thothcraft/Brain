@@ -51,6 +51,11 @@ class SupabaseProConfig:
         return {
             "connect_timeout": cls.DATABASE_CONNECT_TIMEOUT,
             "application_name": cls.APPLICATION_NAME,
+            "sslmode": "require",
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
             "options": f"-c statement_timeout={cls.STATEMENT_TIMEOUT} -c idle_in_transaction_session_timeout={cls.IDLE_TRANSACTION_TIMEOUT}"
         }
     
