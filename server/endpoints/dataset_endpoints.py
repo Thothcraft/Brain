@@ -53,7 +53,7 @@ class CloudTrainingRequest(BaseModel):
     """Request to start cloud training."""
     dataset_id: int
     test_dataset_id: Optional[int] = None
-    model_type: str = "cnn"  # cnn, lstm, transformer, linear
+    model_type: str = "cnn"  # cnn, lstm, transformer, linear, knn, svc, adaboost
     model_architecture: str = "small"  # small, medium, large
     epochs: int = 10
     batch_size: int = 32
@@ -62,6 +62,18 @@ class CloudTrainingRequest(BaseModel):
     test_split: float = 0.0
     model_name: Optional[str] = None
     window_size: int = 128  # Window size for time series data
+    
+    # Preprocessing pipeline (optional - if not set, uses inline config)
+    preprocessing_pipeline_id: Optional[int] = None
+    
+    # CSI-specific preprocessing options (used if no pipeline_id)
+    data_type: str = "auto"  # auto, csi, imu
+    include_phase: bool = True  # CSI: include phase data
+    filter_subcarriers: bool = True  # CSI: filter guard bands
+    subcarrier_start: int = 5  # CSI: start index for filtering
+    subcarrier_end: int = 32  # CSI: end index for filtering
+    output_shape: str = "flattened"  # flattened (ML) or sequence (DL)
+    
     # Bayesian optimization settings
     use_bayesian_optimization: bool = False
     bayesian_trials: int = 20
@@ -483,6 +495,15 @@ async def start_cloud_training(
             "window_size": request.window_size,
             "num_classes": len(labels),
             "labels": list(labels),
+            # Preprocessing pipeline
+            "preprocessing_pipeline_id": request.preprocessing_pipeline_id,
+            # CSI-specific preprocessing options
+            "data_type": request.data_type,
+            "include_phase": request.include_phase,
+            "filter_subcarriers": request.filter_subcarriers,
+            "subcarrier_start": request.subcarrier_start,
+            "subcarrier_end": request.subcarrier_end,
+            "output_shape": request.output_shape,
             # Bayesian optimization settings
             "use_bayesian_optimization": request.use_bayesian_optimization,
             "bayesian_trials": request.bayesian_trials,
@@ -503,6 +524,7 @@ async def start_cloud_training(
             user_id=current_user.userId,
             dataset_id=request.dataset_id,
             test_dataset_id=request.test_dataset_id,
+            preprocessing_pipeline_id=request.preprocessing_pipeline_id,
             model_type=request.model_type,
             training_mode="cloud",
             config=json.dumps(config),

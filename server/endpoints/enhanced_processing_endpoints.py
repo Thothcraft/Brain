@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from enum import Enum
 import json
 
-from ..db import get_db
+from ..db import get_db, PreprocessingPipeline
 from ..auth import get_current_user
 from .models import StandardResponse
 
@@ -376,11 +376,32 @@ BLOCK_TEMPLATES = {
 }
 
 # ============================================================================
-# IN-MEMORY STORAGE
+# IN-MEMORY STORAGE (for backward compatibility, prefer DB storage)
 # ============================================================================
 
 enhanced_pipelines: Dict[str, EnhancedPipeline] = {}
 _pipeline_counter = 1
+
+# ============================================================================
+# MODEL AVAILABILITY BASED ON DATA SHAPE
+# ============================================================================
+
+MODELS_BY_OUTPUT_SHAPE = {
+    "flattened": {
+        "ml": ["knn", "svc", "random_forest", "gradient_boosting", "xgboost", 
+               "lightgbm", "ada_boost", "decision_tree", "naive_bayes", 
+               "logistic_regression", "linear_svc"],
+        "dl": ["mlp", "autoencoder"]  # Simple feedforward networks
+    },
+    "sequence": {
+        "ml": ["knn", "svc", "random_forest"],  # Can work with flattened sequences
+        "dl": ["cnn", "lstm", "gru", "transformer", "cnn_lstm", "resnet"]
+    }
+}
+
+def get_available_models(output_shape: str) -> Dict[str, List[str]]:
+    """Get available models based on output shape."""
+    return MODELS_BY_OUTPUT_SHAPE.get(output_shape, MODELS_BY_OUTPUT_SHAPE["flattened"])
 
 # ============================================================================
 # ENDPOINTS
@@ -749,6 +770,293 @@ async def validate_pipeline(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to validate pipeline: {str(e)}")
+
+@router.get("/available-models", response_model=Dict[str, Any])
+async def get_available_models_endpoint(
+    output_shape: str = Query("flattened", description="Output shape: 'flattened' or 'sequence'")
+):
+    """Get available models based on output shape configuration."""
+    try:
+        models = get_available_models(output_shape)
+        return {
+            "success": True,
+            "output_shape": output_shape,
+            "available_models": models,
+            "description": {
+                "flattened": "Data is flattened into feature vectors. Best for traditional ML models.",
+                "sequence": "Data maintains temporal structure. Best for sequence models (LSTM, CNN, etc.)."
+            }.get(output_shape, "Unknown output shape")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get available models: {str(e)}")
+
+
+# ============================================================================
+# DATABASE-BACKED PREPROCESSING PIPELINE ENDPOINTS
+# ============================================================================
+
+class CreatePipelineRequest(BaseModel):
+    """Request model for creating a preprocessing pipeline."""
+    name: str
+    description: Optional[str] = None
+    data_type: str = "csi"  # csi, imu, sensor
+    output_shape: str = "flattened"  # flattened, sequence
+    include_phase: bool = True
+    window_size: int = 1000
+    filter_subcarriers: bool = True
+    subcarrier_start: int = 5
+    subcarrier_end: int = 32
+    config: Dict[str, Any] = {}  # Additional block configuration
+
+
+class UpdatePipelineRequest(BaseModel):
+    """Request model for updating a preprocessing pipeline."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    data_type: Optional[str] = None
+    output_shape: Optional[str] = None
+    include_phase: Optional[bool] = None
+    window_size: Optional[int] = None
+    filter_subcarriers: Optional[bool] = None
+    subcarrier_start: Optional[int] = None
+    subcarrier_end: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None
+    is_default: Optional[bool] = None
+
+
+@router.post("/db-pipelines", response_model=StandardResponse)
+async def create_db_pipeline(
+    request: CreatePipelineRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Create a new preprocessing pipeline (database-backed)."""
+    try:
+        pipeline = PreprocessingPipeline(
+            user_id=current_user.userId,
+            name=request.name,
+            description=request.description,
+            data_type=request.data_type,
+            output_shape=request.output_shape,
+            include_phase=request.include_phase,
+            window_size=request.window_size,
+            filter_subcarriers=request.filter_subcarriers,
+            subcarrier_start=request.subcarrier_start,
+            subcarrier_end=request.subcarrier_end,
+            config=json.dumps(request.config)
+        )
+        
+        db.add(pipeline)
+        db.commit()
+        db.refresh(pipeline)
+        
+        return StandardResponse(
+            success=True,
+            message=f"Preprocessing pipeline '{request.name}' created successfully",
+            data=pipeline.to_dict()
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create pipeline: {str(e)}")
+
+
+@router.get("/db-pipelines", response_model=Dict[str, Any])
+async def list_db_pipelines(
+    data_type: Optional[str] = Query(None, description="Filter by data type (csi, imu)"),
+    output_shape: Optional[str] = Query(None, description="Filter by output shape"),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """List all preprocessing pipelines for the current user."""
+    try:
+        query = db.query(PreprocessingPipeline).filter(
+            PreprocessingPipeline.user_id == current_user.userId
+        )
+        
+        if data_type:
+            query = query.filter(PreprocessingPipeline.data_type == data_type)
+        if output_shape:
+            query = query.filter(PreprocessingPipeline.output_shape == output_shape)
+        
+        pipelines = query.order_by(PreprocessingPipeline.created_at.desc()).all()
+        
+        return {
+            "success": True,
+            "pipelines": [p.to_dict() for p in pipelines],
+            "total": len(pipelines)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list pipelines: {str(e)}")
+
+
+@router.get("/db-pipelines/{pipeline_id}", response_model=Dict[str, Any])
+async def get_db_pipeline(
+    pipeline_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Get a specific preprocessing pipeline."""
+    try:
+        pipeline = db.query(PreprocessingPipeline).filter(
+            PreprocessingPipeline.id == pipeline_id,
+            PreprocessingPipeline.user_id == current_user.userId
+        ).first()
+        
+        if not pipeline:
+            raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
+        
+        # Get available models for this pipeline's output shape
+        available_models = get_available_models(pipeline.output_shape)
+        
+        return {
+            "success": True,
+            "pipeline": pipeline.to_dict(),
+            "available_models": available_models
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get pipeline: {str(e)}")
+
+
+@router.put("/db-pipelines/{pipeline_id}", response_model=StandardResponse)
+async def update_db_pipeline(
+    pipeline_id: int,
+    request: UpdatePipelineRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Update a preprocessing pipeline."""
+    try:
+        pipeline = db.query(PreprocessingPipeline).filter(
+            PreprocessingPipeline.id == pipeline_id,
+            PreprocessingPipeline.user_id == current_user.userId
+        ).first()
+        
+        if not pipeline:
+            raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
+        
+        # Update fields if provided
+        if request.name is not None:
+            pipeline.name = request.name
+        if request.description is not None:
+            pipeline.description = request.description
+        if request.data_type is not None:
+            pipeline.data_type = request.data_type
+        if request.output_shape is not None:
+            pipeline.output_shape = request.output_shape
+        if request.include_phase is not None:
+            pipeline.include_phase = request.include_phase
+        if request.window_size is not None:
+            pipeline.window_size = request.window_size
+        if request.filter_subcarriers is not None:
+            pipeline.filter_subcarriers = request.filter_subcarriers
+        if request.subcarrier_start is not None:
+            pipeline.subcarrier_start = request.subcarrier_start
+        if request.subcarrier_end is not None:
+            pipeline.subcarrier_end = request.subcarrier_end
+        if request.config is not None:
+            pipeline.config = json.dumps(request.config)
+        if request.is_default is not None:
+            # If setting as default, unset other defaults for this user/data_type
+            if request.is_default:
+                db.query(PreprocessingPipeline).filter(
+                    PreprocessingPipeline.user_id == current_user.userId,
+                    PreprocessingPipeline.data_type == pipeline.data_type,
+                    PreprocessingPipeline.is_default == True
+                ).update({"is_default": False})
+            pipeline.is_default = request.is_default
+        
+        db.commit()
+        db.refresh(pipeline)
+        
+        return StandardResponse(
+            success=True,
+            message=f"Pipeline '{pipeline.name}' updated successfully",
+            data=pipeline.to_dict()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update pipeline: {str(e)}")
+
+
+@router.delete("/db-pipelines/{pipeline_id}", response_model=StandardResponse)
+async def delete_db_pipeline(
+    pipeline_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Delete a preprocessing pipeline."""
+    try:
+        pipeline = db.query(PreprocessingPipeline).filter(
+            PreprocessingPipeline.id == pipeline_id,
+            PreprocessingPipeline.user_id == current_user.userId
+        ).first()
+        
+        if not pipeline:
+            raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
+        
+        pipeline_name = pipeline.name
+        db.delete(pipeline)
+        db.commit()
+        
+        return StandardResponse(
+            success=True,
+            message=f"Pipeline '{pipeline_name}' deleted successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete pipeline: {str(e)}")
+
+
+@router.get("/db-pipelines/default/{data_type}", response_model=Dict[str, Any])
+async def get_default_pipeline(
+    data_type: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Get the default preprocessing pipeline for a data type."""
+    try:
+        pipeline = db.query(PreprocessingPipeline).filter(
+            PreprocessingPipeline.user_id == current_user.userId,
+            PreprocessingPipeline.data_type == data_type,
+            PreprocessingPipeline.is_default == True
+        ).first()
+        
+        if not pipeline:
+            # Return a suggested default config if no default is set
+            return {
+                "success": True,
+                "pipeline": None,
+                "suggested_default": {
+                    "data_type": data_type,
+                    "output_shape": "flattened",
+                    "include_phase": True,
+                    "window_size": 1000 if data_type == "csi" else 128,
+                    "filter_subcarriers": True if data_type == "csi" else False,
+                    "subcarrier_start": 5,
+                    "subcarrier_end": 32
+                }
+            }
+        
+        return {
+            "success": True,
+            "pipeline": pipeline.to_dict(),
+            "available_models": get_available_models(pipeline.output_shape)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get default pipeline: {str(e)}")
+
 
 @router.get("/preprocessing-methods", response_model=Dict[str, Any])
 async def get_preprocessing_methods():

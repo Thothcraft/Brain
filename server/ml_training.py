@@ -194,6 +194,167 @@ class IMUDataset(Dataset):
         return self.data[idx], self.labels[idx]
 
 
+def parse_csi_file(
+    content: bytes,
+    window_size: int = 1000,
+    include_phase: bool = True,
+    filter_subcarriers: bool = True,
+    subcarrier_start: int = 5,
+    subcarrier_end: int = 32,
+    output_shape: str = "flattened"
+) -> Tuple[List[np.ndarray], dict]:
+    """Parse CSI CSV file and extract amplitude/phase data.
+    
+    CSI data format: CSV with rows containing [imag1, real1, imag2, real2, ...]
+    
+    Args:
+        content: Raw file bytes
+        window_size: Number of rows per sample window
+        include_phase: Whether to include phase data alongside amplitude
+        filter_subcarriers: Whether to filter subcarriers (remove guard bands)
+        subcarrier_start: Start index for subcarrier filtering (default 5)
+        subcarrier_end: End index for first range (default 32)
+        output_shape: "flattened" for ML models, "sequence" for DL models
+        
+    Returns:
+        Tuple of (list of data arrays, metadata dict)
+        - flattened: each array is shape (features,)
+        - sequence: each array is shape (window_size, features)
+    """
+    import math
+    import pandas as pd
+    
+    try:
+        text_content = content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
+        lines = text_content.split('\n')
+        
+        if len(lines) < 2:
+            logger.warning("CSI file has less than 2 lines")
+            return [], {"error": "File too short"}
+        
+        # Parse CSI rows - skip header
+        csi_rows = []
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                # Extract array content between brackets [imag, real, imag, real, ...]
+                if '[' in line and ']' in line:
+                    csi_str = line[line.index("[")+1 : line.index("]")]
+                    csi_values = [float(x.strip()) for x in csi_str.split(",") if x.strip()]
+                    if csi_values:
+                        csi_rows.append(csi_values)
+            except Exception as e:
+                logger.debug(f"Skipping malformed CSI row: {e}")
+                continue
+        
+        if not csi_rows:
+            logger.warning("No valid CSI rows found")
+            return [], {"error": "No valid CSI data"}
+        
+        logger.info(f"Parsed {len(csi_rows)} CSI rows")
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(csi_rows)
+        
+        # Extract amplitude and phase from complex values
+        # Format: [imag0, real0, imag1, real1, ...]
+        amplitudes_list = []
+        phases_list = []
+        
+        for row in df.values:
+            row_list = row.tolist()
+            n_subcarriers = len(row_list) // 2
+            
+            amplitudes = []
+            phases = []
+            
+            for k in range(n_subcarriers):
+                imag_idx = k * 2
+                real_idx = k * 2 + 1
+                
+                if real_idx < len(row_list):
+                    imag_val = float(row_list[imag_idx])
+                    real_val = float(row_list[real_idx])
+                    
+                    amp = math.sqrt(imag_val**2 + real_val**2)
+                    phase = math.atan2(imag_val, real_val)
+                    
+                    amplitudes.append(amp)
+                    phases.append(phase)
+            
+            amplitudes_list.append(amplitudes)
+            phases_list.append(phases)
+        
+        amp_df = pd.DataFrame(amplitudes_list)
+        phase_df = pd.DataFrame(phases_list)
+        
+        logger.info(f"Extracted amplitude shape: {amp_df.shape}, phase shape: {phase_df.shape}")
+        
+        # Apply subcarrier filtering (remove null guard bands)
+        if filter_subcarriers and amp_df.shape[1] > subcarrier_end + 27:
+            # First range: subcarrier_start to subcarrier_end
+            # Second range: subcarrier_end+1 to subcarrier_end+27 (skip guard band)
+            amp_df1 = amp_df.iloc[:, subcarrier_start:subcarrier_end]
+            amp_df2 = amp_df.iloc[:, subcarrier_end+1:subcarrier_end+28]
+            amp_df = pd.concat([amp_df1, amp_df2], axis=1)
+            
+            phase_df1 = phase_df.iloc[:, subcarrier_start:subcarrier_end]
+            phase_df2 = phase_df.iloc[:, subcarrier_end+1:subcarrier_end+28]
+            phase_df = pd.concat([phase_df1, phase_df2], axis=1)
+            
+            logger.info(f"After subcarrier filtering: amp shape {amp_df.shape}")
+        
+        # Combine amplitude and phase if requested
+        if include_phase:
+            combined_df = pd.concat([amp_df, phase_df], axis=1)
+        else:
+            combined_df = amp_df
+        
+        logger.info(f"Combined data shape: {combined_df.shape}")
+        
+        # Create windows
+        windows = []
+        n_rows = len(combined_df)
+        n_features = combined_df.shape[1]
+        
+        if n_rows < window_size:
+            logger.warning(f"Not enough rows ({n_rows}) for window size {window_size}")
+            return [], {"error": f"Not enough data: {n_rows} rows < {window_size} window_size"}
+        
+        # Create non-overlapping windows
+        for start in range(0, n_rows - window_size + 1, window_size):
+            window_data = combined_df.iloc[start:start + window_size].values
+            
+            if output_shape == "flattened":
+                # Flatten for ML models: (window_size * n_features,)
+                windows.append(window_data.flatten().astype(np.float32))
+            else:
+                # Keep as sequence for DL models: (window_size, n_features)
+                windows.append(window_data.astype(np.float32))
+        
+        metadata = {
+            "total_rows": n_rows,
+            "n_windows": len(windows),
+            "window_size": window_size,
+            "n_features_per_row": n_features,
+            "include_phase": include_phase,
+            "filter_subcarriers": filter_subcarriers,
+            "output_shape": output_shape,
+            "final_shape": windows[0].shape if windows else None
+        }
+        
+        logger.info(f"Created {len(windows)} windows, shape: {metadata['final_shape']}")
+        
+        return windows, metadata
+        
+    except Exception as e:
+        logger.error(f"Error parsing CSI file: {e}")
+        logger.error(traceback.format_exc())
+        return [], {"error": str(e)}
+
+
 def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
     """Parse IMU JSON file and extract windows of data.
     
@@ -358,20 +519,93 @@ def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
         return []
 
 
-def load_dataset_from_db(db_session, dataset_id: int, window_size: int = 128) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+def detect_file_type(content: bytes, filename: str = "") -> str:
+    """Detect whether file contains CSI or IMU data.
+    
+    Args:
+        content: Raw file bytes
+        filename: Optional filename for hints
+        
+    Returns:
+        "csi" or "imu"
+    """
+    # Check filename hints
+    filename_lower = filename.lower()
+    if 'csi' in filename_lower:
+        return "csi"
+    if 'imu' in filename_lower:
+        return "imu"
+    
+    # Check content
+    try:
+        text = content.decode('utf-8', errors='ignore')[:2000]  # Check first 2KB
+        
+        # CSI files have bracket arrays like [1, 2, 3, ...]
+        if '[' in text and ']' in text:
+            # Check if it looks like CSI data (many comma-separated numbers in brackets)
+            import re
+            bracket_match = re.search(r'\[[\d\s,.-]+\]', text)
+            if bracket_match:
+                values = bracket_match.group()[1:-1].split(',')
+                if len(values) > 50:  # CSI typically has 100+ values per row
+                    return "csi"
+        
+        # IMU files have JSON with accel/gyro keys
+        if any(key in text.lower() for key in ['accel_x', 'accel_y', 'gyro_x', 'gyro_y', '"ax"', '"ay"', '"gx"', '"gy"']):
+            return "imu"
+        
+        # Default to CSI if we see lots of numeric data in brackets
+        if text.count('[') > 5:
+            return "csi"
+            
+    except Exception:
+        pass
+    
+    # Default to IMU for backward compatibility
+    return "imu"
+
+
+def load_dataset_from_db(
+    db_session, 
+    dataset_id: int, 
+    window_size: int = 128,
+    preprocessing_config: dict = None
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Load and preprocess dataset from database.
+    
+    Automatically detects data type (CSI vs IMU) and applies appropriate parsing.
     
     Args:
         db_session: SQLAlchemy database session
         dataset_id: ID of the training dataset
         window_size: Size of sliding window for time series
+        preprocessing_config: Optional preprocessing configuration dict with:
+            - include_phase: bool (CSI only)
+            - filter_subcarriers: bool (CSI only)
+            - subcarrier_start: int (CSI only)
+            - subcarrier_end: int (CSI only)
+            - output_shape: "flattened" or "sequence"
+            - data_type: "csi", "imu", or "auto"
         
     Returns:
-        X: numpy array of shape (num_samples, window_size, 6)
+        X: numpy array of shape depends on output_shape:
+            - flattened: (num_samples, features)
+            - sequence: (num_samples, window_size, features)
         y: numpy array of labels
         class_names: list of class name strings
     """
     from server.db import TrainingDataset, DatasetFile, File
+    
+    # Default preprocessing config
+    if preprocessing_config is None:
+        preprocessing_config = {}
+    
+    include_phase = preprocessing_config.get('include_phase', True)
+    filter_subcarriers = preprocessing_config.get('filter_subcarriers', True)
+    subcarrier_start = preprocessing_config.get('subcarrier_start', 5)
+    subcarrier_end = preprocessing_config.get('subcarrier_end', 32)
+    output_shape = preprocessing_config.get('output_shape', 'flattened')
+    forced_data_type = preprocessing_config.get('data_type', 'auto')
     
     dataset = db_session.query(TrainingDataset).filter(TrainingDataset.id == dataset_id).first()
     if not dataset:
@@ -384,6 +618,7 @@ def load_dataset_from_db(db_session, dataset_id: int, window_size: int = 128) ->
     
     all_windows = []
     all_labels = []
+    detected_type = None
     
     for dataset_file in dataset.files:
         if not dataset_file.file:
@@ -393,22 +628,54 @@ def load_dataset_from_db(db_session, dataset_id: int, window_size: int = 128) ->
         if not file_content:
             continue
         
-        # Parse IMU data from file
-        windows = parse_imu_file(file_content, window_size)
+        filename = dataset_file.file.filename or ""
+        
+        # Detect or use forced data type
+        if forced_data_type == 'auto':
+            file_type = detect_file_type(file_content, filename)
+        else:
+            file_type = forced_data_type
+        
+        if detected_type is None:
+            detected_type = file_type
+            logger.info(f"Detected data type: {file_type}")
+        
+        # Parse based on data type
+        if file_type == "csi":
+            windows, metadata = parse_csi_file(
+                file_content,
+                window_size=window_size,
+                include_phase=include_phase,
+                filter_subcarriers=filter_subcarriers,
+                subcarrier_start=subcarrier_start,
+                subcarrier_end=subcarrier_end,
+                output_shape=output_shape
+            )
+            
+            if "error" in metadata and not windows:
+                logger.warning(f"CSI parsing failed for {filename}: {metadata.get('error')}")
+                continue
+                
+        else:  # IMU
+            windows = parse_imu_file(file_content, window_size)
         
         if windows:
             label_idx = label_to_idx[dataset_file.label]
             all_windows.extend(windows)
             all_labels.extend([label_idx] * len(windows))
-            logger.info(f"Loaded {len(windows)} windows from {dataset_file.file.filename} (label: {dataset_file.label})")
+            logger.info(f"Loaded {len(windows)} windows from {filename} (label: {dataset_file.label}, type: {file_type})")
     
     if not all_windows:
-        raise ValueError(f"No valid IMU data found in dataset {dataset_id}")
+        data_type_msg = f" ({detected_type})" if detected_type else ""
+        raise ValueError(f"No valid data found in dataset {dataset_id}{data_type_msg}. Check that files contain valid {detected_type or 'CSI/IMU'} data.")
     
     X = np.array(all_windows, dtype=np.float32)
     y = np.array(all_labels, dtype=np.int64)
     
-    logger.info(f"Dataset loaded: {X.shape[0]} samples, {len(class_names)} classes, window_size={window_size}")
+    logger.info(f"Dataset loaded: {X.shape[0]} samples, {len(class_names)} classes")
+    logger.info(f"  Data type: {detected_type}")
+    logger.info(f"  Shape: {X.shape}")
+    logger.info(f"  Output format: {output_shape}")
     
     return X, y, class_names
 
@@ -1112,24 +1379,61 @@ async def run_full_training(
         logger.error(traceback.format_exc())
         device = 'cpu'
     
-    # Get window size from config (default 128)
+    # Get window size from config (default 128 for IMU, 1000 for CSI)
     window_size = config.get('window_size', 128)
     architecture_size = config.get('model_architecture', 'medium')
     validation_split = float(config.get('validation_split', 0.2) or 0.0)
     test_split = float(config.get('test_split', 0.0) or 0.0)
+    
+    # Build preprocessing config from training config
+    preprocessing_config = {
+        'include_phase': config.get('include_phase', True),
+        'filter_subcarriers': config.get('filter_subcarriers', True),
+        'subcarrier_start': config.get('subcarrier_start', 5),
+        'subcarrier_end': config.get('subcarrier_end', 32),
+        'output_shape': config.get('output_shape', 'flattened'),
+        'data_type': config.get('data_type', 'auto'),
+    }
+    
+    # Load preprocessing pipeline if specified
+    preprocessing_pipeline_id = config.get('preprocessing_pipeline_id')
+    if preprocessing_pipeline_id:
+        try:
+            from server.db import PreprocessingPipeline
+            pipeline = db_session.query(PreprocessingPipeline).filter(
+                PreprocessingPipeline.id == preprocessing_pipeline_id
+            ).first()
+            if pipeline:
+                logger.info(f"Using preprocessing pipeline: {pipeline.name} (id={pipeline.id})")
+                preprocessing_config.update({
+                    'include_phase': pipeline.include_phase,
+                    'filter_subcarriers': pipeline.filter_subcarriers,
+                    'subcarrier_start': pipeline.subcarrier_start,
+                    'subcarrier_end': pipeline.subcarrier_end,
+                    'output_shape': pipeline.output_shape,
+                    'data_type': pipeline.data_type,
+                })
+                window_size = pipeline.window_size
+        except Exception as e:
+            logger.warning(f"Failed to load preprocessing pipeline {preprocessing_pipeline_id}: {e}")
+    
+    logger.info(f"Preprocessing config: {preprocessing_config}")
     
     # Load real data from database
     try:
         logger.info(f"Loading dataset {dataset_id} from database...")
         logger.debug(f"Window size: {window_size}")
         
-        X, y, class_names = load_dataset_from_db(db_session, dataset_id, window_size)
+        X, y, class_names = load_dataset_from_db(db_session, dataset_id, window_size, preprocessing_config)
         num_classes = len(class_names)
         
         logger.info(f"✓ Dataset loaded successfully")
         logger.info(f"  Samples: {len(X)}")
         logger.info(f"  Classes: {num_classes} - {class_names}")
-        logger.info(f"  Shape: {X.shape} (samples, window_size={window_size}, channels={X.shape[2]})")
+        if len(X.shape) == 3:
+            logger.info(f"  Shape: {X.shape} (samples, window_size={X.shape[1]}, channels={X.shape[2]})")
+        else:
+            logger.info(f"  Shape: {X.shape} (samples, features={X.shape[1]})")
         logger.info(f"  Data type: {X.dtype}")
         logger.info(f"  Data range: [{X.min():.4f}, {X.max():.4f}]")
         logger.info(f"  Label distribution: {np.bincount(y)}")
@@ -1141,16 +1445,22 @@ async def run_full_training(
         logger.error(traceback.format_exc())
         raise RuntimeError(f"Dataset loading failed: {e}") from e
     
-    # Normalize data (z-score normalization per channel)
+    # Normalize data (z-score normalization)
     try:
         logger.debug("Normalizing data...")
-        X_mean = X.mean(axis=(0, 1), keepdims=True)
-        X_std = X.std(axis=(0, 1), keepdims=True) + 1e-8
+        if len(X.shape) == 3:
+            # 3D data: (samples, window_size, channels) - normalize per channel
+            X_mean = X.mean(axis=(0, 1), keepdims=True)
+            X_std = X.std(axis=(0, 1), keepdims=True) + 1e-8
+        else:
+            # 2D data: (samples, features) - normalize per feature
+            X_mean = X.mean(axis=0, keepdims=True)
+            X_std = X.std(axis=0, keepdims=True) + 1e-8
         X = (X - X_mean) / X_std
         
         logger.info(f"✓ Data normalized")
-        logger.debug(f"  Mean: {X_mean.flatten()}")
-        logger.debug(f"  Std: {X_std.flatten()}")
+        logger.debug(f"  Mean shape: {X_mean.shape}")
+        logger.debug(f"  Std shape: {X_std.shape}")
         logger.debug(f"  Normalized range: [{X.min():.4f}, {X.max():.4f}]")
         
     except Exception as e:

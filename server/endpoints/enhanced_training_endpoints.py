@@ -281,15 +281,43 @@ def parse_csi_data(file_content: str, verbose: bool = True) -> Dict[str, Any]:
         raise ValueError(f"Failed to parse CSI data: {str(e)}")
 
 def filter_csi_subcarriers(df: pd.DataFrame, start_idx: int = 5, end_idx: int = 32) -> pd.DataFrame:
-    """Filter CSI subcarriers based on specified range."""
+    """Filter CSI subcarriers based on specified range.
+    
+    For 802.11a/g/n, useful subcarriers are typically:
+    - First range: start_idx to end_idx (e.g., 5:32 for 802.11n)
+    - Second range: end_idx+1 to end_idx+28 (skip null guard band at end_idx)
+    
+    This removes null guard bands at the edges of the spectrum.
+    
+    Args:
+        df: DataFrame with subcarrier columns
+        start_idx: Start index for first range (default 5)
+        end_idx: End index for first range (default 32)
+        
+    Returns:
+        Filtered DataFrame with concatenated useful subcarriers
+    """
     try:
+        n_cols = df.shape[1]
+        
+        # Ensure indices are within bounds
+        if end_idx + 28 > n_cols:
+            # Fallback: just filter from start_idx to a reasonable end
+            return df.iloc[:, start_idx:min(n_cols, start_idx + 54)]
+        
+        # First range: start_idx to end_idx (e.g., columns 5-31 for 802.11n)
         df1 = df.iloc[:, start_idx:end_idx]
-        df2 = df.iloc[:, end_idx+1:end_idx+27]  # Skip guard bands
+        # Second range: skip guard band at end_idx, take next 27 columns
+        df2 = df.iloc[:, end_idx+1:end_idx+28]
+        
         filtered_df = pd.concat([df1, df2], axis=1)
+        filtered_df.columns = range(filtered_df.shape[1])  # Reset column indices
         return filtered_df
-    except:
+    except Exception as e:
         # Fallback if range is invalid
-        return df.iloc[:, 5:60]  # Default range
+        import logging
+        logging.warning(f"Subcarrier filtering failed: {e}, using fallback")
+        return df.iloc[:, 5:min(df.shape[1], 60)]
 
 def select_data_portions(df: pd.DataFrame, sample_size: int) -> pd.DataFrame:
     """Select data portions for training."""

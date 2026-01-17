@@ -493,6 +493,7 @@ class TrainingJob(Base):
     user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
     dataset_id = Column(Integer, ForeignKey("training_dataset.id"), nullable=True)
     test_dataset_id = Column(Integer, ForeignKey("training_dataset.id"), nullable=True)
+    preprocessing_pipeline_id = Column(Integer, ForeignKey("preprocessing_pipeline.id"), nullable=True)
     model_type = Column(String(50), nullable=False)
     training_mode = Column(String(50), nullable=False)
     config = Column(Text, nullable=True)  # JSON string
@@ -511,6 +512,7 @@ class TrainingJob(Base):
     user = relationship("User")
     dataset = relationship("TrainingDataset", foreign_keys=[dataset_id])
     test_dataset = relationship("TrainingDataset", foreign_keys=[test_dataset_id])
+    preprocessing_pipeline = relationship("PreprocessingPipeline")
     
     def to_dict(self):
         import json
@@ -520,6 +522,8 @@ class TrainingJob(Base):
             "dataset_id": self.dataset_id,
             "dataset_name": self.dataset.name if self.dataset else None,
             "test_dataset_id": self.test_dataset_id,
+            "preprocessing_pipeline_id": self.preprocessing_pipeline_id,
+            "preprocessing_pipeline_name": self.preprocessing_pipeline.name if self.preprocessing_pipeline else None,
             "model_type": self.model_type,
             "training_mode": self.training_mode,
             "config": json.loads(self.config) if self.config else {},
@@ -533,6 +537,56 @@ class TrainingJob(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class PreprocessingPipeline(Base):
+    """Stores preprocessing pipelines for CSI/IMU data."""
+    __tablename__ = "preprocessing_pipeline"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    data_type = Column(String(50), nullable=False, default="csi")  # csi, imu, sensor
+    
+    # Pipeline configuration as JSON
+    config = Column(Text, nullable=False)  # JSON: blocks, connections, parameters
+    
+    # Output configuration
+    output_shape = Column(String(50), default="flattened")  # flattened, sequence
+    include_phase = Column(Boolean, default=True)
+    window_size = Column(Integer, default=1000)
+    
+    # Subcarrier filtering
+    filter_subcarriers = Column(Boolean, default=True)
+    subcarrier_start = Column(Integer, default=5)
+    subcarrier_end = Column(Integer, default=32)
+    
+    is_default = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User")
+    
+    def to_dict(self):
+        import json
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "data_type": self.data_type,
+            "config": json.loads(self.config) if self.config else {},
+            "output_shape": self.output_shape,
+            "include_phase": self.include_phase,
+            "window_size": self.window_size,
+            "filter_subcarriers": self.filter_subcarriers,
+            "subcarrier_start": self.subcarrier_start,
+            "subcarrier_end": self.subcarrier_end,
+            "is_default": self.is_default,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 
