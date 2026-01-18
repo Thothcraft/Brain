@@ -870,6 +870,8 @@ def load_dataset_from_db(
         class_names: list of class name strings
     """
     from server.db import TrainingDataset, DatasetFile, File
+    from sqlalchemy.orm import joinedload
+    from sqlalchemy import text
     
     # Default preprocessing config
     if preprocessing_config is None:
@@ -883,7 +885,17 @@ def load_dataset_from_db(
     forced_data_type = preprocessing_config.get('data_type', 'auto')
     preprocessing_blocks = preprocessing_config.get('preprocessing_blocks', [])
     
-    dataset = db_session.query(TrainingDataset).filter(TrainingDataset.id == dataset_id).first()
+    # Set a longer statement timeout for loading large files (5 minutes)
+    try:
+        db_session.execute(text("SET statement_timeout = '300000'"))  # 5 minutes in ms
+    except Exception as e:
+        logger.warning(f"Could not set statement timeout: {e}")
+    
+    # Use eager loading to fetch dataset with files and their content in fewer queries
+    dataset = db_session.query(TrainingDataset).options(
+        joinedload(TrainingDataset.files).joinedload(DatasetFile.file)
+    ).filter(TrainingDataset.id == dataset_id).first()
+    
     if not dataset:
         raise ValueError(f"Dataset {dataset_id} not found")
     

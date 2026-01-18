@@ -807,6 +807,8 @@ class CreatePipelineRequest(BaseModel):
     subcarrier_start: int = 5
     subcarrier_end: int = 32
     config: Dict[str, Any] = {}  # Additional block configuration
+    blocks: Optional[List[Dict[str, Any]]] = None  # Canvas blocks with positions and shapes
+    connections: Optional[List[Dict[str, str]]] = None  # Connections between blocks
 
 
 class UpdatePipelineRequest(BaseModel):
@@ -821,6 +823,8 @@ class UpdatePipelineRequest(BaseModel):
     subcarrier_start: Optional[int] = None
     subcarrier_end: Optional[int] = None
     config: Optional[Dict[str, Any]] = None
+    blocks: Optional[List[Dict[str, Any]]] = None  # Canvas blocks with positions and shapes
+    connections: Optional[List[Dict[str, str]]] = None  # Connections between blocks
     is_default: Optional[bool] = None
 
 
@@ -832,6 +836,13 @@ async def create_db_pipeline(
 ):
     """Create a new preprocessing pipeline (database-backed)."""
     try:
+        # Store blocks and connections in the config JSON
+        config_data = request.config.copy() if request.config else {}
+        if request.blocks is not None:
+            config_data['blocks'] = request.blocks
+        if request.connections is not None:
+            config_data['connections'] = request.connections
+        
         pipeline = PreprocessingPipeline(
             user_id=current_user.userId,
             name=request.name,
@@ -843,7 +854,7 @@ async def create_db_pipeline(
             filter_subcarriers=request.filter_subcarriers,
             subcarrier_start=request.subcarrier_start,
             subcarrier_end=request.subcarrier_end,
-            config=json.dumps(request.config)
+            config=json.dumps(config_data)
         )
         
         db.add(pipeline)
@@ -958,8 +969,25 @@ async def update_db_pipeline(
             pipeline.subcarrier_start = request.subcarrier_start
         if request.subcarrier_end is not None:
             pipeline.subcarrier_end = request.subcarrier_end
-        if request.config is not None:
-            pipeline.config = json.dumps(request.config)
+        # Handle config, blocks, and connections updates
+        if request.config is not None or request.blocks is not None or request.connections is not None:
+            # Load existing config
+            existing_config = json.loads(pipeline.config) if pipeline.config else {}
+            
+            # Update with new config if provided
+            if request.config is not None:
+                existing_config.update(request.config)
+            
+            # Update blocks if provided
+            if request.blocks is not None:
+                existing_config['blocks'] = request.blocks
+            
+            # Update connections if provided
+            if request.connections is not None:
+                existing_config['connections'] = request.connections
+            
+            pipeline.config = json.dumps(existing_config)
+        
         if request.is_default is not None:
             # If setting as default, unset other defaults for this user/data_type
             if request.is_default:

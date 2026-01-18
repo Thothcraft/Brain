@@ -562,19 +562,29 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
     print(f"[TRAINING-DEBUG] _run_cloud_training_async started for job {job_id}")
     sys.stdout.flush()
     
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, event
     from sqlalchemy.orm import sessionmaker
     from server.ml_training import run_full_training
     
     print(f"[TRAINING-DEBUG] Imports successful")
     sys.stdout.flush()
     
-    print(f"[TRAINING-DEBUG] Creating database engine...")
+    print(f"[TRAINING-DEBUG] Creating database engine with extended timeouts...")
     sys.stdout.flush()
-    engine = create_engine(db_url)
+    
+    # Create engine with extended pool timeout for large file operations
+    engine = create_engine(
+        db_url,
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        connect_args={
+            "connect_timeout": 300,  # 5 minutes connection timeout
+            "options": "-c statement_timeout=300000"  # 5 minutes statement timeout
+        }
+    )
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
-    print(f"[TRAINING-DEBUG] Database session created")
+    print(f"[TRAINING-DEBUG] Database session created with extended timeouts")
     sys.stdout.flush()
     
     try:
