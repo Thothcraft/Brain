@@ -297,7 +297,7 @@ async def register_device(
         # Try to get user from token if provided
         if authorization:
             try:
-                current_user = get_user_from_token(authorization)
+                current_user = await get_user_from_token(authorization)
                 log_request_start("POST", "/device/register", current_user.userId if current_user else "device_auth")
             except Exception as e:
                 logger.warning(f"Device auth token invalid, proceeding without user context: {e}")
