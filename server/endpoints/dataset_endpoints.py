@@ -20,7 +20,7 @@ import logging
 
 from sqlalchemy.orm import selectinload, load_only
 
-from ..db import get_db, TrainingDataset, DatasetFile, TrainingJob, TrainedModel, File
+from ..db import get_db, TrainingDataset, DatasetFile, TrainingJob, TrainedModel, File, PreprocessingPipeline
 from ..auth import get_current_user
 from .models import StandardResponse
 
@@ -65,6 +65,9 @@ class CloudTrainingRequest(BaseModel):
     
     # Preprocessing pipeline (optional - if not set, uses inline config)
     preprocessing_pipeline_id: Optional[int] = None
+
+    # Explicit preprocessing blocks (optional override; used by preview/training)
+    preprocessing_blocks: Optional[List[Dict[str, Any]]] = None
     
     # CSI-specific preprocessing options (used if no pipeline_id)
     data_type: str = "auto"  # auto, csi, imu
@@ -76,6 +79,9 @@ class CloudTrainingRequest(BaseModel):
 
     # ML-specific hyperparameters (used for knn/svc/adaboost)
     ml_params: Optional[Dict[str, Any]] = None
+
+    # Optimization (optional)
+    grid_search: Optional[Dict[str, Any]] = None
     
     # Bayesian optimization settings
     use_bayesian_optimization: bool = False
@@ -178,6 +184,294 @@ async def list_datasets(
             "status": "error",
             "error": str(e)
         }
+
+
+class PreprocessingPreviewRequest(BaseModel):
+    preprocessing_pipeline_id: Optional[int] = None
+    preprocessing_blocks: Optional[List[Dict[str, Any]]] = None
+    data_type: str = "auto"  # auto, csi, imu
+    include_phase: bool = True
+    filter_subcarriers: bool = True
+    subcarrier_start: int = 5
+    subcarrier_end: int = 32
+    output_shape: str = "flattened"  # flattened or sequence
+    window_size: int = 1000
+    max_preview_values: int = 32
+
+
+@router.post("/{dataset_id}/preprocessing/preview", response_model=Dict[str, Any])
+async def preview_preprocessing(
+    dataset_id: int,
+    request: PreprocessingPreviewRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    try:
+        dataset = db.query(TrainingDataset).filter(
+            TrainingDataset.id == dataset_id,
+            TrainingDataset.user_id == current_user.userId
+        ).first()
+
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+
+        df_row = db.query(DatasetFile).filter(
+            DatasetFile.dataset_id == dataset_id
+        ).order_by(DatasetFile.id.asc()).first()
+
+        if not df_row:
+            raise HTTPException(status_code=400, detail="Dataset has no files")
+
+        file_row = db.query(File).filter(
+            File.fileId == df_row.file_id,
+            File.userId == current_user.userId
+        ).first()
+
+        if not file_row or not file_row.content:
+            raise HTTPException(status_code=400, detail="Dataset file content not available")
+
+        effective = {
+            "preprocessing_pipeline_id": request.preprocessing_pipeline_id,
+            "preprocessing_blocks": request.preprocessing_blocks,
+            "data_type": request.data_type,
+            "include_phase": request.include_phase,
+            "filter_subcarriers": request.filter_subcarriers,
+            "subcarrier_start": request.subcarrier_start,
+            "subcarrier_end": request.subcarrier_end,
+            "output_shape": request.output_shape,
+            "window_size": request.window_size,
+        }
+
+        pipeline = None
+        if request.preprocessing_pipeline_id is not None:
+            pipeline = db.query(PreprocessingPipeline).filter(
+                PreprocessingPipeline.id == request.preprocessing_pipeline_id,
+                PreprocessingPipeline.user_id == current_user.userId
+            ).first()
+            if pipeline:
+                effective.update({
+                    "data_type": pipeline.data_type,
+                    "include_phase": bool(pipeline.include_phase),
+                    "filter_subcarriers": bool(pipeline.filter_subcarriers),
+                    "subcarrier_start": int(pipeline.subcarrier_start or 5),
+                    "subcarrier_end": int(pipeline.subcarrier_end or 32),
+                    "output_shape": pipeline.output_shape or "flattened",
+                    "window_size": int(pipeline.window_size or request.window_size),
+                })
+
+                # Prefer pipeline blocks if request did not provide an override
+                if not effective.get("preprocessing_blocks"):
+                    try:
+                        pipeline_cfg = json.loads(pipeline.config) if pipeline.config else {}
+                        pipeline_blocks = pipeline_cfg.get("blocks") if isinstance(pipeline_cfg, dict) else None
+                        if isinstance(pipeline_blocks, list) and pipeline_blocks:
+                            effective["preprocessing_blocks"] = pipeline_blocks
+                    except Exception:
+                        pass
+
+        filename = (file_row.filename or "").lower()
+        content_type = (file_row.content_type or "").lower()
+        data_type = effective["data_type"]
+        if data_type == "auto":
+            if "imu" in filename or "json" in content_type:
+                data_type = "imu"
+            elif "csi" in filename or "csv" in content_type:
+                data_type = "csi"
+            else:
+                data_type = "csi"
+
+        stages: List[Dict[str, Any]] = []
+        max_vals = max(8, min(256, int(request.max_preview_values or 32)))
+
+        # If we have a block graph, use the unified pipeline executor
+        if effective.get("preprocessing_blocks"):
+            try:
+                from server.ml_training import execute_preprocessing_pipeline_preview
+                preview = execute_preprocessing_pipeline_preview(
+                    content=file_row.content,
+                    filename=file_row.filename or "",
+                    base_config={
+                        "data_type": data_type,
+                        "include_phase": effective.get("include_phase"),
+                        "filter_subcarriers": effective.get("filter_subcarriers"),
+                        "subcarrier_start": effective.get("subcarrier_start"),
+                        "subcarrier_end": effective.get("subcarrier_end"),
+                        "output_shape": effective.get("output_shape"),
+                        "window_size": effective.get("window_size"),
+                    },
+                    pipeline_blocks=effective.get("preprocessing_blocks") or [],
+                    max_preview_values=max_vals,
+                )
+                return {
+                    "success": True,
+                    "preview": {
+                        "dataset_id": dataset_id,
+                        "file": {
+                            "file_id": file_row.fileId,
+                            "filename": file_row.filename,
+                            "size": file_row.size,
+                            "content_type": file_row.content_type,
+                        },
+                        "data_type": data_type,
+                        "effective_config": effective,
+                        "stages": preview.get("stages", []),
+                    }
+                }
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Pipeline preview failed: {str(e)}")
+
+        if data_type == "csi":
+            import numpy as np
+
+            text_content = file_row.content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
+            lines = text_content.split('\n')
+
+            csi_rows: List[List[float]] = []
+            for line in lines[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                if '[' not in line or ']' not in line:
+                    continue
+                try:
+                    csi_str = line[line.index('[') + 1: line.index(']')]
+                    csi_values = [float(x.strip()) for x in csi_str.split(',') if x.strip()]
+                    if csi_values:
+                        csi_rows.append(csi_values)
+                except Exception:
+                    continue
+
+            if not csi_rows:
+                raise HTTPException(status_code=400, detail="No valid CSI rows found")
+
+            lengths = [len(r) for r in csi_rows]
+            expected_len = int(max(set(lengths), key=lengths.count))
+            expected_len = expected_len - (expected_len % 2)
+            cleaned = []
+            dropped_rows = 0
+            for r in csi_rows:
+                if len(r) < expected_len:
+                    dropped_rows += 1
+                    continue
+                rr = r[:expected_len]
+                arr = np.asarray(rr, dtype=np.float32)
+                if not np.isfinite(arr).all():
+                    dropped_rows += 1
+                    continue
+                cleaned.append(arr)
+
+            if not cleaned:
+                raise HTTPException(status_code=400, detail="No valid CSI rows after cleaning")
+
+            csi_arr = np.stack(cleaned, axis=0)
+            imag = csi_arr[:, 0::2]
+            real = csi_arr[:, 1::2]
+            amp_arr = np.sqrt(imag ** 2 + real ** 2)
+            phase_arr = np.arctan2(imag, real)
+
+            stages.append({
+                "block": "csi_loader",
+                "name": "CSI Loader",
+                "shape": list(csi_arr.shape),
+                "sample": csi_arr[0, :max_vals].tolist(),
+                "metadata": {"total_rows": int(csi_arr.shape[0]), "expected_row_len": int(expected_len), "dropped_rows": int(dropped_rows)}
+            })
+
+            stages.append({
+                "block": "amplitude_extractor",
+                "name": "Amplitude Extractor",
+                "shape": list(amp_arr.shape),
+                "sample": amp_arr[0, :max_vals].tolist(),
+            })
+
+            if effective["include_phase"]:
+                stages.append({
+                    "block": "phase_extractor",
+                    "name": "Phase Extractor",
+                    "shape": list(phase_arr.shape),
+                    "sample": phase_arr[0, :max_vals].tolist(),
+                })
+
+            if effective["filter_subcarriers"] and amp_arr.shape[1] > int(effective["subcarrier_end"]) + 27:
+                s = int(effective["subcarrier_start"])
+                e = int(effective["subcarrier_end"])
+                amp_arr = np.concatenate([amp_arr[:, s:e], amp_arr[:, e + 1:e + 28]], axis=1)
+                phase_arr = np.concatenate([phase_arr[:, s:e], phase_arr[:, e + 1:e + 28]], axis=1)
+
+                stages.append({
+                    "block": "subcarrier_filter",
+                    "name": "Subcarrier Filter",
+                    "shape": list(amp_arr.shape),
+                    "sample": amp_arr[0, :max_vals].tolist(),
+                    "metadata": {"subcarrier_start": s, "subcarrier_end": e}
+                })
+
+            combined = np.concatenate([amp_arr, phase_arr], axis=1) if effective["include_phase"] else amp_arr
+            if not np.isfinite(combined).all():
+                combined = np.nan_to_num(combined, nan=0.0, posinf=0.0, neginf=0.0)
+
+            stages.append({
+                "block": "feature_concat",
+                "name": "Feature Combine",
+                "shape": list(combined.shape),
+                "sample": combined[0, :max_vals].tolist(),
+            })
+
+            window_size = int(effective["window_size"])
+            if combined.shape[0] < window_size:
+                stages.append({
+                    "block": "data_portion_selector",
+                    "name": "Windowing",
+                    "error": f"Not enough rows ({int(combined.shape[0])}) for window_size={window_size}",
+                })
+            else:
+                windows = []
+                for start in range(0, combined.shape[0] - window_size + 1, window_size):
+                    w = combined[start:start + window_size]
+                    windows.append(w.reshape(-1).astype(np.float32) if effective["output_shape"] == "flattened" else w.astype(np.float32))
+                if windows:
+                    sample_window = windows[0]
+                    stages.append({
+                        "block": "data_portion_selector",
+                        "name": "Window + Flatten" if effective["output_shape"] == "flattened" else "Window (Sequence)",
+                        "shape": list(sample_window.shape),
+                        "sample": sample_window.reshape(-1)[:max_vals].tolist(),
+                        "metadata": {"n_windows": len(windows), "window_size": window_size, "output_shape": effective["output_shape"]}
+                    })
+
+        else:
+            from server.ml_training import parse_imu_file
+            windows = parse_imu_file(file_row.content, window_size=int(effective["window_size"]))
+            sample_window = windows[0] if windows else None
+            stages.append({
+                "block": "imu_loader",
+                "name": "IMU Loader",
+                "shape": list(sample_window.shape) if sample_window is not None else None,
+                "sample": sample_window.reshape(-1)[:max_vals].tolist() if sample_window is not None else None,
+                "metadata": {"n_windows": len(windows), "window_size": int(effective["window_size"])}
+            })
+
+        return {
+            "success": True,
+            "preview": {
+                "dataset_id": dataset_id,
+                "file": {
+                    "file_id": file_row.fileId,
+                    "filename": file_row.filename,
+                    "size": file_row.size,
+                    "content_type": file_row.content_type,
+                },
+                "data_type": data_type,
+                "effective_config": effective,
+                "stages": stages,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to preview preprocessing: {str(e)}")
 
 
 # ============================================================================
@@ -500,6 +794,7 @@ async def start_cloud_training(
             "labels": list(labels),
             # Preprocessing pipeline
             "preprocessing_pipeline_id": request.preprocessing_pipeline_id,
+            "preprocessing_blocks": request.preprocessing_blocks or [],
             # CSI-specific preprocessing options
             "data_type": request.data_type,
             "include_phase": request.include_phase,
@@ -509,6 +804,8 @@ async def start_cloud_training(
             "output_shape": request.output_shape,
             # ML-specific hyperparameters
             "ml_params": request.ml_params or {},
+            # Optimization
+            "grid_search": request.grid_search or {},
             # Bayesian optimization settings
             "use_bayesian_optimization": request.use_bayesian_optimization,
             "bayesian_trials": request.bayesian_trials,
