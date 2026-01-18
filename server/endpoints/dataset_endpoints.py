@@ -544,6 +544,20 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
     """Async implementation of cloud training."""
     import traceback
     import sys
+    import time
+    
+    # Timing tracking for each pipeline stage
+    timing = {
+        'total_start': time.time(),
+        'preprocessing_start': None,
+        'preprocessing_end': None,
+        'training_start': None,
+        'training_end': None,
+        'evaluation_start': None,
+        'evaluation_end': None,
+        'model_save_start': None,
+        'model_save_end': None,
+    }
     
     print(f"[TRAINING-DEBUG] _run_cloud_training_async started for job {job_id}")
     sys.stdout.flush()
@@ -612,6 +626,7 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
         print(f"[TRAINING-DEBUG] ========================================")
         sys.stdout.flush()
         
+        timing['training_start'] = time.time()
         results = await run_full_training(
             job_id=job_id,
             dataset_id=job.dataset_id,
@@ -620,11 +635,28 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
             config=config,
             update_callback=update_callback
         )
+        timing['training_end'] = time.time()
+        
+        # Calculate timing durations
+        timing['total_end'] = time.time()
+        timing_summary = {
+            'total_seconds': timing['total_end'] - timing['total_start'],
+            'training_seconds': timing['training_end'] - timing['training_start'] if timing['training_start'] else 0,
+        }
+        # Add timing from results if available (preprocessing, evaluation)
+        if results.get('timing'):
+            timing_summary.update(results['timing'])
+        
+        print(f"[TIMING] Total: {timing_summary['total_seconds']:.2f}s, Training: {timing_summary['training_seconds']:.2f}s")
+        sys.stdout.flush()
         
         # Store Bayesian trials if available
         if results.get('bayesian_trials_data'):
             config['bayesian_trials_results'] = results['bayesian_trials_data']
-            job.config = json.dumps(config)
+        
+        # Store timing in config
+        config['timing'] = timing_summary
+        job.config = json.dumps(config)
         
         # Store model bytes
         model_bytes = results.get('model_bytes')

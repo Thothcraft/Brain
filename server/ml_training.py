@@ -1648,13 +1648,13 @@ async def run_full_training(
 ) -> Dict[str, Any]:
     """Run full training pipeline with real data from database.
     
-    Supports both DL models (CNN-LSTM) and ML models (AdaBoost, KNN, SVC).
+    Supports both DL models (CNN-LSTM) and ML models (AdaBoost, KNN, SVC, XGBoost).
     
     Args:
         job_id: Unique job identifier
         dataset_id: ID of the training dataset
         db_session: SQLAlchemy database session
-        model_type: Type of model - 'dl_cnn_lstm', 'adaboost', 'knn', 'svc'
+        model_type: Type of model - 'dl_cnn_lstm', 'adaboost', 'knn', 'svc', 'xgboost'
         config: Training configuration with model-specific parameters
         update_callback: Async callback for progress updates
         
@@ -1662,6 +1662,14 @@ async def run_full_training(
         Dictionary with training results and model bytes
     """
     import asyncio
+    import time
+    
+    # Timing tracking for pipeline stages
+    timing = {
+        'preprocessing_seconds': 0,
+        'training_seconds': 0,
+        'evaluation_seconds': 0,
+    }
     
     logger.info("="*80)
     logger.info(f"TRAINING JOB START: {job_id}")
@@ -1728,7 +1736,10 @@ async def run_full_training(
         logger.info(f"Loading dataset {dataset_id} from database...")
         logger.debug(f"Window size: {window_size}")
         
+        preprocessing_start = time.time()
         X, y, class_names = load_dataset_from_db(db_session, dataset_id, window_size, preprocessing_config)
+        timing['preprocessing_seconds'] = time.time() - preprocessing_start
+        logger.info(f"[TIMING] Preprocessing: {timing['preprocessing_seconds']:.2f}s")
         num_classes = len(class_names)
         
         logger.info(f"✓ Dataset loaded successfully")
@@ -1821,13 +1832,14 @@ async def run_full_training(
         raise
     
     # Determine if using ML or DL model
-    is_ml_model = model_type in ['adaboost', 'knn', 'svc']
+    is_ml_model = model_type in ['adaboost', 'knn', 'svc', 'xgboost']
     is_dl_model = model_type in ['dl_cnn_lstm', 'cnn_lstm', 'deep_learning']
     
     logger.info(f"Model category: {'ML' if is_ml_model else 'DL' if is_dl_model else 'UNKNOWN'}")
     
     if is_ml_model:
         logger.info(f"Training ML model: {model_type}")
+        training_start = time.time()
         ml_results = await train_ml_model(
             job_id, X_train, y_train,
             X_val if len(X_val) > 0 else X_train,
@@ -1835,7 +1847,10 @@ async def run_full_training(
             class_names,
             model_type, config, db_session, update_callback
         )
+        timing['training_seconds'] = time.time() - training_start
+        logger.info(f"[TIMING] ML Training: {timing['training_seconds']:.2f}s")
 
+        evaluation_start = time.time()
         if len(X_test) > 0:
             try:
                 from server.ml_models import MLModelWrapper, get_default_ml_config
@@ -1853,6 +1868,9 @@ async def run_full_training(
             except Exception as test_err:
                 logger.warning(f"Test evaluation for ML model failed: {test_err}")
 
+        timing['evaluation_seconds'] = time.time() - evaluation_start
+        logger.info(f"[TIMING] Evaluation: {timing['evaluation_seconds']:.2f}s")
+        
         ml_results['num_train_samples'] = len(X_train)
         ml_results['num_val_samples'] = len(X_val)
         ml_results['num_test_samples'] = len(X_test)
@@ -1861,6 +1879,8 @@ async def run_full_training(
             'val': validation_split,
             'test': test_split
         }
+        ml_results['timing'] = timing
+        logger.info(f"[TIMING] Total pipeline: preprocessing={timing['preprocessing_seconds']:.2f}s, training={timing['training_seconds']:.2f}s, evaluation={timing['evaluation_seconds']:.2f}s")
         return ml_results
     
     # Deep Learning path (existing code)
@@ -2073,6 +2093,11 @@ async def run_full_training(
     
     logger.info(f"Model saved: {len(model_bytes)} bytes")
     
+    # Calculate DL timing (training time is in results if available)
+    timing['training_seconds'] = results.get('training_time', 0)
+    timing['evaluation_seconds'] = 0  # Evaluation is included in training for DL
+    logger.info(f"[TIMING] DL pipeline: preprocessing={timing['preprocessing_seconds']:.2f}s, training={timing['training_seconds']:.2f}s")
+    
     return {
         'train_losses': results['train_losses'],
         'train_accuracies': results['train_accuracies'],
@@ -2097,5 +2122,6 @@ async def run_full_training(
             'val': validation_split,
             'test': test_split
         },
-        'test_results': test_results
+        'test_results': test_results,
+        'timing': timing
     }
