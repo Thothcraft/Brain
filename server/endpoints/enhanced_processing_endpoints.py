@@ -802,7 +802,7 @@ class CreatePipelineRequest(BaseModel):
     data_type: str = "csi"  # csi, imu, sensor
     output_shape: str = "flattened"  # flattened, sequence
     include_phase: bool = True
-    window_size: int = 128
+    window_size: int = 1000
     filter_subcarriers: bool = True
     subcarrier_start: int = 5
     subcarrier_end: int = 32
@@ -1069,7 +1069,7 @@ async def get_default_pipeline(
                     "data_type": data_type,
                     "output_shape": "flattened",
                     "include_phase": True,
-                    "window_size": 128,
+                    "window_size": 1000 if data_type == "csi" else 128,
                     "filter_subcarriers": True if data_type == "csi" else False,
                     "subcarrier_start": 5,
                     "subcarrier_end": 32

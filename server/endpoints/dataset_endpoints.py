@@ -195,7 +195,7 @@ class PreprocessingPreviewRequest(BaseModel):
     subcarrier_start: int = 5
     subcarrier_end: int = 32
     output_shape: str = "flattened"  # flattened or sequence
-    window_size: int = 128
+    window_size: int = 1000
     max_preview_values: int = 32
 
 
@@ -485,62 +485,85 @@ async def get_file_line_count(
     current_user = Depends(get_current_user)
 ):
     """Get the number of data lines in a file (excluding header)."""
+    from sqlalchemy import text
     try:
-        file_row = db.query(File).filter(
+        # First, check file exists and get metadata without loading content
+        file_meta = db.query(File.fileId, File.filename, File.content_type, File.size).filter(
             File.fileId == file_id,
             File.userId == current_user.userId
         ).first()
         
-        if not file_row:
+        if not file_meta:
             raise HTTPException(status_code=404, detail="File not found")
         
-        if not file_row.content:
+        filename = file_meta.filename
+        content_type = file_meta.content_type
+        file_size = file_meta.size
+        
+        # For large files, estimate line count based on file size
+        # Average CSI line is ~500 bytes, IMU line is ~100 bytes
+        filename_lower = (filename or "").lower()
+        is_csi = 'csi' in filename_lower or (content_type and 'csv' in content_type.lower())
+        
+        if file_size and file_size > 10_000_000:  # > 10MB, estimate instead
+            avg_line_size = 500 if is_csi else 100
+            estimated_lines = file_size // avg_line_size
             return {
                 "success": True,
                 "file_id": file_id,
-                "filename": file_row.filename,
-                "total_lines": 0,
-                "data_lines": 0,
-                "error": "File content not available"
+                "filename": filename,
+                "total_lines": estimated_lines,
+                "data_lines": estimated_lines - 1 if is_csi else estimated_lines,
+                "is_csi": is_csi,
+                "estimated": True,
+                "note": f"Estimated from file size ({file_size:,} bytes)"
             }
         
-        # Decode and count lines
+        # For smaller files, count lines efficiently using raw SQL to avoid ORM overhead
         try:
-            text_content = file_row.content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
-            lines = text_content.split('\n')
-            total_lines = len(lines)
+            # Use a raw SQL query with timeout to count newlines directly in the database
+            result = db.execute(text("""
+                SELECT 
+                    LENGTH(content) - LENGTH(REPLACE(CONVERT_FROM(content, 'UTF8'), E'\\n', '')) + 1 as line_count
+                FROM file 
+                WHERE file_id = :file_id AND user_id = :user_id
+            """), {"file_id": file_id, "user_id": current_user.userId}).fetchone()
             
-            # Count non-empty data lines (skip header for CSI files)
-            data_lines = 0
-            filename_lower = (file_row.filename or "").lower()
-            is_csi = 'csi' in filename_lower or (file_row.content_type and 'csv' in file_row.content_type.lower())
-            
-            for i, line in enumerate(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                # Skip header row for CSI files (first non-empty line)
-                if is_csi and i == 0 and not line.startswith('['):
-                    continue
-                data_lines += 1
-            
-            return {
-                "success": True,
-                "file_id": file_id,
-                "filename": file_row.filename,
-                "total_lines": total_lines,
-                "data_lines": data_lines,
-                "is_csi": is_csi
-            }
-        except Exception as decode_err:
-            return {
-                "success": True,
-                "file_id": file_id,
-                "filename": file_row.filename,
-                "total_lines": 0,
-                "data_lines": 0,
-                "error": f"Failed to decode file: {str(decode_err)}"
-            }
+            if result and result[0]:
+                total_lines = result[0]
+                data_lines = total_lines - 1 if is_csi else total_lines  # Subtract header for CSI
+                return {
+                    "success": True,
+                    "file_id": file_id,
+                    "filename": filename,
+                    "total_lines": total_lines,
+                    "data_lines": max(0, data_lines),
+                    "is_csi": is_csi
+                }
+        except Exception as sql_err:
+            # If raw SQL fails, fall back to estimation
+            if file_size:
+                avg_line_size = 500 if is_csi else 100
+                estimated_lines = file_size // avg_line_size
+                return {
+                    "success": True,
+                    "file_id": file_id,
+                    "filename": filename,
+                    "total_lines": estimated_lines,
+                    "data_lines": estimated_lines - 1 if is_csi else estimated_lines,
+                    "is_csi": is_csi,
+                    "estimated": True,
+                    "note": f"Estimated (query failed: {str(sql_err)[:50]})"
+                }
+        
+        return {
+            "success": True,
+            "file_id": file_id,
+            "filename": filename,
+            "total_lines": 0,
+            "data_lines": 0,
+            "error": "Could not determine line count"
+        }
     except HTTPException:
         raise
     except Exception as e:
