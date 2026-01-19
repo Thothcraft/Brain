@@ -475,6 +475,79 @@ async def preview_preprocessing(
 
 
 # ============================================================================
+# FILE LINE COUNT ENDPOINT
+# ============================================================================
+
+@router.get("/files/{file_id}/line-count", response_model=Dict[str, Any])
+async def get_file_line_count(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Get the number of data lines in a file (excluding header)."""
+    try:
+        file_row = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
+        ).first()
+        
+        if not file_row:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        if not file_row.content:
+            return {
+                "success": True,
+                "file_id": file_id,
+                "filename": file_row.filename,
+                "total_lines": 0,
+                "data_lines": 0,
+                "error": "File content not available"
+            }
+        
+        # Decode and count lines
+        try:
+            text_content = file_row.content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
+            lines = text_content.split('\n')
+            total_lines = len(lines)
+            
+            # Count non-empty data lines (skip header for CSI files)
+            data_lines = 0
+            filename_lower = (file_row.filename or "").lower()
+            is_csi = 'csi' in filename_lower or (file_row.content_type and 'csv' in file_row.content_type.lower())
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                # Skip header row for CSI files (first non-empty line)
+                if is_csi and i == 0 and not line.startswith('['):
+                    continue
+                data_lines += 1
+            
+            return {
+                "success": True,
+                "file_id": file_id,
+                "filename": file_row.filename,
+                "total_lines": total_lines,
+                "data_lines": data_lines,
+                "is_csi": is_csi
+            }
+        except Exception as decode_err:
+            return {
+                "success": True,
+                "file_id": file_id,
+                "filename": file_row.filename,
+                "total_lines": 0,
+                "data_lines": 0,
+                "error": f"Failed to decode file: {str(decode_err)}"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get line count: {str(e)}")
+
+
+# ============================================================================
 # CLOUD TRAINING ENDPOINTS (must be before /{dataset_id} catch-all)
 # ============================================================================
 
@@ -702,6 +775,8 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
         
         job.status = "completed"
         job.completed_at = datetime.utcnow()
+        # For ML models, set current_epoch = total_epochs (1) to show 100% progress
+        job.current_epoch = job.total_epochs
         
         # Save trained model (for both mock and real training)
         try:
@@ -863,6 +938,10 @@ async def start_cloud_training(
             "bayesian_search_architecture": request.bayesian_search_architecture
         }
         
+        # ML models don't have epochs - set total_epochs=1 for progress tracking
+        is_ml_model = request.model_type in ['adaboost', 'knn', 'svc', 'xgboost']
+        total_epochs = 1 if is_ml_model else request.epochs
+        
         job = TrainingJob(
             job_id=job_id,
             user_id=current_user.userId,
@@ -873,7 +952,7 @@ async def start_cloud_training(
             training_mode="cloud",
             config=json.dumps(config),
             status="pending",
-            total_epochs=request.epochs
+            total_epochs=total_epochs
         )
         db.add(job)
         db.commit()

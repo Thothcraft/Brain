@@ -1804,23 +1804,26 @@ async def run_full_training(
         logger.error(traceback.format_exc())
         raise
     
-    # Shuffle and split data
+    # Sequential split data (first part = training, second part = validation/test)
+    # No shuffling - preserves temporal order for time-series data
     try:
-        logger.debug("Shuffling and splitting data...")
-        indices = np.random.permutation(len(X))
-        X, y = X[indices], y[indices]
-
+        logger.debug("Splitting data sequentially (no shuffle)...")
+        
         if validation_split < 0 or test_split < 0 or (validation_split + test_split) >= 1:
             raise ValueError(f"Invalid splits: validation_split={validation_split}, test_split={test_split}. Must be >=0 and sum < 1")
 
         n_total = len(X)
-        n_test = int(n_total * test_split)
+        # Training data comes FIRST, then validation, then test
+        # This preserves temporal order: train on earlier data, validate/test on later data
+        train_ratio = 1.0 - validation_split - test_split
+        n_train = int(n_total * train_ratio)
         n_val = int(n_total * validation_split)
-        n_train = n_total - n_val - n_test
+        n_test = n_total - n_train - n_val  # Remainder goes to test
 
         if n_train <= 0:
             raise ValueError(f"Invalid splits result in no training data: total={n_total}, train={n_train}, val={n_val}, test={n_test}")
 
+        # Sequential split: [0:n_train] = train, [n_train:n_train+n_val] = val, [n_train+n_val:] = test
         X_train = X[:n_train]
         y_train = y[:n_train]
         X_val = X[n_train:n_train + n_val] if n_val > 0 else X[:0]
@@ -1828,10 +1831,10 @@ async def run_full_training(
         X_test = X[n_train + n_val:] if n_test > 0 else X[:0]
         y_test = y[n_train + n_val:] if n_test > 0 else y[:0]
 
-        logger.info(f"✓ Data split complete")
-        logger.info(f"  Train: {len(X_train)} samples ({len(X_train)/len(X)*100:.1f}%)")
-        logger.info(f"  Val: {len(X_val)} samples ({len(X_val)/len(X)*100:.1f}%)")
-        logger.info(f"  Test: {len(X_test)} samples ({len(X_test)/len(X)*100:.1f}%)")
+        logger.info(f"✓ Data split complete (sequential, no shuffle)")
+        logger.info(f"  Train: {len(X_train)} samples ({len(X_train)/len(X)*100:.1f}%) - indices [0:{n_train}]")
+        logger.info(f"  Val: {len(X_val)} samples ({len(X_val)/len(X)*100:.1f}%) - indices [{n_train}:{n_train+n_val}]")
+        logger.info(f"  Test: {len(X_test)} samples ({len(X_test)/len(X)*100:.1f}%) - indices [{n_train+n_val}:{n_total}]")
         logger.info(f"  Train label dist: {np.bincount(y_train)}")
         if len(y_val) > 0:
             logger.info(f"  Val label dist: {np.bincount(y_val)}")
