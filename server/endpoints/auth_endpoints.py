@@ -235,6 +235,31 @@ async def register_user(
             detail="Registration failed"
         )
 
+@router.post(
+    '/logout',
+    summary="User logout",
+    description="Logout the current user (client should clear token)",
+    responses={
+        200: {"description": "Logout successful"},
+        401: {"description": "Not authenticated"}
+    }
+)
+async def logout(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Logout endpoint - primarily for client-side token invalidation.
+    The actual token invalidation happens client-side by removing the stored token.
+    This endpoint confirms the logout action was received.
+    """
+    log_request_start("POST", "/logout", dict(request.headers) if hasattr(request, "headers") else {})
+    log_response(200, "Logout successful", "/logout")
+    return {
+        "success": True,
+        "message": "Logged out successfully"
+    }
+
 @router.get(
     '/profile', 
     response_model=UserResponse,

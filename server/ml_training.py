@@ -196,7 +196,7 @@ class IMUDataset(Dataset):
 
 def parse_csi_file(
     content: bytes,
-    window_size: int = 1000,
+    window_size: int = 128,
     include_phase: bool = True,
     filter_subcarriers: bool = True,
     subcarrier_start: int = 5,
@@ -626,7 +626,7 @@ def _block_windowing(data: np.ndarray, config: dict, max_preview: int = 32) -> T
     """Create windows and optionally flatten."""
     if data.size == 0:
         return data, {"block": "data_portion_selector", "name": "Windowing / Flattening", "shape": [], "sample": [], "error": "No input data"}
-    window_size = int(config.get("window_size", 1000))
+    window_size = int(config.get("window_size", 128))
     output_shape = config.get("output_shape", "flattened")
     n_rows = data.shape[0]
     if n_rows < window_size:

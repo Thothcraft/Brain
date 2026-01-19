@@ -195,7 +195,7 @@ class PreprocessingPreviewRequest(BaseModel):
     subcarrier_start: int = 5
     subcarrier_end: int = 32
     output_shape: str = "flattened"  # flattened or sequence
-    window_size: int = 1000
+    window_size: int = 128
     max_preview_values: int = 32
 
 
@@ -688,13 +688,24 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
         async def update_callback(status, epoch, total, metrics):
             nonlocal job, db
             try:
-                print(f"[TRAINING-DEBUG] Update callback: status={status}, epoch={epoch}")
+                stage = metrics.get('stage', '') if metrics else ''
+                print(f"[TRAINING-DEBUG] Update callback: status={status}, epoch={epoch}, stage={stage}")
                 sys.stdout.flush()
                 job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
                 if job:
                     job.status = status
                     if epoch > 0:
                         job.current_epoch = epoch
+                    # Store stage info in config for ML models
+                    if stage and metrics:
+                        try:
+                            config_data = json.loads(job.config) if job.config else {}
+                            config_data['current_stage'] = stage
+                            if 'train_accuracy' in metrics:
+                                config_data['current_train_accuracy'] = metrics['train_accuracy']
+                            job.config = json.dumps(config_data)
+                        except:
+                            pass
                     db.commit()
             except Exception as e:
                 print(f"[TRAINING-WARNING] Failed to update job status: {e}")

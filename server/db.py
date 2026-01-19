@@ -556,7 +556,7 @@ class PreprocessingPipeline(Base):
     # Output configuration
     output_shape = Column(String(50), default="flattened")  # flattened, sequence
     include_phase = Column(Boolean, default=True)
-    window_size = Column(Integer, default=1000)
+    window_size = Column(Integer, default=128)
     
     # Subcarrier filtering
     filter_subcarriers = Column(Boolean, default=True)
