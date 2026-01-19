@@ -897,23 +897,48 @@ def load_dataset_from_db(
     ).filter(TrainingDataset.id == dataset_id).first()
     
     if not dataset:
-        raise ValueError(f"Dataset {dataset_id} not found")
+        raise ValueError(f"Dataset {dataset_id} not found. Please verify the dataset exists and you have access to it.")
+    
+    # Validate dataset has files
+    if not dataset.files or len(dataset.files) == 0:
+        raise ValueError(
+            f"Dataset '{dataset.name}' (ID: {dataset_id}) has no files. "
+            f"Please add at least 2 files with different labels to the dataset before training."
+        )
     
     # Get unique labels and create mapping
-    labels_set = set(df.label for df in dataset.files)
+    labels_set = set(df.label for df in dataset.files if df.label)
+    
+    # Validate labels
+    if len(labels_set) < 2:
+        raise ValueError(
+            f"Dataset '{dataset.name}' has only {len(labels_set)} unique label(s): {list(labels_set)}. "
+            f"Training requires at least 2 different classes. "
+            f"Please add files with different labels to create a classification task."
+        )
+    
     class_names = sorted(list(labels_set))
     label_to_idx = {label: idx for idx, label in enumerate(class_names)}
+    
+    logger.info(f"Dataset '{dataset.name}' loaded with {len(dataset.files)} files")
+    logger.info(f"  Classes ({len(class_names)}): {class_names}")
     
     all_windows = []
     all_labels = []
     detected_type = None
+    files_processed = 0
+    files_failed = []
+    files_empty = []
+    per_class_samples = {label: 0 for label in class_names}
     
     for dataset_file in dataset.files:
         if not dataset_file.file:
+            files_failed.append((dataset_file.label, "File reference missing"))
             continue
             
         file_content = dataset_file.file.content
         if not file_content:
+            files_empty.append(dataset_file.file.filename or "unknown")
             continue
         
         filename = dataset_file.file.filename or ""
@@ -978,16 +1003,64 @@ def load_dataset_from_db(
             label_idx = label_to_idx[dataset_file.label]
             all_windows.extend(windows)
             all_labels.extend([label_idx] * len(windows))
+            per_class_samples[dataset_file.label] += len(windows)
+            files_processed += 1
             logger.info(f"Loaded {len(windows)} windows from {filename} (label: {dataset_file.label}, type: {file_type})")
+        else:
+            files_failed.append((filename, f"No windows extracted (file_type: {file_type})"))
     
+    # Report processing summary
+    logger.info(f"File processing summary:")
+    logger.info(f"  Processed: {files_processed}/{len(dataset.files)} files")
+    if files_empty:
+        logger.warning(f"  Empty files (skipped): {files_empty}")
+    if files_failed:
+        logger.warning(f"  Failed files: {files_failed}")
+    
+    # Validate we have data
     if not all_windows:
         data_type_msg = f" ({detected_type})" if detected_type else ""
-        raise ValueError(f"No valid data found in dataset {dataset_id}{data_type_msg}. Check that files contain valid {detected_type or 'CSI/IMU'} data.")
+        error_details = []
+        if files_empty:
+            error_details.append(f"Empty files: {files_empty}")
+        if files_failed:
+            error_details.append(f"Failed files: {[f[0] for f in files_failed]}")
+        raise ValueError(
+            f"No valid data found in dataset '{dataset.name}'{data_type_msg}. "
+            f"Check that files contain valid {detected_type or 'CSI/IMU'} data. "
+            f"Details: {'; '.join(error_details) if error_details else 'Unknown error'}"
+        )
+    
+    # Validate per-class sample counts
+    logger.info(f"Per-class sample counts:")
+    min_samples_per_class = float('inf')
+    classes_with_few_samples = []
+    for label, count in per_class_samples.items():
+        logger.info(f"  {label}: {count} samples")
+        if count < min_samples_per_class:
+            min_samples_per_class = count
+        if count < 10:
+            classes_with_few_samples.append((label, count))
+    
+    if min_samples_per_class < 3:
+        raise ValueError(
+            f"Some classes have too few samples for training. "
+            f"Each class needs at least 3 samples (for train/val/test split). "
+            f"Classes with insufficient data: {[(l, c) for l, c in per_class_samples.items() if c < 3]}"
+        )
+    
+    if classes_with_few_samples:
+        logger.warning(
+            f"WARNING: Some classes have very few samples (<10), which may lead to poor model performance: "
+            f"{classes_with_few_samples}"
+        )
     
     X = np.array(all_windows, dtype=np.float32)
     y = np.array(all_labels, dtype=np.int64)
     
-    logger.info(f"Dataset loaded: {X.shape[0]} samples, {len(class_names)} classes")
+    logger.info(f"Dataset loaded successfully:")
+    logger.info(f"  Total samples: {X.shape[0]}")
+    logger.info(f"  Classes: {len(class_names)} - {class_names}")
     logger.info(f"  Data type: {detected_type}")
     logger.info(f"  Shape: {X.shape}")
     logger.info(f"  Output format: {output_shape}")
@@ -1522,18 +1595,25 @@ def compute_metrics_from_predictions(
     """Compute metrics from predictions (for ML models)."""
     num_classes = len(class_names)
     
-    # Ensure y_probs has the correct shape for all classes
-    # ML models may only return probabilities for classes present in the data
-    if y_probs.shape[1] < num_classes:
-        logger.warning(f"y_probs has {y_probs.shape[1]} columns but expected {num_classes} classes. Padding with zeros.")
-        # Create a full probability matrix with zeros for missing classes
-        full_probs = np.zeros((y_probs.shape[0], num_classes), dtype=y_probs.dtype)
-        # Find which classes are present in y_true
-        unique_classes = np.unique(y_true)
-        for idx, cls in enumerate(unique_classes):
-            if idx < y_probs.shape[1] and cls < num_classes:
-                full_probs[:, cls] = y_probs[:, idx]
-        y_probs = full_probs
+    # Validate y_probs shape - should match num_classes
+    if y_probs.shape[1] != num_classes:
+        raise ValueError(
+            f"CRITICAL: Probability matrix has {y_probs.shape[1]} columns but expected {num_classes} classes. "
+            f"This indicates the validation set is missing some classes. "
+            f"Ensure all classes are represented in the validation data. "
+            f"Classes in y_true: {np.unique(y_true).tolist()}, Expected: {list(range(num_classes))}"
+        )
+    
+    # Validate all classes are present in y_true
+    unique_in_true = set(np.unique(y_true))
+    expected_classes = set(range(num_classes))
+    if unique_in_true != expected_classes:
+        missing = expected_classes - unique_in_true
+        raise ValueError(
+            f"CRITICAL: Validation data is missing classes: {[class_names[c] for c in missing]}. "
+            f"All classes must be present in validation data for proper evaluation. "
+            f"Please ensure your data split includes all classes in each set."
+        )
     
     # Confusion matrix
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
@@ -1561,29 +1641,25 @@ def compute_metrics_from_predictions(
         y_bin = np.hstack([1 - y_bin, y_bin])
     
     for i, class_name in enumerate(class_names):
-        try:
-            # Check if this class has any samples in y_true
-            if y_bin[:, i].sum() == 0:
-                # No positive samples for this class - skip ROC/PR curves
-                roc_curves[class_name] = {'points': [{'fpr': 0.0, 'tpr': 0.0}, {'fpr': 1.0, 'tpr': 1.0}], 'auc': 0.5}
-                pr_curves[class_name] = {'points': [{'precision': 0.0, 'recall': 1.0}, {'precision': 0.0, 'recall': 0.0}]}
-                continue
-            
-            fpr, tpr, _ = roc_curve(y_bin[:, i], y_probs[:, i])
-            roc_auc = auc(fpr, tpr)
-            
-            indices = np.linspace(0, len(fpr) - 1, min(20, len(fpr)), dtype=int)
-            roc_points = [{'fpr': round(float(fpr[j]), 4), 'tpr': round(float(tpr[j]), 4)} for j in indices]
-            roc_curves[class_name] = {'points': roc_points, 'auc': round(float(roc_auc), 4)}
-            
-            prec, rec, _ = precision_recall_curve(y_bin[:, i], y_probs[:, i])
-            indices = np.linspace(0, len(prec) - 1, min(20, len(prec)), dtype=int)
-            pr_points = [{'precision': round(float(prec[j]), 4), 'recall': round(float(rec[j]), 4)} for j in indices]
-            pr_curves[class_name] = {'points': pr_points}
-        except Exception as e:
-            logger.warning(f"Failed to compute ROC/PR curves for class {class_name}: {e}")
-            roc_curves[class_name] = {'points': [{'fpr': 0.0, 'tpr': 0.0}, {'fpr': 1.0, 'tpr': 1.0}], 'auc': 0.5}
-            pr_curves[class_name] = {'points': [{'precision': 0.0, 'recall': 1.0}, {'precision': 0.0, 'recall': 0.0}]}
+        # With stratified splitting, all classes should be present
+        # If not, this is a bug that should be caught earlier
+        if y_bin[:, i].sum() == 0:
+            raise ValueError(
+                f"CRITICAL: Class '{class_name}' has no samples in validation data. "
+                f"This should have been caught during data splitting. Please report this bug."
+            )
+        
+        fpr, tpr, _ = roc_curve(y_bin[:, i], y_probs[:, i])
+        roc_auc = auc(fpr, tpr)
+        
+        indices = np.linspace(0, len(fpr) - 1, min(20, len(fpr)), dtype=int)
+        roc_points = [{'fpr': round(float(fpr[j]), 4), 'tpr': round(float(tpr[j]), 4)} for j in indices]
+        roc_curves[class_name] = {'points': roc_points, 'auc': round(float(roc_auc), 4)}
+        
+        prec, rec, _ = precision_recall_curve(y_bin[:, i], y_probs[:, i])
+        indices = np.linspace(0, len(prec) - 1, min(20, len(prec)), dtype=int)
+        pr_points = [{'precision': round(float(prec[j]), 4), 'recall': round(float(rec[j]), 4)} for j in indices]
+        pr_curves[class_name] = {'points': pr_points}
     
     return {
         'confusion_matrix': cm.tolist(),
@@ -1829,42 +1905,131 @@ async def run_full_training(
         logger.error(traceback.format_exc())
         raise
     
-    # Sequential split data (first part = training, second part = validation/test)
-    # No shuffling - preserves temporal order for time-series data
+    # Stratified sequential split: ensures all classes are represented in each split
+    # Data is split per-class to maintain class balance across train/val/test
     try:
-        logger.debug("Splitting data sequentially (no shuffle)...")
+        logger.info("Splitting data with stratified sequential split...")
+        logger.info("  (Each class is split independently to ensure all classes in all sets)")
         
         if validation_split < 0 or test_split < 0 or (validation_split + test_split) >= 1:
             raise ValueError(f"Invalid splits: validation_split={validation_split}, test_split={test_split}. Must be >=0 and sum < 1")
 
-        n_total = len(X)
-        # Training data comes FIRST, then validation, then test
-        # This preserves temporal order: train on earlier data, validate/test on later data
         train_ratio = 1.0 - validation_split - test_split
-        n_train = int(n_total * train_ratio)
-        n_val = int(n_total * validation_split)
-        n_test = n_total - n_train - n_val  # Remainder goes to test
+        
+        # Split each class independently to ensure all classes in all sets
+        X_train_list, y_train_list = [], []
+        X_val_list, y_val_list = [], []
+        X_test_list, y_test_list = [], []
+        
+        unique_classes = np.unique(y)
+        logger.info(f"  Found {len(unique_classes)} classes: {unique_classes.tolist()}")
+        
+        for cls in unique_classes:
+            cls_mask = y == cls
+            X_cls = X[cls_mask]
+            y_cls = y[cls_mask]
+            n_cls = len(X_cls)
+            
+            if n_cls < 3:
+                raise ValueError(
+                    f"Class '{class_names[cls]}' has only {n_cls} samples. "
+                    f"Each class needs at least 3 samples for train/val/test split. "
+                    f"Please add more data for this class or remove it from the dataset."
+                )
+            
+            # Calculate split sizes for this class
+            n_train_cls = max(1, int(n_cls * train_ratio))
+            n_val_cls = max(1, int(n_cls * validation_split)) if validation_split > 0 else 0
+            n_test_cls = n_cls - n_train_cls - n_val_cls
+            
+            # Ensure at least 1 sample in test if test_split > 0
+            if test_split > 0 and n_test_cls < 1:
+                n_test_cls = 1
+                n_train_cls = n_cls - n_val_cls - n_test_cls
+            
+            if n_train_cls < 1:
+                raise ValueError(
+                    f"Class '{class_names[cls]}' has {n_cls} samples which is too few for the requested split ratios. "
+                    f"Train would get {n_train_cls} samples. Please add more data or adjust split ratios."
+                )
+            
+            # Sequential split within each class (first part = train, then val, then test)
+            X_train_list.append(X_cls[:n_train_cls])
+            y_train_list.append(y_cls[:n_train_cls])
+            
+            if n_val_cls > 0:
+                X_val_list.append(X_cls[n_train_cls:n_train_cls + n_val_cls])
+                y_val_list.append(y_cls[n_train_cls:n_train_cls + n_val_cls])
+            
+            if n_test_cls > 0:
+                X_test_list.append(X_cls[n_train_cls + n_val_cls:])
+                y_test_list.append(y_cls[n_train_cls + n_val_cls:])
+            
+            logger.debug(f"    Class '{class_names[cls]}': {n_cls} total -> train={n_train_cls}, val={n_val_cls}, test={n_test_cls}")
+        
+        # Concatenate all classes
+        X_train = np.concatenate(X_train_list, axis=0) if X_train_list else np.array([])
+        y_train = np.concatenate(y_train_list, axis=0) if y_train_list else np.array([])
+        X_val = np.concatenate(X_val_list, axis=0) if X_val_list else np.array([]).reshape(0, *X.shape[1:])
+        y_val = np.concatenate(y_val_list, axis=0) if y_val_list else np.array([], dtype=np.int64)
+        X_test = np.concatenate(X_test_list, axis=0) if X_test_list else np.array([]).reshape(0, *X.shape[1:])
+        y_test = np.concatenate(y_test_list, axis=0) if y_test_list else np.array([], dtype=np.int64)
+        
+        n_total = len(X)
+        n_train = len(X_train)
+        n_val = len(X_val)
+        n_test = len(X_test)
 
-        if n_train <= 0:
-            raise ValueError(f"Invalid splits result in no training data: total={n_total}, train={n_train}, val={n_val}, test={n_test}")
-
-        # Sequential split: [0:n_train] = train, [n_train:n_train+n_val] = val, [n_train+n_val:] = test
-        X_train = X[:n_train]
-        y_train = y[:n_train]
-        X_val = X[n_train:n_train + n_val] if n_val > 0 else X[:0]
-        y_val = y[n_train:n_train + n_val] if n_val > 0 else y[:0]
-        X_test = X[n_train + n_val:] if n_test > 0 else X[:0]
-        y_test = y[n_train + n_val:] if n_test > 0 else y[:0]
-
-        logger.info(f"✓ Data split complete (sequential, no shuffle)")
-        logger.info(f"  Train: {len(X_train)} samples ({len(X_train)/len(X)*100:.1f}%) - indices [0:{n_train}]")
-        logger.info(f"  Val: {len(X_val)} samples ({len(X_val)/len(X)*100:.1f}%) - indices [{n_train}:{n_train+n_val}]")
-        logger.info(f"  Test: {len(X_test)} samples ({len(X_test)/len(X)*100:.1f}%) - indices [{n_train+n_val}:{n_total}]")
-        logger.info(f"  Train label dist: {np.bincount(y_train)}")
+        logger.info(f"✓ Data split complete (stratified sequential)")
+        logger.info(f"  Train: {n_train} samples ({n_train/n_total*100:.1f}%)")
+        logger.info(f"  Val: {n_val} samples ({n_val/n_total*100:.1f}%)")
+        logger.info(f"  Test: {n_test} samples ({n_test/n_total*100:.1f}%)")
+        
+        # Verify all classes are in each split
+        train_classes = set(np.unique(y_train))
+        val_classes = set(np.unique(y_val)) if len(y_val) > 0 else set()
+        test_classes = set(np.unique(y_test)) if len(y_test) > 0 else set()
+        all_classes = set(unique_classes)
+        
+        logger.info(f"  Train classes: {sorted(train_classes)} ({len(train_classes)}/{len(all_classes)})")
         if len(y_val) > 0:
-            logger.info(f"  Val label dist: {np.bincount(y_val)}")
+            logger.info(f"  Val classes: {sorted(val_classes)} ({len(val_classes)}/{len(all_classes)})")
         if len(y_test) > 0:
-            logger.info(f"  Test label dist: {np.bincount(y_test)}")
+            logger.info(f"  Test classes: {sorted(test_classes)} ({len(test_classes)}/{len(all_classes)})")
+        
+        # Detailed distribution
+        train_dist = np.bincount(y_train, minlength=len(class_names))
+        logger.info(f"  Train distribution: {dict(zip(class_names, train_dist.tolist()))}")
+        if len(y_val) > 0:
+            val_dist = np.bincount(y_val, minlength=len(class_names))
+            logger.info(f"  Val distribution: {dict(zip(class_names, val_dist.tolist()))}")
+        if len(y_test) > 0:
+            test_dist = np.bincount(y_test, minlength=len(class_names))
+            logger.info(f"  Test distribution: {dict(zip(class_names, test_dist.tolist()))}")
+        
+        # Validate that all classes are present where needed
+        if train_classes != all_classes:
+            missing = all_classes - train_classes
+            raise ValueError(
+                f"CRITICAL: Training set is missing classes: {[class_names[c] for c in missing]}. "
+                f"This should not happen with stratified splitting. Please report this bug."
+            )
+        
+        if validation_split > 0 and val_classes != all_classes:
+            missing = all_classes - val_classes
+            raise ValueError(
+                f"CRITICAL: Validation set is missing classes: {[class_names[c] for c in missing]}. "
+                f"Each class needs at least 2 samples for train+val split. "
+                f"Please add more data for these classes."
+            )
+        
+        if test_split > 0 and test_classes != all_classes:
+            missing = all_classes - test_classes
+            raise ValueError(
+                f"CRITICAL: Test set is missing classes: {[class_names[c] for c in missing]}. "
+                f"Each class needs at least 3 samples for train+val+test split. "
+                f"Please add more data for these classes."
+            )
         
     except Exception as e:
         logger.error(f"✗ Data splitting failed: {e}")
