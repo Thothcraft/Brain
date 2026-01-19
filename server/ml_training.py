@@ -1522,6 +1522,19 @@ def compute_metrics_from_predictions(
     """Compute metrics from predictions (for ML models)."""
     num_classes = len(class_names)
     
+    # Ensure y_probs has the correct shape for all classes
+    # ML models may only return probabilities for classes present in the data
+    if y_probs.shape[1] < num_classes:
+        logger.warning(f"y_probs has {y_probs.shape[1]} columns but expected {num_classes} classes. Padding with zeros.")
+        # Create a full probability matrix with zeros for missing classes
+        full_probs = np.zeros((y_probs.shape[0], num_classes), dtype=y_probs.dtype)
+        # Find which classes are present in y_true
+        unique_classes = np.unique(y_true)
+        for idx, cls in enumerate(unique_classes):
+            if idx < y_probs.shape[1] and cls < num_classes:
+                full_probs[:, cls] = y_probs[:, idx]
+        y_probs = full_probs
+    
     # Confusion matrix
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
     
@@ -1548,17 +1561,29 @@ def compute_metrics_from_predictions(
         y_bin = np.hstack([1 - y_bin, y_bin])
     
     for i, class_name in enumerate(class_names):
-        fpr, tpr, _ = roc_curve(y_bin[:, i], y_probs[:, i])
-        roc_auc = auc(fpr, tpr)
-        
-        indices = np.linspace(0, len(fpr) - 1, min(20, len(fpr)), dtype=int)
-        roc_points = [{'fpr': round(float(fpr[j]), 4), 'tpr': round(float(tpr[j]), 4)} for j in indices]
-        roc_curves[class_name] = {'points': roc_points, 'auc': round(float(roc_auc), 4)}
-        
-        prec, rec, _ = precision_recall_curve(y_bin[:, i], y_probs[:, i])
-        indices = np.linspace(0, len(prec) - 1, min(20, len(prec)), dtype=int)
-        pr_points = [{'precision': round(float(prec[j]), 4), 'recall': round(float(rec[j]), 4)} for j in indices]
-        pr_curves[class_name] = {'points': pr_points}
+        try:
+            # Check if this class has any samples in y_true
+            if y_bin[:, i].sum() == 0:
+                # No positive samples for this class - skip ROC/PR curves
+                roc_curves[class_name] = {'points': [{'fpr': 0.0, 'tpr': 0.0}, {'fpr': 1.0, 'tpr': 1.0}], 'auc': 0.5}
+                pr_curves[class_name] = {'points': [{'precision': 0.0, 'recall': 1.0}, {'precision': 0.0, 'recall': 0.0}]}
+                continue
+            
+            fpr, tpr, _ = roc_curve(y_bin[:, i], y_probs[:, i])
+            roc_auc = auc(fpr, tpr)
+            
+            indices = np.linspace(0, len(fpr) - 1, min(20, len(fpr)), dtype=int)
+            roc_points = [{'fpr': round(float(fpr[j]), 4), 'tpr': round(float(tpr[j]), 4)} for j in indices]
+            roc_curves[class_name] = {'points': roc_points, 'auc': round(float(roc_auc), 4)}
+            
+            prec, rec, _ = precision_recall_curve(y_bin[:, i], y_probs[:, i])
+            indices = np.linspace(0, len(prec) - 1, min(20, len(prec)), dtype=int)
+            pr_points = [{'precision': round(float(prec[j]), 4), 'recall': round(float(rec[j]), 4)} for j in indices]
+            pr_curves[class_name] = {'points': pr_points}
+        except Exception as e:
+            logger.warning(f"Failed to compute ROC/PR curves for class {class_name}: {e}")
+            roc_curves[class_name] = {'points': [{'fpr': 0.0, 'tpr': 0.0}, {'fpr': 1.0, 'tpr': 1.0}], 'auc': 0.5}
+            pr_curves[class_name] = {'points': [{'precision': 0.0, 'recall': 1.0}, {'precision': 0.0, 'recall': 0.0}]}
     
     return {
         'confusion_matrix': cm.tolist(),
