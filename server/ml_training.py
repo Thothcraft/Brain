@@ -1510,6 +1510,13 @@ async def train_ml_model(
     logger.info("="*80)
     
     try:
+        # Update progress: ML training started
+        if update_callback:
+            try:
+                await update_callback("training", 0, 1, {"stage": "initializing"})
+            except Exception as cb_err:
+                logger.warning(f"Progress callback failed: {cb_err}")
+        
         # Get model-specific config
         ml_config = get_default_ml_config(model_type)
         ml_config.update(config.get('ml_params', {}))
@@ -1520,6 +1527,13 @@ async def train_ml_model(
         logger.debug("Creating ML model wrapper...")
         model_wrapper = MLModelWrapper(model_type, ml_config)
         logger.info(f"✓ {model_type} model initialized")
+        
+        # Update progress: Model initialized, starting training
+        if update_callback:
+            try:
+                await update_callback("training", 0, 1, {"stage": "fitting"})
+            except Exception as cb_err:
+                logger.warning(f"Progress callback failed: {cb_err}")
         
         # Train model in thread pool
         logger.info("Starting ML model training...")
@@ -1533,6 +1547,13 @@ async def train_ml_model(
         logger.info(f"  Train accuracy: {metrics['train_accuracy']:.4f}")
         if 'val_accuracy' in metrics:
             logger.info(f"  Val accuracy: {metrics['val_accuracy']:.4f}")
+        
+        # Update progress: Training complete, computing metrics
+        if update_callback:
+            try:
+                await update_callback("training", 1, 1, {"stage": "computing_metrics", "train_accuracy": metrics['train_accuracy']})
+            except Exception as cb_err:
+                logger.warning(f"Progress callback failed: {cb_err}")
         
         # Compute detailed metrics
         logger.info("Computing detailed metrics...")
