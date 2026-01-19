@@ -33,6 +33,7 @@ from server.endpoints.processing_endpoints import router as processing_router
 from server.endpoints.activity_endpoints import router as activity_router
 from server.endpoints.enhanced_training_endpoints import router as enhanced_training_router
 from server.endpoints.enhanced_processing_endpoints import router as enhanced_processing_router
+from server.endpoints.figure_endpoints import router as figure_router
 
 # Create main router
 router = APIRouter()
@@ -54,6 +55,7 @@ router.include_router(processing_router)  # /processing/* (Data processing pipel
 router.include_router(activity_router)    # /activity/* (Activity feed and stats)
 router.include_router(enhanced_training_router)  # /enhanced-training/* (DL/ML training with CSI support)
 router.include_router(enhanced_processing_router) # /enhanced-processing/* (CSI preprocessing pipelines)
+router.include_router(figure_router)             # /figures/* (Publication-ready figure export)
 
 # ============================================================================
 # MODULAR ENDPOINTS LOADED
