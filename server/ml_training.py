@@ -844,7 +844,8 @@ def load_dataset_from_db(
     db_session, 
     dataset_id: int, 
     window_size: int = 128,
-    preprocessing_config: dict = None
+    preprocessing_config: dict = None,
+    progress_callback: callable = None
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Load and preprocess dataset from database.
     
@@ -931,7 +932,15 @@ def load_dataset_from_db(
     files_empty = []
     per_class_samples = {label: 0 for label in class_names}
     
-    for dataset_file in dataset.files:
+    total_files = len(dataset.files)
+    for file_idx, dataset_file in enumerate(dataset.files):
+        # Report progress for each file
+        if progress_callback:
+            try:
+                progress_callback(file_idx, total_files, dataset_file.file.filename if dataset_file.file else "unknown")
+            except Exception as cb_err:
+                logger.warning(f"Progress callback failed: {cb_err}")
+        
         if not dataset_file.file:
             files_failed.append((dataset_file.label, "File reference missing"))
             continue
@@ -1867,11 +1876,38 @@ async def run_full_training(
     
     # Load real data from database
     try:
+        # Update progress: Loading data (this is the slow part for large CSI files)
+        if update_callback:
+            try:
+                await update_callback("training", 0, 1, {"stage": "loading_data", "files_loaded": 0, "total_files": 0})
+            except Exception as cb_err:
+                logger.warning(f"Progress callback failed: {cb_err}")
+        
         logger.info(f"Loading dataset {dataset_id} from database...")
         logger.debug(f"Window size: {window_size}")
         
+        # Create a synchronous progress callback that updates the database directly
+        from server.db import TrainingJob
+        import json as json_module
+        
+        def file_progress_callback(file_idx: int, total_files: int, filename: str):
+            logger.info(f"Loading file {file_idx + 1}/{total_files}: {filename}")
+            try:
+                # Update job config with file loading progress
+                job = db_session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+                if job:
+                    config_data = json_module.loads(job.config) if job.config else {}
+                    config_data['current_stage'] = 'loading_data'
+                    config_data['files_loaded'] = file_idx + 1
+                    config_data['total_files'] = total_files
+                    config_data['current_file'] = filename
+                    job.config = json_module.dumps(config_data)
+                    db_session.commit()
+            except Exception as e:
+                logger.warning(f"Failed to update file progress: {e}")
+        
         preprocessing_start = time.time()
-        X, y, class_names = load_dataset_from_db(db_session, dataset_id, window_size, preprocessing_config)
+        X, y, class_names = load_dataset_from_db(db_session, dataset_id, window_size, preprocessing_config, file_progress_callback)
         timing['preprocessing_seconds'] = time.time() - preprocessing_start
         logger.info(f"[TIMING] Preprocessing: {timing['preprocessing_seconds']:.2f}s")
         num_classes = len(class_names)
