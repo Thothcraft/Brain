@@ -1058,6 +1058,7 @@ async def list_training_jobs(
             TrainingJob.total_epochs,
             TrainingJob.metrics,
             TrainingJob.best_metrics,
+            TrainingJob.config,
             TrainingJob.created_at,
             TrainingJob.started_at,
             TrainingJob.completed_at,
@@ -1095,6 +1096,13 @@ async def list_training_jobs(
                 except Exception:
                     best_metrics = {}
 
+            config = {}
+            if j.config:
+                try:
+                    config = json.loads(j.config)
+                except Exception:
+                    config = {}
+
             job_list.append({
                 "job_id": j.job_id,
                 "dataset_id": j.dataset_id,
@@ -1107,6 +1115,7 @@ async def list_training_jobs(
                 "progress": progress,
                 "metrics": metrics,
                 "best_metrics": best_metrics,
+                "config": config,
                 "created_at": j.created_at.isoformat() if j.created_at else None,
                 "started_at": j.started_at.isoformat() if j.started_at else None,
                 "completed_at": j.completed_at.isoformat() if j.completed_at else None,
