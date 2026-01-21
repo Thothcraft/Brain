@@ -67,9 +67,10 @@ class MLModelWrapper:
         
         logger.debug(f"AdaBoost params: n_estimators={n_estimators}, lr={learning_rate}, algo={algorithm}, max_depth={max_depth}")
         
-        base_estimator = DecisionTreeClassifier(max_depth=max_depth)
+        base_tree = DecisionTreeClassifier(max_depth=max_depth)
+        # scikit-learn 1.2+ renamed base_estimator to estimator
         return AdaBoostClassifier(
-            base_estimator=base_estimator,
+            estimator=base_tree,
             n_estimators=n_estimators,
             learning_rate=learning_rate,
             algorithm=algorithm,
