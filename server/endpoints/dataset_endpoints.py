@@ -328,8 +328,12 @@ async def preview_preprocessing(
             text_content = file_row.content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
             lines = text_content.split('\n')
 
+            # For preview, limit rows to 2x window_size to avoid timeout on large files
+            preview_row_limit = max(2000, int(effective["window_size"]) * 2)
+            total_data_lines = len(lines) - 1  # Exclude header
+
             csi_rows: List[List[float]] = []
-            for line in lines[1:]:
+            for line in lines[1:preview_row_limit + 1]:
                 line = line.strip()
                 if not line:
                     continue
@@ -376,7 +380,13 @@ async def preview_preprocessing(
                 "name": "CSI Loader",
                 "shape": list(csi_arr.shape),
                 "sample": csi_arr[0, :max_vals].tolist(),
-                "metadata": {"total_rows": int(csi_arr.shape[0]), "expected_row_len": int(expected_len), "dropped_rows": int(dropped_rows)}
+                "metadata": {
+                    "total_rows": int(csi_arr.shape[0]),
+                    "expected_row_len": int(expected_len),
+                    "dropped_rows": int(dropped_rows),
+                    "total_file_rows": int(total_data_lines),
+                    "preview_limited": total_data_lines > preview_row_limit
+                }
             })
 
             stages.append({
@@ -471,6 +481,9 @@ async def preview_preprocessing(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        logger.error(f"[PREVIEW] Failed to preview preprocessing for dataset {dataset_id}: {str(e)}\n{error_details}")
         raise HTTPException(status_code=500, detail=f"Failed to preview preprocessing: {str(e)}")
 
 

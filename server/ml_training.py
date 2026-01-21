@@ -538,8 +538,14 @@ def _block_csi_loader(content: bytes, config: dict, max_preview: int = 32) -> Tu
     """Load CSI data from raw bytes, return I/Q matrix."""
     text_content = content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
     lines = text_content.split('\n')
+    
+    # For preview, limit rows to avoid timeout on large files
+    window_size = int(config.get("window_size", 1000))
+    preview_row_limit = max(2000, window_size * 2)
+    total_data_lines = len(lines) - 1
+    
     csi_rows = []
-    for line in lines[1:]:
+    for line in lines[1:preview_row_limit + 1]:
         line = line.strip()
         if not line or '[' not in line or ']' not in line:
             continue
@@ -567,7 +573,14 @@ def _block_csi_loader(content: bytes, config: dict, max_preview: int = 32) -> Tu
         return np.array([]), {"error": "No valid CSI rows after cleaning"}
     csi_arr = np.stack(cleaned, axis=0)
     sample = csi_arr[0, :max_preview].tolist() if csi_arr.size else []
-    return csi_arr, {"block": "csi_loader", "name": "CSI Loader", "shape": list(csi_arr.shape), "sample": sample}
+    return csi_arr, {
+        "block": "csi_loader",
+        "name": "CSI Loader",
+        "shape": list(csi_arr.shape),
+        "sample": sample,
+        "total_file_rows": total_data_lines,
+        "preview_limited": total_data_lines > preview_row_limit
+    }
 
 
 def _block_amplitude_extractor(data: np.ndarray, config: dict, max_preview: int = 32) -> Tuple[np.ndarray, dict]:
