@@ -367,7 +367,11 @@ async def start_fl_session(
     session_id: str,
     background_tasks: BackgroundTasks
 ):
-    """Start an FL session (begin training rounds)."""
+    """Start an FL session (begin training rounds).
+    
+    For simulation mode, clients are simulated automatically based on num_partitions.
+    No need to register clients manually.
+    """
     try:
         session = fl_manager.get_session(session_id)
         if not session:
@@ -376,11 +380,9 @@ async def start_fl_session(
         if session.status != "pending":
             raise HTTPException(status_code=400, detail=f"Session is already {session.status}")
         
-        if len(session.clients) < session.config.server.min_available_clients:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Need at least {session.config.server.min_available_clients} clients, have {len(session.clients)}"
-            )
+        # For Flower simulation mode, we don't need real clients
+        # The simulation will create virtual clients based on num_partitions
+        # Skip the client check for simulation
         
         # Start session in background
         background_tasks.add_task(fl_manager.run_session, session_id)
@@ -391,7 +393,7 @@ async def start_fl_session(
             data={
                 "session_id": session_id,
                 "status": "running",
-                "num_clients": len(session.clients),
+                "num_clients": session.config.data.num_partitions,
                 "total_rounds": session.total_rounds
             }
         )
