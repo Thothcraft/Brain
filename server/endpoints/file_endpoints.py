@@ -238,20 +238,47 @@ async def upload_file_simple(
             "is_base64_encoded": request.is_base64
         }
         
-        # Save file
+        # Save file record first (without content if using storage)
         db_file = File(
             userId=current_user.userId,
             filename=unique_filename,
-            content=content_bytes,
             size=len(content_bytes),
             content_type=content_type,
             uploaded_at=datetime.now(),
-            # Store metadata as JSON in a comment field if available
-            file_hash=json.dumps(file_metadata)  # Reusing file_hash field for metadata
+            file_hash=json.dumps(file_metadata)
         )
         db.add(db_file)
         db.commit()
         db.refresh(db_file)
+        
+        # Try to upload to Supabase Storage first
+        storage_path = None
+        try:
+            from server.utils.supabase_storage import upload_file_sync, generate_storage_path, is_storage_configured, BUCKET_FILES
+            
+            if is_storage_configured():
+                path = generate_storage_path(current_user.userId, db_file.fileId, request.filename)
+                success, result = upload_file_sync(BUCKET_FILES, path, content_bytes, content_type)
+                
+                if success:
+                    storage_path = result
+                    db_file.storage_path = storage_path
+                    db_file.content = None  # Don't store in DB if in storage
+                    db.commit()
+                    log_response(200, f"File uploaded to Supabase Storage: {storage_path}", "/file/upload")
+                else:
+                    # Fall back to DB storage
+                    log_error(f"Supabase Storage upload failed, falling back to DB: {result}")
+                    db_file.content = content_bytes
+                    db.commit()
+            else:
+                # No storage configured, use DB
+                db_file.content = content_bytes
+                db.commit()
+        except Exception as storage_error:
+            log_error(f"Storage error, falling back to DB: {storage_error}")
+            db_file.content = content_bytes
+            db.commit()
         
         # If this upload is from a device, update the DeviceFile record
         if request.device_id:
@@ -456,9 +483,32 @@ async def download_file_simple(
         parts = file_record.filename.split('_', 3)
         original_filename = parts[-1] if len(parts) >= 4 else file_record.filename
         
+        # Get file content - try Supabase Storage first, then DB
+        file_content = None
+        if file_record.storage_path:
+            try:
+                from server.utils.supabase_storage import download_file_sync, BUCKET_FILES
+                # Extract path from storage_path (format: "bucket/path")
+                path_parts = file_record.storage_path.split('/', 1)
+                if len(path_parts) == 2:
+                    bucket, path = path_parts
+                    success, content = download_file_sync(bucket, path)
+                    if success and content:
+                        file_content = content
+                        log_response(200, f"File retrieved from Supabase Storage: {file_record.storage_path}", f"/file/{file_id}")
+            except Exception as storage_error:
+                log_error(f"Failed to download from storage, trying DB: {storage_error}")
+        
+        # Fall back to DB content
+        if file_content is None:
+            file_content = file_record.content
+        
+        if file_content is None:
+            raise HTTPException(status_code=404, detail="File content not available")
+        
         # Prepare headers
         headers = {
-            "Content-Length": str(file_record.size)
+            "Content-Length": str(len(file_content))
         }
         
         if download:
@@ -469,7 +519,7 @@ async def download_file_simple(
         log_response(200, f"File {'downloaded' if download else 'viewed'}: {original_filename}", f"/file/{file_id}")
         
         return Response(
-            content=file_record.content,
+            content=file_content,
             media_type=file_record.content_type or "application/octet-stream",
             headers=headers
         )

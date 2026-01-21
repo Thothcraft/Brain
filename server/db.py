@@ -258,6 +258,8 @@ class File(Base):
     """Hash of the file"""
     last_modified = Column("last_modified", DateTime, nullable=True)
     """Timestamp when the file was last modified"""
+    storage_path = Column("storage_path", String(500), nullable=True)
+    """Path in Supabase Storage (e.g., 'files/user_123/file_456/name.csv')"""
     
     # Relationships
     user = relationship("User", back_populates="files")
@@ -602,6 +604,8 @@ class TrainedModel(Base):
     accuracy = Column(Float, nullable=True)  # Stored as percentage (0-100)
     size_bytes = Column(BigInteger, nullable=True)
     model_data = Column(LargeBinary, nullable=True)
+    storage_path = Column("storage_path", String(500), nullable=True)
+    """Path in Supabase Storage (e.g., 'models/user_123/model_456/name.pt')"""
     config = Column(Text, nullable=True)  # JSON string
     is_pinned = Column(Boolean, default=False)  # Pinned models won't be auto-deleted
     created_at = Column(DateTime, default=datetime.utcnow)
