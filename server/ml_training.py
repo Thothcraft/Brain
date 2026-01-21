@@ -1886,23 +1886,45 @@ async def run_full_training(
         logger.info(f"Loading dataset {dataset_id} from database...")
         logger.debug(f"Window size: {window_size}")
         
-        # Create a synchronous progress callback that updates the database directly
+        # Create a synchronous progress callback that updates the database using a SEPARATE session
+        # to avoid transaction conflicts with the main data loading session
         from server.db import TrainingJob
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
         import json as json_module
+        import os
+        
+        # Get database URL for creating a separate session
+        db_url = os.environ.get('DATABASE_URL', '')
+        if db_url:
+            try:
+                progress_engine = create_engine(db_url, pool_pre_ping=True)
+                ProgressSession = sessionmaker(bind=progress_engine)
+            except Exception as e:
+                logger.warning(f"Failed to create progress session engine: {e}")
+                ProgressSession = None
+        else:
+            ProgressSession = None
         
         def file_progress_callback(file_idx: int, total_files: int, filename: str):
             logger.info(f"Loading file {file_idx + 1}/{total_files}: {filename}")
+            if not ProgressSession:
+                return
             try:
-                # Update job config with file loading progress
-                job = db_session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
-                if job:
-                    config_data = json_module.loads(job.config) if job.config else {}
-                    config_data['current_stage'] = 'loading_data'
-                    config_data['files_loaded'] = file_idx + 1
-                    config_data['total_files'] = total_files
-                    config_data['current_file'] = filename
-                    job.config = json_module.dumps(config_data)
-                    db_session.commit()
+                # Use a separate session to avoid transaction conflicts
+                progress_db = ProgressSession()
+                try:
+                    job = progress_db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+                    if job:
+                        config_data = json_module.loads(job.config) if job.config else {}
+                        config_data['current_stage'] = 'loading_data'
+                        config_data['files_loaded'] = file_idx + 1
+                        config_data['total_files'] = total_files
+                        config_data['current_file'] = filename
+                        job.config = json_module.dumps(config_data)
+                        progress_db.commit()
+                finally:
+                    progress_db.close()
             except Exception as e:
                 logger.warning(f"Failed to update file progress: {e}")
         
