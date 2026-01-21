@@ -62,18 +62,17 @@ class MLModelWrapper:
         """Create AdaBoost classifier."""
         n_estimators = config.get('n_estimators', 50)
         learning_rate = config.get('learning_rate', 1.0)
-        algorithm = config.get('algorithm', 'SAMME.R')
         max_depth = config.get('max_depth', 1)
         
-        logger.debug(f"AdaBoost params: n_estimators={n_estimators}, lr={learning_rate}, algo={algorithm}, max_depth={max_depth}")
+        logger.debug(f"AdaBoost params: n_estimators={n_estimators}, lr={learning_rate}, max_depth={max_depth}")
         
         base_tree = DecisionTreeClassifier(max_depth=max_depth)
         # scikit-learn 1.2+ renamed base_estimator to estimator
+        # scikit-learn 1.4+ removed algorithm parameter (SAMME.R is now default/only)
         return AdaBoostClassifier(
             estimator=base_tree,
             n_estimators=n_estimators,
             learning_rate=learning_rate,
-            algorithm=algorithm,
             random_state=42
         )
     
