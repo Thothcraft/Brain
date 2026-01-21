@@ -1583,8 +1583,10 @@ async def train_ml_model(
         model_bytes = model_wrapper.save_to_bytes()
         logger.info(f"✓ Model saved: {len(model_bytes)} bytes")
         
-        # Get model info
+        # Get model info and add sample counts
         model_info = model_wrapper.get_model_info()
+        model_info['num_train_samples'] = len(X_train)
+        model_info['num_val_samples'] = len(X_val)
         
         return {
             'train_accuracies': [metrics['train_accuracy']],

@@ -858,34 +858,42 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
             actual_size_bytes = len(model_bytes)
             print(f"[INFO] Saving real model weights: {actual_size_bytes} bytes")
             
+            # Convert accuracy from decimal (0-1) to percentage (0-100) for storage
+            accuracy_pct = float(results["best_val_accuracy"]) * 100
+            
             trained_model = TrainedModel(
                 user_id=job.user_id,
                 job_id=job_id,
                 name=model_name,
                 architecture=job.model_type,
-                accuracy=float(results["best_val_accuracy"]),
+                accuracy=accuracy_pct,
                 size_bytes=actual_size_bytes,
                 model_data=actual_model_bytes,
                 config=json.dumps({
                     "training_results": {
                         "total_epochs": job.total_epochs,
                         "best_epoch": results["best_epoch"],
-                        "final_train_loss": results["train_losses"][-1],
-                        "final_val_loss": results["val_losses"][-1],
-                        "final_train_acc": results["train_accuracies"][-1],
-                        "final_val_acc": results["val_accuracies"][-1],
+                        "final_train_loss": results["train_losses"][-1] if results["train_losses"] else 0,
+                        "final_val_loss": results["val_losses"][-1] if results["val_losses"] else 0,
+                        "final_train_acc": results["train_accuracies"][-1] if results["train_accuracies"] else 0,
+                        "final_val_acc": results["val_accuracies"][-1] if results["val_accuracies"] else 0,
                         "best_val_acc": results["best_val_accuracy"],
-                        "test_results": results.get("test_results")
+                        "test_results": results.get("test_results"),
+                        "model_type": job.model_type,
+                        "num_train_samples": results.get("num_train_samples"),
+                        "num_val_samples": results.get("num_val_samples")
                     }
                 })
             )
             db.add(trained_model)
             db.commit()
-            print(f"[INFO] Created trained model {model_name} with {results['best_val_accuracy']*100:.2f}% accuracy, size: {actual_size_bytes/1024/1024:.2f} MB")
+            print(f"[INFO] Created trained model {model_name} with {accuracy_pct:.2f}% accuracy, size: {actual_size_bytes/1024/1024:.2f} MB")
+            sys.stdout.flush()
         except Exception as e:
             print(f"[ERROR] Failed to create trained model: {str(e)}")
             import traceback
             traceback.print_exc()
+            sys.stdout.flush()
         
         db.commit()
         
