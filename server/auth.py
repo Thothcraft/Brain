@@ -213,7 +213,21 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
         logging.error(f"[Auth] Error type: {type(e).__name__}", exc_info=True)
         return None
 
-async def get_user_from_token(token: str) -> dict:
+class TokenUser:
+    """Simple class to hold user info from token with attribute access."""
+    def __init__(self, data: dict):
+        self._data = data
+        for key, value in data.items():
+            setattr(self, key, value)
+    
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+    
+    def __getitem__(self, key):
+        return self._data[key]
+
+
+async def get_user_from_token(token: str) -> TokenUser:
     """Get user information from a JWT token without requiring a database session.
     
     This is a lighter version of get_current_user that doesn't hit the database.
@@ -236,17 +250,28 @@ async def get_user_from_token(token: str) -> dict:
     
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        sub: str = payload.get("sub")
+        if sub is None:
             raise credentials_exception
+        
+        # The 'sub' field contains the user ID (as string)
+        # Try to parse it as an integer user_id
+        try:
+            user_id = int(sub)
+            username = payload.get("username")
+        except (ValueError, TypeError):
+            # If sub is not numeric, treat it as username
+            user_id = payload.get("user_id")
+            username = sub
             
         # Return basic user info from the token
-        return {
+        return TokenUser({
             "username": username,
-            "user_id": payload.get("user_id"),
+            "user_id": user_id,
+            "userId": user_id,  # Alias for compatibility
             "email": payload.get("email"),
             "scopes": payload.get("scopes", [])
-        }
+        })
     except JWTError as e:
         logging.error(f"[Auth] JWT validation error: {str(e)}")
         raise credentials_exception

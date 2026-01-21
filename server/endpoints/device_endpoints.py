@@ -302,7 +302,11 @@ async def register_device(
             )
         
         try:
-            current_user = await get_user_from_token(authorization)
+            # Strip "Bearer " prefix if present
+            token = authorization
+            if authorization.lower().startswith("bearer "):
+                token = authorization[7:]
+            current_user = await get_user_from_token(token)
             log_request_start("POST", "/device/register", current_user.userId)
         except Exception as e:
             logger.warning(f"Device auth token invalid: {e}")
