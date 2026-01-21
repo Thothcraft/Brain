@@ -289,21 +289,27 @@ async def register_device(
     its information will be updated. The device will be marked as online upon registration.
     After successful registration, it will attempt to fetch the list of files from the device.
     
-    Note: This endpoint can work with or without user authentication for device flexibility.
+    Authentication is required for device registration.
     """
     try:
         current_user = None
         
-        # Try to get user from token if provided
-        if authorization:
-            try:
-                current_user = await get_user_from_token(authorization)
-                log_request_start("POST", "/device/register", current_user.userId if current_user else "device_auth")
-            except Exception as e:
-                logger.warning(f"Device auth token invalid, proceeding without user context: {e}")
-                log_request_start("POST", "/device/register", "device_auth")
-        else:
-            log_request_start("POST", "/device/register", "device_auth")
+        # Require authentication for device registration
+        if not authorization:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required for device registration"
+            )
+        
+        try:
+            current_user = await get_user_from_token(authorization)
+            log_request_start("POST", "/device/register", current_user.userId)
+        except Exception as e:
+            logger.warning(f"Device auth token invalid: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired authentication token"
+            )
         
         # Rate limiting check
         ip = get_client_ip(request_obj)
@@ -342,8 +348,8 @@ async def register_device(
             if mac_address:
                 hardware_info['mac_address'] = mac_address
             
-            # Check if device already exists for this user
-            user_id = current_user.userId if current_user else 1
+            # Check if device already exists (by UUID for this user)
+            user_id = current_user.userId
             existing_device = db.query(Device).filter(
                 Device.device_uuid == request.device_id,
                 Device.userId == user_id
@@ -372,15 +378,14 @@ async def register_device(
                 
                 # Store files pushed from device (if provided)
                 if request.files:
-                    _store_device_files(existing_device.deviceId, current_user.userId if current_user else 1, device_uuid, request.files, db)
+                    _store_device_files(existing_device.deviceId, user_id, device_uuid, request.files, db)
                 else:
                     # Auto-scan files if none provided
-                    _auto_sync_device_files(existing_device.deviceId, current_user.userId if current_user else 1, device_uuid, db)
+                    _auto_sync_device_files(existing_device.deviceId, user_id, device_uuid, db)
                 
                 # Get pending upload requests for this device
                 pending_uploads = _get_pending_uploads(existing_device.deviceId, db)
                 
-                user_id = current_user.userId if current_user else 1
                 logger.info(f"Device updated: {device_uuid} for user {user_id}")
                 if pending_uploads:
                     logger.info(f"Pending uploads for device {device_uuid}: {pending_uploads}")
@@ -396,7 +401,6 @@ async def register_device(
                 }
             
             # Create new device record
-            user_id = current_user.userId if current_user else 1
             new_device = Device(
                 userId=user_id,
                 device_uuid=device_uuid,
