@@ -116,7 +116,7 @@ def handle_api_error(error: APIError) -> HTTPException:
     
     return HTTPException(
         status_code=error.status_code,
-        detail=response.dict()
+        detail=response.model_dump()
     )
 
 
@@ -161,7 +161,7 @@ def file_error(error_code: ErrorCode, message: str, details: Optional[Dict[str, 
         ErrorCode.FILE_NOT_FOUND: status.HTTP_404_NOT_FOUND,
         ErrorCode.FILE_UPLOAD_FAILED: status.HTTP_400_BAD_REQUEST,
         ErrorCode.FILE_DELETE_FAILED: status.HTTP_500_INTERNAL_SERVER_ERROR,
-        ErrorCode.FILE_TOO_LARGE: status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        ErrorCode.FILE_TOO_LARGE: status.HTTP_413_CONTENT_TOO_LARGE,
         ErrorCode.STORAGE_QUOTA_EXCEEDED: status.HTTP_507_INSUFFICIENT_STORAGE,
     }
     

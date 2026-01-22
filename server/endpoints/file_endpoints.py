@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from server.db import get_db
 from server.auth import get_current_user
-from server.db import User, File, DeviceFile, Device
+from server.db import User, File, DeviceFile, Device, DatasetFile, TrainingDataset
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.utils.error_handler import (
     APIError, handle_api_error, file_error, validation_error, 
@@ -678,6 +678,24 @@ async def delete_file_simple(
         # Extract original filename for logging
         parts = file_record.filename.split('_', 3)
         original_filename = parts[-1] if len(parts) >= 4 else file_record.filename
+        
+        # Check if file is used in any datasets
+        dataset_refs = db.query(DatasetFile).filter(DatasetFile.file_id == file_id).all()
+        if dataset_refs:
+            # Get dataset names for error message
+            dataset_ids = list(set(ref.dataset_id for ref in dataset_refs))
+            datasets = db.query(TrainingDataset).filter(TrainingDataset.id.in_(dataset_ids)).all()
+            dataset_names = [ds.name for ds in datasets]
+            
+            raise handle_api_error(file_error(
+                ErrorCode.FILE_DELETE_FAILED,
+                f"Cannot delete file '{original_filename}' - it is used in {len(dataset_refs)} dataset(s)",
+                {
+                    "file_id": file_id,
+                    "datasets": dataset_names,
+                    "hint": "Remove the file from all datasets first, or delete the datasets"
+                }
+            ))
         
         # Delete the file
         try:
