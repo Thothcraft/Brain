@@ -9,21 +9,32 @@ This module provides:
 """
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, UploadFile, File as FastAPIFile
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Callable
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
 import uuid
-import random
 import json
 import numpy as np
 import pandas as pd
 import math
+import logging
 from collections import defaultdict
 
 # Import shared models
 from .models import StandardResponse
+
+# Import real training functions from ml_training
+from server.ml_training import (
+    train_model,
+    train_ml_model,
+    IMUClassifier,
+    load_dataset_from_db,
+    save_model_to_bytes,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/enhanced-training", tags=["enhanced-training"])
 
@@ -388,11 +399,18 @@ def apply_preprocessing(data: Dict[str, Any], config: CSIConfig) -> Dict[str, An
         raise ValueError(f"Preprocessing failed: {str(e)}")
 
 # ============================================================================
-# TRAINING SIMULATION FUNCTIONS
+# REAL TRAINING FUNCTIONS (using ml_training.py)
 # ============================================================================
 
-async def simulate_dl_training(job: TrainingJob):
-    """Simulate Deep Learning training."""
+async def run_dl_training(job: TrainingJob, db_session=None):
+    """Run real Deep Learning training using PyTorch.
+    
+    Uses IMUClassifier from ml_training.py for actual neural network training.
+    """
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+    from sklearn.model_selection import train_test_split
+    
     try:
         job.status = "running"
         job.started_at = datetime.now()
@@ -400,91 +418,208 @@ async def simulate_dl_training(job: TrainingJob):
         config = job.config.dl_config
         epochs = config.epochs
         
-        for epoch in range(1, epochs + 1):
-            if job.status == "cancelled":
-                break
-                
-            await asyncio.sleep(1)  # Simulate training time
-            
+        logger.info(f"Starting DL training job {job.job_id}")
+        logger.info(f"  Model: {config.model_type}, Epochs: {epochs}")
+        
+        # Check if we have a dataset_id to load real data
+        dataset_id = getattr(job.config, 'dataset_id', None)
+        
+        if dataset_id and db_session:
+            # Load real data from database
+            logger.info(f"Loading dataset {dataset_id} from database...")
+            X, y, class_names = load_dataset_from_db(
+                db_session=db_session,
+                dataset_id=dataset_id,
+                window_size=config.window_size if hasattr(config, 'window_size') else 128,
+                output_shape='sequence'
+            )
+            logger.info(f"Loaded {len(X)} samples, {len(class_names)} classes")
+        else:
+            # No dataset provided - return error
+            raise ValueError(
+                "No dataset_id provided. Please create a dataset with labeled files "
+                "and provide the dataset_id in the training configuration."
+            )
+        
+        # Split data
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=config.validation_split, 
+            random_state=42, stratify=y
+        )
+        
+        # Create data loaders
+        train_dataset = TensorDataset(
+            torch.FloatTensor(X_train), 
+            torch.LongTensor(y_train)
+        )
+        val_dataset = TensorDataset(
+            torch.FloatTensor(X_val), 
+            torch.LongTensor(y_val)
+        )
+        
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+        
+        # Determine input shape
+        seq_length = X_train.shape[1]
+        input_channels = X_train.shape[2] if len(X_train.shape) > 2 else 1
+        num_classes = len(class_names)
+        
+        # Create model
+        model = IMUClassifier(
+            input_channels=input_channels,
+            seq_length=seq_length,
+            num_classes=num_classes,
+            architecture_size=config.architecture_size if hasattr(config, 'architecture_size') else 'medium'
+        )
+        
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        logger.info(f"Training on device: {device}")
+        
+        # Training callback to update job progress
+        def training_callback(epoch, total_epochs, train_loss, train_acc, val_loss, val_acc):
             job.current_epoch = epoch
             
-            # Simulate improving metrics
-            base_loss = 1.0 - (epoch / epochs) * 0.8
-            base_acc = 0.5 + (epoch / epochs) * 0.4
+            if "loss" not in job.metrics:
+                job.metrics["loss"] = []
+            if "accuracy" not in job.metrics:
+                job.metrics["accuracy"] = []
+            if "val_loss" not in job.metrics:
+                job.metrics["val_loss"] = []
+            if "val_accuracy" not in job.metrics:
+                job.metrics["val_accuracy"] = []
             
-            # Update metrics
-            for metric in job.config.metrics:
-                if metric not in job.metrics:
-                    job.metrics[metric] = []
-                
-                if metric == "accuracy":
-                    value = min(0.95, base_acc + random.uniform(-0.02, 0.02))
-                elif metric == "loss":
-                    value = max(0.1, base_loss + random.uniform(-0.05, 0.05))
-                elif metric == "precision":
-                    value = min(0.93, base_acc + random.uniform(-0.03, 0.03))
-                elif metric == "recall":
-                    value = min(0.94, base_acc + random.uniform(-0.03, 0.03))
-                elif metric == "f1":
-                    value = min(0.92, base_acc + random.uniform(-0.02, 0.02))
-                else:
-                    value = base_acc + random.uniform(-0.02, 0.02)
-                
-                job.metrics[metric].append(value)
-                
-                # Track best metrics
-                if metric not in job.best_metrics or value > job.best_metrics[metric]:
-                    job.best_metrics[metric] = value
+            job.metrics["loss"].append(train_loss)
+            job.metrics["accuracy"].append(train_acc)
+            job.metrics["val_loss"].append(val_loss)
+            job.metrics["val_accuracy"].append(val_acc)
+            
+            if "val_accuracy" not in job.best_metrics or val_acc > job.best_metrics["val_accuracy"]:
+                job.best_metrics["val_accuracy"] = val_acc
+                job.best_metrics["best_epoch"] = epoch
+            
+            logger.info(f"Epoch {epoch}/{total_epochs}: loss={train_loss:.4f}, acc={train_acc:.4f}, val_acc={val_acc:.4f}")
         
-        # Complete training
+        # Run real training
+        results = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            num_epochs=epochs,
+            learning_rate=config.learning_rate,
+            device=device,
+            callback=training_callback
+        )
+        
+        # Save model
         if job.status == "running":
             job.status = "completed"
             job.completed_at = datetime.now()
+            
+            # Save model bytes
+            model_bytes = save_model_to_bytes(model, {
+                'model_type': config.model_type.value,
+                'num_classes': num_classes,
+                'class_names': class_names,
+                'input_channels': input_channels,
+                'seq_length': seq_length
+            })
+            job.model_bytes = model_bytes
             job.model_path = f"/models/dl/{job.job_id}/model.pth"
             
+            logger.info(f"DL training completed. Best val accuracy: {results['best_val_accuracy']:.4f}")
+            
     except Exception as e:
+        logger.error(f"DL training failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         job.status = "failed"
         job.error_message = str(e)
 
-async def simulate_ml_training(job: TrainingJob):
-    """Simulate Machine Learning training."""
+async def run_ml_training(job: TrainingJob, db_session=None):
+    """Run real Machine Learning training using sklearn.
+    
+    Uses train_ml_model from ml_training.py for actual ML model training.
+    """
+    from sklearn.model_selection import train_test_split
+    
     try:
         job.status = "running"
         job.started_at = datetime.now()
         
         config = job.config.ml_config
-        # ML training is typically faster
-        await asyncio.sleep(2)
         
-        # Simulate cross-validation results
-        for metric in job.config.metrics:
-            if metric not in job.metrics:
-                job.metrics[metric] = []
-            
-            # Generate CV scores
-            cv_scores = []
-            for fold in range(config.cross_validation_folds):
-                if metric == "accuracy":
-                    score = random.uniform(0.7, 0.9)
-                elif metric == "precision":
-                    score = random.uniform(0.65, 0.88)
-                elif metric == "recall":
-                    score = random.uniform(0.68, 0.91)
-                elif metric == "f1":
-                    score = random.uniform(0.67, 0.89)
-                else:
-                    score = random.uniform(0.7, 0.85)
-                cv_scores.append(score)
-            
-            job.metrics[metric] = cv_scores
-            job.best_metrics[metric] = np.mean(cv_scores)
+        logger.info(f"Starting ML training job {job.job_id}")
+        logger.info(f"  Model: {config.model_type}")
         
-        job.current_epoch = config.cross_validation_folds
+        # Check if we have a dataset_id to load real data
+        dataset_id = getattr(job.config, 'dataset_id', None)
+        
+        if dataset_id and db_session:
+            # Load real data from database
+            logger.info(f"Loading dataset {dataset_id} from database...")
+            X, y, class_names = load_dataset_from_db(
+                db_session=db_session,
+                dataset_id=dataset_id,
+                window_size=1000,  # ML models use flattened data
+                output_shape='flattened'
+            )
+            logger.info(f"Loaded {len(X)} samples, {len(class_names)} classes")
+        else:
+            raise ValueError(
+                "No dataset_id provided. Please create a dataset with labeled files "
+                "and provide the dataset_id in the training configuration."
+            )
+        
+        # Split data
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=config.validation_split if hasattr(config, 'validation_split') else 0.2,
+            random_state=42, stratify=y
+        )
+        
+        # Map model type to ml_training format
+        model_type_map = {
+            'knn': 'knn',
+            'svc': 'svc',
+            'ada_boost': 'adaboost',
+            'random_forest': 'random_forest',
+            'gradient_boosting': 'gradient_boosting',
+            'decision_tree': 'decision_tree',
+            'logistic_regression': 'logistic_regression',
+        }
+        ml_model_type = model_type_map.get(config.model_type.value, 'knn')
+        
+        # Run real ML training
+        results = await train_ml_model(
+            job_id=job.job_id,
+            X_train=X_train,
+            y_train=y_train,
+            X_val=X_val,
+            y_val=y_val,
+            class_names=class_names,
+            model_type=ml_model_type,
+            config={'ml_params': config.model_dump() if hasattr(config, 'model_dump') else {}},
+            db_session=db_session
+        )
+        
+        # Update job with results
+        job.metrics["accuracy"] = results['train_accuracies']
+        job.metrics["val_accuracy"] = results['val_accuracies']
+        job.best_metrics["accuracy"] = results['best_val_accuracy']
+        job.best_metrics["val_accuracy"] = results['best_val_accuracy']
+        
+        job.current_epoch = 1  # ML models train in one step
         job.status = "completed"
         job.completed_at = datetime.now()
+        job.model_bytes = results.get('model_bytes')
         job.model_path = f"/models/ml/{job.job_id}/model.pkl"
         
+        logger.info(f"ML training completed. Val accuracy: {results['best_val_accuracy']:.4f}")
+        
     except Exception as e:
+        logger.error(f"ML training failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         job.status = "failed"
         job.error_message = str(e)
 
@@ -590,11 +725,15 @@ async def start_enhanced_training(
         # Store job
         enhanced_training_jobs[job_id] = job
         
-        # Start training in background
+        # Start real training in background (using ml_training.py functions)
+        # Note: db_session needs to be passed for database access
+        from server.db import get_db_session
+        db_session = get_db_session()
+        
         if config.section == TrainingSection.DEEP_LEARNING:
-            background_tasks.add_task(simulate_dl_training, job)
+            background_tasks.add_task(run_dl_training, job, db_session)
         else:
-            background_tasks.add_task(simulate_ml_training, job)
+            background_tasks.add_task(run_ml_training, job, db_session)
         
         return StandardResponse(
             success=True,

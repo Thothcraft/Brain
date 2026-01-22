@@ -14,50 +14,23 @@ from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
 import uuid
-import random
+import logging
 from collections import defaultdict
 
 # Import shared models
 from .models import StandardResponse
 
+# Import real training functions
+from server.ml_training import (
+    train_model,
+    IMUClassifier,
+    load_dataset_from_db,
+    save_model_to_bytes,
+)
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/training", tags=["training"])
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-async def simulate_training_progress(job_id: str):
-    """Simulate training progress for demo purposes"""
-    if job_id not in training_jobs:
-        return
-    
-    job = training_jobs[job_id]
-    epochs = job["config"].get("epochs", 10)
-    
-    for epoch in range(1, epochs + 1):
-        if job["status"] != "running":
-            break
-            
-        await asyncio.sleep(2)  # Simulate training time
-        
-        # Simulate improving metrics
-        base_loss = 1.0 - (epoch / epochs) * 0.8
-        base_acc = 0.5 + (epoch / epochs) * 0.4
-        
-        job["progress"] = int((epoch / epochs) * 100)
-        job["metrics"] = {
-            "epoch": epoch,
-            "loss": base_loss + random.uniform(-0.1, 0.1),
-            "accuracy": base_acc + random.uniform(-0.05, 0.05),
-            "val_loss": base_loss + random.uniform(-0.05, 0.15),
-            "val_accuracy": base_acc + random.uniform(-0.1, 0.1)
-        }
-        job["logs"].append(f"Epoch {epoch}/{epochs} - Loss: {job['metrics']['loss']:.4f}, Acc: {job['metrics']['accuracy']:.4f}")
-    
-    if job["status"] == "running":
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["logs"].append("Training completed successfully")
 
 # ============================================================================
 # ENUMS
@@ -202,88 +175,153 @@ federated_clients: Dict[str, FederatedClient] = {}
 metrics_history: Dict[str, List[TrainingMetrics]] = defaultdict(list)
 
 # ============================================================================
-# HELPER FUNCTIONS
+# REAL TRAINING FUNCTIONS
 # ============================================================================
 
-async def simulate_training(job: TrainingJob):
-    """Simulate model training (replace with actual training in production)."""
-    job.status = TrainingStatus.RUNNING
-    job.started_at = datetime.now()
+async def run_training(job: TrainingJob, db_session=None):
+    """Run real model training using PyTorch.
     
-    for epoch in range(job.config.epochs):
-        if job.status == TrainingStatus.CANCELLED:
-            break
-            
-        # Simulate epoch training
-        await asyncio.sleep(2)  # Simulate training time
+    Uses IMUClassifier from ml_training.py for actual neural network training.
+    Requires a dataset_id in the job config to load real data.
+    """
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+    from sklearn.model_selection import train_test_split
+    import time
+    
+    try:
+        job.status = TrainingStatus.RUNNING
+        job.started_at = datetime.now()
         
-        job.current_epoch = epoch + 1
+        logger.info(f"Starting training job {job.job_id}")
+        logger.info(f"  Model: {job.config.model}, Epochs: {job.config.epochs}")
         
-        # Generate mock metrics
-        metrics = TrainingMetrics(
-            job_id=job.job_id,
-            epoch=epoch + 1,
-            batch=100,
-            loss=0.5 * (0.9 ** epoch) + random.uniform(-0.05, 0.05),
-            accuracy=min(0.95, 0.6 + 0.03 * epoch + random.uniform(-0.02, 0.02)),
-            val_loss=0.6 * (0.9 ** epoch) + random.uniform(-0.05, 0.05),
-            val_accuracy=min(0.93, 0.55 + 0.03 * epoch + random.uniform(-0.02, 0.02)),
-            learning_rate=job.config.learning_rate,
-            time_per_epoch=2.0,
-            estimated_time_remaining=(job.config.epochs - epoch - 1) * 2.0,
-            memory_usage=random.uniform(100, 500),
-            gpu_usage=random.uniform(40, 90) if job.config.mode != TrainingMode.ON_DEVICE else None
+        # Check if we have a dataset_id to load real data
+        dataset_id = getattr(job.config, 'dataset_id', None)
+        
+        if dataset_id and db_session:
+            # Load real data from database
+            logger.info(f"Loading dataset {dataset_id} from database...")
+            X, y, class_names = load_dataset_from_db(
+                db_session=db_session,
+                dataset_id=dataset_id,
+                window_size=128,
+                output_shape='sequence'
+            )
+            logger.info(f"Loaded {len(X)} samples, {len(class_names)} classes")
+        else:
+            raise ValueError(
+                "No dataset_id provided. Please create a dataset with labeled files "
+                "and provide the dataset_id in the training configuration. "
+                "Use the /datasets endpoints to create and manage datasets."
+            )
+        
+        # Split data
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=job.config.validation_split, 
+            random_state=42, stratify=y
         )
         
-        # Update job metrics
-        for key in ["loss", "accuracy", "val_loss", "val_accuracy"]:
-            if key not in job.metrics:
-                job.metrics[key] = []
-            value = getattr(metrics, key)
-            if value is not None:
-                job.metrics[key].append(value)
+        # Create data loaders
+        train_dataset = TensorDataset(
+            torch.FloatTensor(X_train), 
+            torch.LongTensor(y_train)
+        )
+        val_dataset = TensorDataset(
+            torch.FloatTensor(X_val), 
+            torch.LongTensor(y_val)
+        )
         
-        # Track best metrics
-        if metrics.val_accuracy:
-            if "val_accuracy" not in job.best_metrics or metrics.val_accuracy > job.best_metrics["val_accuracy"]:
-                job.best_metrics["val_accuracy"] = metrics.val_accuracy
-                job.best_metrics["best_epoch"] = epoch + 1
+        train_loader = DataLoader(train_dataset, batch_size=job.config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=job.config.batch_size, shuffle=False)
         
-        # Store metrics
-        metrics_history[job.job_id].append(metrics)
-    
-    # Complete training
-    if job.status == TrainingStatus.RUNNING:
-        job.status = TrainingStatus.COMPLETED
-        job.completed_at = datetime.now()
-        job.model_path = f"/models/{job.job_id}/model.h5"
-
-async def simulate_federated_round(session: FederatedSession, round_num: int):
-    """Simulate a federated learning round."""
-    # Select clients for this round
-    num_clients = int(len(session.connected_clients) * session.config.client_fraction)
-    selected_clients = random.sample(session.connected_clients, min(num_clients, len(session.connected_clients)))
-    
-    # Simulate client training
-    await asyncio.sleep(5)  # Simulate round time
-    
-    # Generate round metrics
-    round_metrics = {
-        "round": round_num,
-        "clients": len(selected_clients),
-        "avg_loss": 0.4 * (0.9 ** round_num) + random.uniform(-0.05, 0.05),
-        "avg_accuracy": min(0.92, 0.65 + 0.025 * round_num + random.uniform(-0.02, 0.02)),
-        "convergence_rate": min(1.0, 0.1 * round_num)
-    }
-    
-    session.round_metrics[round_num] = round_metrics
-    session.current_round = round_num
-    
-    # Update client participation
-    for client_id in selected_clients:
-        if client_id in federated_clients:
-            federated_clients[client_id].rounds_participated.append(round_num)
-            federated_clients[client_id].last_update = datetime.now()
+        # Determine input shape
+        seq_length = X_train.shape[1]
+        input_channels = X_train.shape[2] if len(X_train.shape) > 2 else 1
+        num_classes = len(class_names)
+        
+        # Create model
+        model = IMUClassifier(
+            input_channels=input_channels,
+            seq_length=seq_length,
+            num_classes=num_classes,
+            architecture_size='medium'
+        )
+        
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        logger.info(f"Training on device: {device}")
+        
+        # Training callback to update job progress
+        def training_callback(epoch, total_epochs, train_loss, train_acc, val_loss, val_acc):
+            job.current_epoch = epoch
+            
+            # Create metrics record
+            metrics = TrainingMetrics(
+                job_id=job.job_id,
+                epoch=epoch,
+                batch=len(train_loader),
+                loss=train_loss,
+                accuracy=train_acc,
+                val_loss=val_loss,
+                val_accuracy=val_acc,
+                learning_rate=job.config.learning_rate,
+                time_per_epoch=time.time() - job.started_at.timestamp() if job.started_at else 0,
+                estimated_time_remaining=(total_epochs - epoch) * 2.0,
+                memory_usage=torch.cuda.memory_allocated() / 1024 / 1024 if torch.cuda.is_available() else 0,
+                gpu_usage=None
+            )
+            
+            # Update job metrics
+            for key in ["loss", "accuracy", "val_loss", "val_accuracy"]:
+                if key not in job.metrics:
+                    job.metrics[key] = []
+                value = getattr(metrics, key)
+                if value is not None:
+                    job.metrics[key].append(value)
+            
+            # Track best metrics
+            if val_acc is not None:
+                if "val_accuracy" not in job.best_metrics or val_acc > job.best_metrics["val_accuracy"]:
+                    job.best_metrics["val_accuracy"] = val_acc
+                    job.best_metrics["best_epoch"] = epoch
+            
+            metrics_history[job.job_id].append(metrics)
+            logger.info(f"Epoch {epoch}/{total_epochs}: loss={train_loss:.4f}, acc={train_acc:.4f}, val_acc={val_acc:.4f}")
+        
+        # Run real training
+        results = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            num_epochs=job.config.epochs,
+            learning_rate=job.config.learning_rate,
+            device=device,
+            callback=training_callback
+        )
+        
+        # Save model
+        if job.status == TrainingStatus.RUNNING:
+            job.status = TrainingStatus.COMPLETED
+            job.completed_at = datetime.now()
+            
+            # Save model bytes
+            model_bytes = save_model_to_bytes(model, {
+                'model_type': job.config.model.value,
+                'num_classes': num_classes,
+                'class_names': class_names,
+                'input_channels': input_channels,
+                'seq_length': seq_length
+            })
+            job.model_path = f"/models/{job.job_id}/model.pth"
+            
+            logger.info(f"Training completed. Best val accuracy: {results['best_val_accuracy']:.4f}")
+            
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        job.status = TrainingStatus.FAILED
+        job.error_message = str(e)
 
 # ============================================================================
 # ENDPOINTS
@@ -319,8 +357,10 @@ async def setup_training(
         # Store job
         training_jobs[job_id] = job
         
-        # Start training in background
-        background_tasks.add_task(simulate_training, job)
+        # Start real training in background
+        from server.db import get_db_session
+        db_session = get_db_session()
+        background_tasks.add_task(run_training, job, db_session)
         
         return StandardResponse(
             success=True,
@@ -439,74 +479,20 @@ async def start_federated_training(
 ):
     """Start a federated learning session using Flower framework.
     
-    Enables privacy-preserving collaborative training across multiple devices
-    with optional differential privacy and secure aggregation.
+    DEPRECATED: This endpoint is deprecated. Please use /fl/sessions endpoint instead
+    for full Flower framework integration with real federated learning.
+    
+    This endpoint now redirects to the proper Flower FL implementation.
     """
-    try:
-        # Generate session ID
-        session_id = str(uuid.uuid4())
-        
-        # Create federated session
-        session = FederatedSession(
-            session_id=session_id,
-            config=config,
-            status=TrainingStatus.PENDING,
-            total_rounds=config.num_rounds,
-            created_at=datetime.now()
-        )
-        
-        # Store session
-        federated_sessions[session_id] = session
-        
-        # Start federated training simulation
-        async def run_federated_training():
-            session.status = TrainingStatus.RUNNING
-            session.started_at = datetime.now()
-            
-            # Simulate client connections
-            for i in range(config.min_clients):
-                client_id = f"client_{i+1}"
-                session.connected_clients.append(client_id)
-                
-                # Create client record
-                client = FederatedClient(
-                    client_id=client_id,
-                    device_id=f"thoth-{i+1:03d}",
-                    session_id=session_id,
-                    data_samples=random.randint(100, 1000),
-                    last_update=datetime.now()
-                )
-                federated_clients[client_id] = client
-            
-            # Run federated rounds
-            for round_num in range(1, config.num_rounds + 1):
-                if session.status == TrainingStatus.CANCELLED:
-                    break
-                    
-                await simulate_federated_round(session, round_num)
-            
-            # Complete session
-            if session.status == TrainingStatus.RUNNING:
-                session.status = TrainingStatus.COMPLETED
-                session.completed_at = datetime.now()
-                session.global_model_path = f"/models/federated/{session_id}/global_model.h5"
-        
-        background_tasks.add_task(run_federated_training)
-        
-        return StandardResponse(
-            success=True,
-            message=f"Federated session {session_id} created",
-            data={
-                "session_id": session_id,
-                "session_name": config.session_name,
-                "num_rounds": config.num_rounds,
-                "min_clients": config.min_clients,
-                "differential_privacy": config.differential_privacy,
-                "status": session.status
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start federated training: {str(e)}")
+    # Redirect to the proper Flower FL endpoints
+    raise HTTPException(
+        status_code=308,
+        detail={
+            "message": "This endpoint is deprecated. Use /fl/sessions for Flower-based federated learning.",
+            "redirect_to": "/fl/sessions",
+            "documentation": "POST /fl/sessions to create a new FL session with Flower framework"
+        }
+    )
 
 @router.get("/federated/status", response_model=Union[FederatedSession, Dict[str, Any]])
 async def get_federated_status(
@@ -514,54 +500,16 @@ async def get_federated_status(
 ):
     """Monitor federated learning session and client contributions.
     
-    Returns round progress, client participation, and aggregated metrics.
+    DEPRECATED: Use /fl/sessions or /fl/sessions/{session_id} instead.
     """
-    try:
-        if session_id:
-            if session_id not in federated_sessions:
-                raise HTTPException(status_code=404, detail=f"Federated session {session_id} not found")
-            
-            session = federated_sessions[session_id]
-            
-            # Add client details
-            client_details = []
-            for client_id in session.connected_clients:
-                if client_id in federated_clients:
-                    client = federated_clients[client_id]
-                    client_details.append({
-                        "client_id": client_id,
-                        "device_id": client.device_id,
-                        "data_samples": client.data_samples,
-                        "rounds_participated": len(client.rounds_participated),
-                        "last_update": client.last_update.isoformat()
-                    })
-            
-            response = session.model_dump()
-            response["client_details"] = client_details
-            
-            return response
-        else:
-            # Return all sessions
-            sessions = []
-            for sid, session in federated_sessions.items():
-                sessions.append({
-                    "session_id": sid,
-                    "session_name": session.config.session_name,
-                    "status": session.status,
-                    "progress": f"{session.current_round}/{session.total_rounds}",
-                    "clients": len(session.connected_clients),
-                    "created_at": session.created_at.isoformat()
-                })
-            
-            return {
-                "success": True,
-                "total_sessions": len(sessions),
-                "sessions": sessions
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get federated status: {str(e)}")
+    raise HTTPException(
+        status_code=308,
+        detail={
+            "message": "This endpoint is deprecated. Use /fl/sessions for Flower-based federated learning.",
+            "redirect_to": "/fl/sessions" if not session_id else f"/fl/sessions/{session_id}",
+            "documentation": "GET /fl/sessions to list sessions, GET /fl/sessions/{id} for details"
+        }
+    )
 
 @router.post("/federated/{session_id}/join", response_model=StandardResponse)
 async def join_federated_session(
@@ -571,53 +519,16 @@ async def join_federated_session(
 ):
     """Join an existing federated learning session as a client.
     
-    Allows devices to participate in collaborative training.
+    DEPRECATED: Use /fl/sessions/{session_id}/clients endpoint instead.
     """
-    try:
-        if session_id not in federated_sessions:
-            raise HTTPException(status_code=404, detail=f"Federated session {session_id} not found")
-        
-        session = federated_sessions[session_id]
-        
-        if session.status != TrainingStatus.RUNNING:
-            raise ValueError("Can only join running sessions")
-        
-        if len(session.connected_clients) >= session.config.max_clients:
-            raise ValueError("Session has reached maximum client capacity")
-        
-        # Generate client ID
-        client_id = f"client_{device_id}"
-        
-        if client_id in session.connected_clients:
-            raise ValueError("Device already joined this session")
-        
-        # Add client to session
-        session.connected_clients.append(client_id)
-        
-        # Create client record
-        client = FederatedClient(
-            client_id=client_id,
-            device_id=device_id,
-            session_id=session_id,
-            data_samples=data_samples,
-            last_update=datetime.now()
-        )
-        federated_clients[client_id] = client
-        
-        return StandardResponse(
-            success=True,
-            message=f"Device {device_id} joined federated session",
-            data={
-                "session_id": session_id,
-                "client_id": client_id,
-                "current_round": session.current_round,
-                "total_rounds": session.total_rounds
-            }
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    raise HTTPException(
+        status_code=308,
+        detail={
+            "message": "This endpoint is deprecated. Use /fl/sessions/{session_id}/clients for Flower-based federated learning.",
+            "redirect_to": f"/fl/sessions/{session_id}/clients",
+            "documentation": "POST /fl/sessions/{session_id}/clients to join a session"
+        }
+    )
 
 @router.get("/training/models", response_model=Dict[str, Any])
 async def list_trained_models(
@@ -638,6 +549,11 @@ async def list_trained_models(
             if device_id and job.config.device_id != device_id:
                 continue
             
+            # Calculate actual model size if available
+            model_size = None
+            if hasattr(job, 'model_bytes') and job.model_bytes:
+                model_size = len(job.model_bytes) / (1024 * 1024)  # Convert to MB
+            
             model_info = {
                 "model_id": job_id,
                 "model_name": job.config.model_name or f"{job.config.model}_model",
@@ -647,27 +563,12 @@ async def list_trained_models(
                 "model_path": job.model_path,
                 "created_at": job.completed_at.isoformat() if job.completed_at else None,
                 "device_id": job.config.device_id,
-                "size_mb": random.uniform(1, 50)  # Mock size
+                "size_mb": model_size
             }
             models.append(model_info)
         
-        # Get models from federated sessions
-        for session_id, session in federated_sessions.items():
-            if session.status != TrainingStatus.COMPLETED:
-                continue
-                
-            model_info = {
-                "model_id": session_id,
-                "model_name": f"federated_{session.config.session_name}",
-                "architecture": session.config.training_config.model,
-                "training_mode": "federated",
-                "accuracy": max(session.round_metrics.values(), key=lambda x: x.get("avg_accuracy", 0)).get("avg_accuracy") if session.round_metrics else None,
-                "model_path": session.global_model_path,
-                "created_at": session.completed_at.isoformat() if session.completed_at else None,
-                "num_clients": len(session.connected_clients),
-                "size_mb": random.uniform(5, 100)  # Mock size
-            }
-            models.append(model_info)
+        # Note: Federated sessions are now handled by /fl/sessions endpoint
+        # This legacy code is kept for backward compatibility but redirects to FL endpoints
         
         return {
             "success": True,

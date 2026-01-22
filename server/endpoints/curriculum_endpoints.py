@@ -592,9 +592,10 @@ async def submit_lab(submission: LabSubmission):
         
         lab_submissions[submission.student_id].append(submission)
         
-        # Auto-grade if possible (mock grading)
+        # Auto-grading requires manual review or integration with code evaluation system
+        # Grade will be set to None until manually graded by instructor
         if submission.code or submission.notebook_path:
-            submission.grade = 85.0 + random.uniform(-10, 10)  # Mock grade
+            submission.grade = None  # Pending manual grading
         
         # Update progress
         progress = StudentProgress(

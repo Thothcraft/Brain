@@ -55,9 +55,10 @@ from flwr.server.strategy import (
     DPFedAvgFixed,
     Strategy,
 )
-from flwr.server import ServerConfig as FlwrServerConfig
-from flwr.client import NumPyClient
+from flwr.server import ServerConfig as FlwrServerConfig, ServerApp, ServerAppComponents
+from flwr.client import NumPyClient, ClientApp
 from flwr.simulation import run_simulation
+from flwr.common import ConfigsRecord
 
 # Flower Datasets for federated data partitioning
 from flwr_datasets import FederatedDataset
@@ -1022,7 +1023,7 @@ class FLSessionManager:
         num_classes = dataset_info.get("num_classes", 10)
         in_channels = dataset_info.get("input_shape", (3, 32, 32))[0]
         
-        # Create global model
+        # Create global model for initial parameters
         global_model = get_model(config.model_architecture, num_classes, in_channels)
         
         # Get initial parameters
@@ -1082,10 +1083,13 @@ class FLSessionManager:
             evaluate_fn=get_evaluate_fn(global_model)
         )
         
-        # Client function for Flower simulation
-        def client_fn(cid: str) -> NumPyClient:
+        # Client function for Flower simulation (new API uses context)
+        def client_fn(context: Context) -> NumPyClient:
             """Create a Flower client for simulation using Flower Datasets."""
-            partition_id = int(cid)
+            # Get partition ID from node config
+            partition_id = context.node_config.get("partition-id", 0)
+            if isinstance(partition_id, str):
+                partition_id = int(partition_id)
             
             # Load this client's data partition using Flower Datasets
             trainloader, valloader = load_partition(
@@ -1115,24 +1119,32 @@ class FLSessionManager:
                 proximal_mu=proximal_mu
             )
         
+        # Server function for Flower simulation
+        def server_fn(context: Context) -> ServerAppComponents:
+            """Create server components for simulation."""
+            return ServerAppComponents(
+                strategy=strategy,
+                config=FlwrServerConfig(num_rounds=config.server.num_rounds)
+            )
+        
         # Run Flower simulation in a separate thread
         def run_fl():
             try:
                 logger.info(f"Starting Flower simulation with {config.data.num_partitions} clients")
                 
-                # Run simulation using Flower's run_simulation
-                history = run_simulation(
-                    client_fn=client_fn,
-                    num_clients=config.data.num_partitions,
-                    config=FlwrServerConfig(num_rounds=config.server.num_rounds),
-                    strategy=strategy,
-                    client_resources={"num_cpus": 1, "num_gpus": 0.0},
+                # Create ServerApp and ClientApp for new Flower API
+                server_app = ServerApp(server_fn=server_fn)
+                client_app = ClientApp(client_fn=client_fn)
+                
+                # Run simulation using new Flower API
+                run_simulation(
+                    server_app=server_app,
+                    client_app=client_app,
+                    num_supernodes=config.data.num_partitions,
+                    backend_config={"client_resources": {"num_cpus": 1, "num_gpus": 0.0}},
                 )
                 
-                # Save final model
-                if history.metrics_centralized:
-                    final_accuracy = history.metrics_centralized.get("accuracy", [(0, 0)])[-1][1]
-                    logger.info(f"Training completed. Final accuracy: {final_accuracy:.4f}")
+                logger.info(f"Training completed. Best accuracy: {session.best_accuracy:.4f}")
                 
             except Exception as e:
                 logger.error(f"Flower simulation error: {e}")

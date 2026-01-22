@@ -1482,14 +1482,10 @@ async def download_model(
                 }
             )
         else:
-            # Return mock model file for now
-            mock_model_data = b"Mock model weights data"
-            return Response(
-                content=mock_model_data,
-                media_type="application/octet-stream",
-                headers={
-                    "Content-Disposition": f"attachment; filename={model.name}.pth"
-                }
+            # No model weights available
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Model weights not found for model '{model.name}'. The model may not have been trained yet."
             )
     except HTTPException:
         raise
