@@ -758,6 +758,27 @@ DATASET_MAPPING = {
     FLDataset.MNIST: "ylecun/mnist",
     FLDataset.FASHION_MNIST: "zalando-datasets/fashion_mnist",
     FLDataset.SVHN: "ufldl-stanford/svhn",
+    FLDataset.EMNIST: "mnist",  # Use MNIST as fallback, EMNIST needs special handling
+}
+
+# Image key mapping - different HuggingFace datasets use different keys
+DATASET_IMAGE_KEY = {
+    FLDataset.CIFAR10: "img",
+    FLDataset.CIFAR100: "img",
+    FLDataset.MNIST: "image",
+    FLDataset.FASHION_MNIST: "image",
+    FLDataset.SVHN: "image",
+    FLDataset.EMNIST: "image",
+}
+
+# Dataset metadata for UI
+DATASET_INFO = {
+    FLDataset.CIFAR10: {"type": "image", "input_shape": (3, 32, 32), "num_classes": 10, "samples": "60K"},
+    FLDataset.CIFAR100: {"type": "image", "input_shape": (3, 32, 32), "num_classes": 100, "samples": "60K"},
+    FLDataset.MNIST: {"type": "image", "input_shape": (1, 28, 28), "num_classes": 10, "samples": "70K"},
+    FLDataset.FASHION_MNIST: {"type": "image", "input_shape": (1, 28, 28), "num_classes": 10, "samples": "70K"},
+    FLDataset.SVHN: {"type": "image", "input_shape": (3, 32, 32), "num_classes": 10, "samples": "600K"},
+    FLDataset.EMNIST: {"type": "image", "input_shape": (1, 28, 28), "num_classes": 62, "samples": "814K"},
 }
 
 
@@ -796,6 +817,9 @@ def get_partitioner(
 
 def apply_transforms(batch: Dict[str, Any], dataset: FLDataset) -> Dict[str, Any]:
     """Apply PyTorch transforms to a batch from FederatedDataset."""
+    # Get the correct image key for this dataset
+    image_key = DATASET_IMAGE_KEY.get(dataset, "image")
+    
     if dataset in [FLDataset.CIFAR10, FLDataset.CIFAR100, FLDataset.SVHN]:
         pytorch_transforms = Compose([
             ToTensor(),
@@ -807,7 +831,8 @@ def apply_transforms(batch: Dict[str, Any], dataset: FLDataset) -> Dict[str, Any
             Normalize((0.5,), (0.5,))
         ])
     
-    batch["img"] = [pytorch_transforms(img) for img in batch["img"]]
+    # Apply transforms using the correct key, output to standard "img" key
+    batch["img"] = [pytorch_transforms(img) for img in batch[image_key]]
     return batch
 
 
