@@ -377,6 +377,10 @@ async def register_device(
                 existing_device.last_seen = now
                 existing_device.online = True
                 
+                # Store hardware_info as JSON if provided
+                if hardware_info:
+                    existing_device.hardware_info = json.dumps(hardware_info)
+                
                 db.commit()
                 db.refresh(existing_device)
                 
@@ -413,7 +417,8 @@ async def register_device(
                 ip_address=ip_address,
                 mac_address=mac_address,
                 last_seen=now,
-                online=True
+                online=True,
+                hardware_info=json.dumps(hardware_info) if hardware_info else None
             )
             
             db.add(new_device)
@@ -872,6 +877,59 @@ async def get_device_files(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get device files: {str(e)}"
+        )
+
+
+@router.delete("/all", response_model=StandardResponse)
+async def delete_all_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Delete all devices for the current user.
+    
+    This endpoint removes all registered devices and their associated files
+    from the database for the authenticated user.
+    """
+    try:
+        log_request_start("DELETE", "/device/all", current_user.userId)
+        
+        # Get all devices for this user
+        devices = db.query(Device).filter(Device.userId == current_user.userId).all()
+        
+        if not devices:
+            return {
+                "success": True,
+                "message": "No devices found to delete"
+            }
+        
+        deleted_count = 0
+        for device in devices:
+            # Delete associated device files first
+            db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId).delete()
+            # Delete file device updates
+            from server.db import FileDeviceUpdate
+            db.query(FileDeviceUpdate).filter(FileDeviceUpdate.deviceId == device.deviceId).delete()
+            # Delete the device
+            db.delete(device)
+            deleted_count += 1
+        
+        db.commit()
+        
+        logger.info(f"Deleted {deleted_count} devices for user {current_user.userId}")
+        log_response(200, {"success": True, "deleted_count": deleted_count}, "/device/all")
+        
+        return {
+            "success": True,
+            "message": f"Successfully deleted {deleted_count} devices",
+            "data": {"deleted_count": deleted_count}
+        }
+        
+    except Exception as e:
+        db.rollback()
+        log_error(f"Error deleting all devices: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete devices: {str(e)}"
         )
 
 

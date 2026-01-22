@@ -342,7 +342,7 @@ class Device(Base):
     ip_address = Column("ip_address", String, nullable=True)
     mac_address = Column("mac_address", String, nullable=True)
     battery_level = Column("battery_level", Integer, nullable=True)
-    
+    hardware_info = Column("hardware_info", Text, nullable=True)  # JSON string with device type, sensors, etc.
     
 
     # Relationship back to user
@@ -352,6 +352,14 @@ class Device(Base):
     """Relationship to FileDeviceUpdate objects for this device"""
     
     def to_dict(self):
+        import json
+        hw_info = None
+        if self.hardware_info:
+            try:
+                hw_info = json.loads(self.hardware_info)
+            except (json.JSONDecodeError, TypeError):
+                hw_info = None
+        
         return {
             "device_id": self.device_uuid,
             "device_name": self.device_name,
@@ -362,7 +370,8 @@ class Device(Base):
             "ip_address": self.ip_address,
             "mac_address": self.mac_address,
             "device_uuid": self.device_uuid,
-            "user_id": self.userId
+            "user_id": self.userId,
+            "hardware_info": hw_info
         }
 
 
