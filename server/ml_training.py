@@ -807,6 +807,114 @@ def execute_preprocessing_pipeline_preview(
     return {"stages": stages}
 
 
+def execute_preprocessing_pipeline(
+    content: bytes,
+    filename: str,
+    base_config: dict,
+    pipeline_blocks: List[dict],
+) -> Tuple[np.ndarray, dict]:
+    """Execute a preprocessing pipeline and return the processed data array.
+    
+    This is the training version that returns actual processed data, not just preview info.
+    
+    Args:
+        content: Raw file bytes
+        filename: Filename for type detection
+        base_config: Base preprocessing config (data_type, include_phase, etc.)
+        pipeline_blocks: List of block dicts, each with 'type' and optional 'params'
+    
+    Returns:
+        Tuple of (processed_data_array, metadata_dict)
+    """
+    data_type = base_config.get("data_type", "auto")
+    if data_type == "auto":
+        data_type = detect_file_type(content, filename)
+    
+    # If no explicit blocks, build default pipeline from base_config
+    if not pipeline_blocks:
+        if data_type == "csi":
+            pipeline_blocks = [
+                {"type": "csi_loader"},
+                {"type": "amplitude_extractor"},
+            ]
+            if base_config.get("include_phase", True):
+                pipeline_blocks.append({"type": "phase_extractor"})
+            if base_config.get("filter_subcarriers", True):
+                pipeline_blocks.append({"type": "subcarrier_filter"})
+            pipeline_blocks.append({"type": "feature_concat"})
+            pipeline_blocks.append({"type": "data_portion_selector"})
+        else:
+            pipeline_blocks = [{"type": "imu_loader"}]
+    
+    # Execute blocks in order
+    current_data = None
+    amp_data = None
+    phase_data = None
+    raw_iq = None
+    metadata = {"data_type": data_type, "blocks_executed": []}
+    
+    for block in pipeline_blocks:
+        block_type = block.get("type", "")
+        block_params = {**base_config, **(block.get("params") or {})}
+        if not block.get("enabled", True):
+            continue
+        
+        try:
+            if block_type == "csi_loader":
+                current_data, info = _block_csi_loader(content, block_params, 0)
+                raw_iq = current_data
+            elif block_type == "amplitude_extractor":
+                if raw_iq is None:
+                    raw_iq, _ = _block_csi_loader(content, block_params, 0)
+                amp_data, info = _block_amplitude_extractor(raw_iq, block_params, 0)
+                current_data = amp_data
+            elif block_type == "phase_extractor":
+                if raw_iq is None:
+                    raw_iq, _ = _block_csi_loader(content, block_params, 0)
+                phase_data, info = _block_phase_extractor(raw_iq, block_params, 0)
+            elif block_type == "subcarrier_filter":
+                if amp_data is not None:
+                    amp_data, info = _block_subcarrier_filter(amp_data, block_params, 0)
+                if phase_data is not None:
+                    phase_data, _ = _block_subcarrier_filter(phase_data, block_params, 0)
+                current_data = amp_data
+            elif block_type == "feature_concat":
+                current_data, info = _block_feature_concat(
+                    amp_data if amp_data is not None else np.array([]), 
+                    phase_data if phase_data is not None else np.array([]), 
+                    block_params, 0
+                )
+            elif block_type in ("data_portion_selector", "windowing"):
+                if current_data is None or current_data.size == 0:
+                    current_data = amp_data if amp_data is not None else np.array([])
+                current_data, info = _block_windowing(current_data, block_params, 0)
+            elif block_type == "moving_average":
+                if current_data is not None:
+                    current_data, info = _block_moving_average(current_data, block_params, 0)
+            elif block_type == "zscore_normalize":
+                if current_data is not None:
+                    current_data, info = _block_zscore_normalize(current_data, block_params, 0)
+            elif block_type == "imu_loader":
+                current_data, info = _block_imu_loader(content, block_params, 0)
+            else:
+                logger.warning(f"Unknown preprocessing block type: {block_type}")
+                continue
+            
+            metadata["blocks_executed"].append(block_type)
+            if "shape" in info:
+                metadata["output_shape"] = info["shape"]
+                
+        except Exception as e:
+            logger.error(f"Preprocessing block '{block_type}' failed: {e}")
+            metadata["error"] = str(e)
+            break
+    
+    if current_data is None:
+        current_data = np.array([])
+    
+    return current_data, metadata
+
+
 def detect_file_type(content: bytes, filename: str = "") -> str:
     """Detect whether file contains CSI or IMU data.
     
@@ -976,6 +1084,7 @@ def load_dataset_from_db(
             logger.info(f"Detected data type: {file_type}")
         
         # If we have explicit preprocessing blocks, use the pipeline executor
+        windows = None
         if preprocessing_blocks:
             try:
                 base_cfg = {
@@ -987,39 +1096,54 @@ def load_dataset_from_db(
                     'output_shape': output_shape,
                     'window_size': window_size,
                 }
-                result = execute_preprocessing_pipeline_preview(
+                # Use the actual pipeline executor that returns processed data
+                processed_data, pipeline_metadata = execute_preprocessing_pipeline(
                     content=file_content,
                     filename=filename,
                     base_config=base_cfg,
                     pipeline_blocks=preprocessing_blocks,
-                    max_preview_values=0,  # No sample needed for training
                 )
-                # Get final output from last stage
-                # Re-run pipeline to get actual data (not just preview info)
-                # For now, fall back to standard parsing since execute_preprocessing_pipeline_preview
-                # returns info only, not the actual processed data array.
-                # TODO: refactor to return processed data from pipeline executor
+                
+                if processed_data is not None and processed_data.size > 0:
+                    # Convert to list of windows for consistency with standard parsing
+                    if len(processed_data.shape) == 1:
+                        # Single window/sample
+                        windows = [processed_data]
+                    elif len(processed_data.shape) == 2:
+                        # Multiple windows: (num_windows, features)
+                        windows = [processed_data[i] for i in range(processed_data.shape[0])]
+                    else:
+                        # 3D: (num_windows, time_steps, features) - keep as is
+                        windows = [processed_data[i] for i in range(processed_data.shape[0])]
+                    
+                    logger.info(f"Pipeline processed {filename}: {len(windows)} windows, blocks={pipeline_metadata.get('blocks_executed', [])}")
+                else:
+                    logger.warning(f"Pipeline returned empty data for {filename}, falling back to standard parsing")
+                    windows = None
+                    
             except Exception as e:
                 logger.warning(f"Pipeline execution failed for {filename}, falling back to standard parsing: {e}")
+                windows = None
         
-        # Parse based on data type (standard path)
-        if file_type == "csi":
-            windows, metadata = parse_csi_file(
-                file_content,
-                window_size=window_size,
-                include_phase=include_phase,
-                filter_subcarriers=filter_subcarriers,
-                subcarrier_start=subcarrier_start,
-                subcarrier_end=subcarrier_end,
-                output_shape=output_shape
-            )
-            
-            if "error" in metadata and not windows:
-                logger.warning(f"CSI parsing failed for {filename}: {metadata.get('error')}")
-                continue
+        # Fall back to standard parsing if pipeline didn't produce results
+        if windows is None:
+            if file_type == "csi":
+                windows, metadata = parse_csi_file(
+                    file_content,
+                    window_size=window_size,
+                    include_phase=include_phase,
+                    filter_subcarriers=filter_subcarriers,
+                    subcarrier_start=subcarrier_start,
+                    subcarrier_end=subcarrier_end,
+                    output_shape=output_shape
+                )
                 
-        else:  # IMU
-            windows = parse_imu_file(file_content, window_size)
+                if "error" in metadata and not windows:
+                    logger.warning(f"CSI parsing failed for {filename}: {metadata.get('error')}")
+                    continue
+                    
+            else:  # IMU
+                windows = parse_imu_file(file_content, window_size)
         
         if windows:
             label_idx = label_to_idx[dataset_file.label]
@@ -1870,6 +1994,7 @@ async def run_full_training(
     if preprocessing_pipeline_id:
         try:
             from server.db import PreprocessingPipeline
+            import json as json_module
             pipeline = db_session.query(PreprocessingPipeline).filter(
                 PreprocessingPipeline.id == preprocessing_pipeline_id
             ).first()
@@ -1884,6 +2009,18 @@ async def run_full_training(
                     'data_type': pipeline.data_type,
                 })
                 window_size = pipeline.window_size
+                
+                # Load preprocessing blocks from pipeline config
+                if pipeline.config:
+                    try:
+                        pipeline_config = json_module.loads(pipeline.config) if isinstance(pipeline.config, str) else pipeline.config
+                        if 'blocks' in pipeline_config:
+                            preprocessing_config['preprocessing_blocks'] = pipeline_config['blocks']
+                            logger.info(f"Loaded {len(pipeline_config['blocks'])} preprocessing blocks from pipeline")
+                    except Exception as parse_err:
+                        logger.warning(f"Failed to parse pipeline config: {parse_err}")
+            else:
+                logger.warning(f"Preprocessing pipeline {preprocessing_pipeline_id} not found")
         except Exception as e:
             logger.warning(f"Failed to load preprocessing pipeline {preprocessing_pipeline_id}: {e}")
     
