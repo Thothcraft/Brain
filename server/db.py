@@ -260,6 +260,10 @@ class File(Base):
     """Timestamp when the file was last modified"""
     storage_path = Column("storage_path", String(500), nullable=True)
     """Path in Supabase Storage (e.g., 'files/user_123/file_456/name.csv')"""
+    sample_content = Column("sample_content", Text, nullable=True)
+    """First few lines of the file for quick preview (max ~10KB)"""
+    data_type = Column("data_type", String(50), nullable=True)
+    """Detected data type: 'csi', 'imu', 'sensor', etc."""
     
     # Relationships
     user = relationship("User", back_populates="files")

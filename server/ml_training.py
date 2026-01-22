@@ -915,6 +915,133 @@ def execute_preprocessing_pipeline(
     return current_data, metadata
 
 
+def generate_file_sample(content: bytes, filename: str = "", max_lines: int = 20, max_bytes: int = 10240) -> Tuple[str, str]:
+    """Generate a sample preview of file content for quick access.
+    
+    Args:
+        content: Raw file bytes
+        filename: Optional filename for hints
+        max_lines: Maximum number of lines to include in sample
+        max_bytes: Maximum bytes for sample (default 10KB)
+        
+    Returns:
+        Tuple of (sample_content, detected_data_type)
+    """
+    try:
+        # Decode content
+        text = content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
+        lines = text.split('\n')
+        
+        # Take first N lines, respecting max_bytes
+        sample_lines = []
+        total_bytes = 0
+        for i, line in enumerate(lines[:max_lines]):
+            line_bytes = len(line.encode('utf-8'))
+            if total_bytes + line_bytes > max_bytes:
+                break
+            sample_lines.append(line)
+            total_bytes += line_bytes + 1  # +1 for newline
+        
+        sample_content = '\n'.join(sample_lines)
+        
+        # Detect data type
+        data_type = detect_file_type(content, filename)
+        
+        return sample_content, data_type
+        
+    except Exception as e:
+        logger.warning(f"Failed to generate file sample: {e}")
+        return "", "unknown"
+
+
+def get_file_sample_info(content: bytes, filename: str = "") -> dict:
+    """Get detailed sample information for a file, useful for preprocessing preview.
+    
+    Args:
+        content: Raw file bytes
+        filename: Optional filename
+        
+    Returns:
+        Dictionary with sample info including:
+        - sample_lines: First few lines of raw content
+        - data_type: Detected type (csi, imu, etc.)
+        - total_lines: Estimated total lines
+        - file_size: Size in bytes
+        - format_info: Format-specific metadata
+    """
+    try:
+        text = content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
+        lines = text.split('\n')
+        total_lines = len(lines)
+        
+        # Get sample lines (first 10)
+        sample_lines = lines[:10]
+        
+        # Detect data type
+        data_type = detect_file_type(content, filename)
+        
+        # Format-specific info
+        format_info = {}
+        
+        if data_type == "csi":
+            # Parse CSI format info
+            header = lines[0] if lines else ""
+            format_info["header"] = header[:200]  # First 200 chars of header
+            
+            # Find first data row with CSI values
+            for line in lines[1:5]:
+                if '[' in line and ']' in line:
+                    try:
+                        csi_str = line[line.index('[') + 1: line.index(']')]
+                        values = [x.strip() for x in csi_str.split(',') if x.strip()]
+                        format_info["values_per_row"] = len(values)
+                        format_info["sample_values"] = values[:8]  # First 8 values
+                        format_info["subcarriers"] = len(values) // 2 if len(values) % 2 == 0 else len(values)
+                    except:
+                        pass
+                    break
+                    
+        elif data_type == "imu":
+            # Parse IMU format info
+            try:
+                import json
+                # Try to parse as JSON
+                for line in lines[:5]:
+                    line = line.strip()
+                    if line.startswith('{'):
+                        data = json.loads(line)
+                        format_info["fields"] = list(data.keys())[:10]
+                        format_info["sample_record"] = {k: data[k] for k in list(data.keys())[:5]}
+                        break
+            except:
+                # Not JSON, try CSV
+                if lines:
+                    format_info["header"] = lines[0][:200]
+                    if len(lines) > 1:
+                        format_info["sample_row"] = lines[1][:200]
+        
+        return {
+            "sample_lines": sample_lines,
+            "data_type": data_type,
+            "total_lines": total_lines,
+            "file_size": len(content),
+            "format_info": format_info,
+            "preview_available": True
+        }
+        
+    except Exception as e:
+        logger.warning(f"Failed to get file sample info: {e}")
+        return {
+            "sample_lines": [],
+            "data_type": "unknown",
+            "total_lines": 0,
+            "file_size": len(content) if content else 0,
+            "format_info": {},
+            "preview_available": False,
+            "error": str(e)
+        }
+
+
 def detect_file_type(content: bytes, filename: str = "") -> str:
     """Detect whether file contains CSI or IMU data.
     
@@ -1044,6 +1171,19 @@ def load_dataset_from_db(
     
     logger.info(f"Dataset '{dataset.name}' loaded with {len(dataset.files)} files")
     logger.info(f"  Classes ({len(class_names)}): {class_names}")
+    
+    # Log file samples for debugging
+    logger.info(f"  File samples preview:")
+    for df in dataset.files[:3]:  # Show first 3 files
+        if df.file:
+            sample_preview = df.file.sample_content[:100] if df.file.sample_content else "(no sample)"
+            data_type_str = df.file.data_type or "unknown"
+            logger.info(f"    - {df.file.filename}: type={data_type_str}, label={df.label}")
+            if df.file.sample_content:
+                first_line = df.file.sample_content.split('\n')[0][:80]
+                logger.debug(f"      Sample: {first_line}...")
+    if len(dataset.files) > 3:
+        logger.info(f"    ... and {len(dataset.files) - 3} more files")
     
     all_windows = []
     all_labels = []
@@ -1489,8 +1629,28 @@ def run_bayesian_optimization(
     """
     import time
     
-    seq_length = X_train.shape[1]
-    input_channels = X_train.shape[2]
+    # Handle both 2D (flattened) and 3D (sequence) data
+    if len(X_train.shape) == 2:
+        # Flattened data: (samples, features) -> reshape to (samples, seq_length, channels)
+        # Assume features = seq_length * channels, try to infer reasonable dimensions
+        total_features = X_train.shape[1]
+        # Try common sequence lengths for CSI/IMU data
+        for possible_seq_len in [1000, 500, 200, 128, 100, 64]:
+            if total_features % possible_seq_len == 0:
+                seq_length = possible_seq_len
+                input_channels = total_features // possible_seq_len
+                break
+        else:
+            # Fallback: treat as single channel with all features as sequence
+            seq_length = total_features
+            input_channels = 1
+        
+        logger.info(f"Reshaping flattened data: ({X_train.shape[0]}, {total_features}) -> ({X_train.shape[0]}, {seq_length}, {input_channels})")
+        X_train = X_train.reshape(X_train.shape[0], seq_length, input_channels)
+        X_val = X_val.reshape(X_val.shape[0], seq_length, input_channels)
+    else:
+        seq_length = X_train.shape[1]
+        input_channels = X_train.shape[2]
     
     # Convert to tensors
     X_train_t = torch.FloatTensor(X_train)
@@ -2362,6 +2522,27 @@ async def run_full_training(
     try:
         batch_size = config.get('batch_size', 32)
         logger.debug(f"Creating data loaders with batch_size={batch_size}")
+        
+        # Handle both 2D (flattened) and 3D (sequence) data for DL models
+        if len(X_train.shape) == 2:
+            # Flattened data: (samples, features) -> reshape to (samples, seq_length, channels)
+            total_features = X_train.shape[1]
+            # Try common sequence lengths for CSI/IMU data
+            for possible_seq_len in [1000, 500, 200, 128, 100, 64]:
+                if total_features % possible_seq_len == 0:
+                    seq_length = possible_seq_len
+                    input_channels = total_features // possible_seq_len
+                    break
+            else:
+                # Fallback: treat as single channel with all features as sequence
+                seq_length = total_features
+                input_channels = 1
+            
+            logger.info(f"Reshaping flattened data for DL: ({X_train.shape[0]}, {total_features}) -> ({X_train.shape[0]}, {seq_length}, {input_channels})")
+            X_train = X_train.reshape(X_train.shape[0], seq_length, input_channels)
+            X_val = X_val.reshape(X_val.shape[0], seq_length, input_channels)
+            if len(X_test) > 0:
+                X_test = X_test.reshape(X_test.shape[0], seq_length, input_channels)
         
         X_train_t = torch.FloatTensor(X_train)
         y_train_t = torch.LongTensor(y_train)

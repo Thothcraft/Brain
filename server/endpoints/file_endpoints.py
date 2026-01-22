@@ -238,6 +238,16 @@ async def upload_file_simple(
             "is_base64_encoded": request.is_base64
         }
         
+        # Generate sample content and detect data type for quick preview
+        sample_content = None
+        data_type = None
+        try:
+            from server.ml_training import generate_file_sample
+            sample_content, data_type = generate_file_sample(content_bytes, request.filename)
+            log_response(200, f"Generated sample for {request.filename}: type={data_type}, sample_len={len(sample_content) if sample_content else 0}", "/file/upload")
+        except Exception as sample_err:
+            log_error(f"Failed to generate file sample: {sample_err}")
+        
         # Save file record first (without content if using storage)
         db_file = File(
             userId=current_user.userId,
@@ -245,7 +255,9 @@ async def upload_file_simple(
             size=len(content_bytes),
             content_type=content_type,
             uploaded_at=datetime.now(),
-            file_hash=json.dumps(file_metadata)
+            file_hash=json.dumps(file_metadata),
+            sample_content=sample_content,
+            data_type=data_type
         )
         db.add(db_file)
         db.commit()
@@ -407,6 +419,16 @@ async def upload_file_multipart(
             "upload_method": "multipart"
         }
         
+        # Generate sample content and detect data type for quick preview
+        sample_content = None
+        data_type = None
+        try:
+            from server.ml_training import generate_file_sample
+            sample_content, data_type = generate_file_sample(content_bytes, filename)
+            logger.info(f"Generated sample for {filename}: type={data_type}, sample_len={len(sample_content) if sample_content else 0}")
+        except Exception as sample_err:
+            logger.warning(f"Failed to generate file sample: {sample_err}")
+        
         # Save file to database
         logger.info(f"Saving to database: {filename}")
         db_file = File(
@@ -416,7 +438,9 @@ async def upload_file_multipart(
             size=len(content_bytes),
             content_type=content_type,
             uploaded_at=datetime.now(),
-            file_hash=json.dumps(file_metadata)
+            file_hash=json.dumps(file_metadata),
+            sample_content=sample_content,
+            data_type=data_type
         )
         db.add(db_file)
         
@@ -529,6 +553,98 @@ async def download_file_simple(
     except Exception as e:
         log_error(f"Error retrieving file: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve file")
+
+
+@router.get("/{file_id}/sample")
+async def get_file_sample(
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get sample preview data for a file.
+    
+    Purpose: Retrieve quick preview data for preprocessing and training UI
+    
+    Args:
+        file_id: The unique file identifier
+        
+    Returns:
+        Dict containing sample content, data type, and format info
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        log_request_start("GET", f"/file/{file_id}/sample", current_user.userId)
+        
+        # Get file record
+        file_record = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
+        ).first()
+        
+        if not file_record:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # If sample already exists in DB, return it
+        if file_record.sample_content:
+            return {
+                "success": True,
+                "file_id": file_id,
+                "filename": file_record.filename,
+                "sample_content": file_record.sample_content,
+                "data_type": file_record.data_type or "unknown",
+                "file_size": file_record.size,
+                "cached": True
+            }
+        
+        # Otherwise, generate sample from content
+        file_content = file_record.content
+        
+        # Try to get from storage if not in DB
+        if file_content is None and file_record.storage_path:
+            try:
+                from server.utils.supabase_storage import download_file_sync, BUCKET_FILES
+                success, result = download_file_sync(BUCKET_FILES, file_record.storage_path)
+                if success:
+                    file_content = result
+            except Exception as storage_err:
+                logger.warning(f"Failed to download from storage for sample: {storage_err}")
+        
+        if file_content is None:
+            raise HTTPException(status_code=404, detail="File content not available for preview")
+        
+        # Generate sample
+        from server.ml_training import generate_file_sample, get_file_sample_info
+        
+        sample_content, data_type = generate_file_sample(file_content, file_record.filename)
+        sample_info = get_file_sample_info(file_content, file_record.filename)
+        
+        # Cache the sample in DB for future requests
+        try:
+            file_record.sample_content = sample_content
+            file_record.data_type = data_type
+            db.commit()
+            logger.info(f"Cached sample for file {file_id}")
+        except Exception as cache_err:
+            logger.warning(f"Failed to cache sample: {cache_err}")
+        
+        return {
+            "success": True,
+            "file_id": file_id,
+            "filename": file_record.filename,
+            "sample_content": sample_content,
+            "data_type": data_type,
+            "file_size": file_record.size,
+            "sample_info": sample_info,
+            "cached": False
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting file sample: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get file sample: {str(e)}")
 
 
 @router.delete("/{file_id}")
