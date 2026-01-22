@@ -16,7 +16,7 @@ import uuid as uuid_lib
 from ipaddress import ip_address, IPv4Address
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -182,6 +182,32 @@ def _get_pending_uploads(device_id: int, db: Session) -> list:
         return []
 
 
+def _get_file_type_from_extension(filename: str) -> str:
+    """Determine file type based on extension.
+    
+    Returns one of: image, video, audio, sensor, timelapse, other
+    """
+    import os
+    
+    IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.heic'}
+    VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'}
+    AUDIO_EXTENSIONS = {'.wav', '.mp3', '.m4a', '.flac', '.ogg', '.aac'}
+    SENSOR_EXTENSIONS = {'.json', '.csv'}
+    
+    ext = os.path.splitext(filename)[1].lower()
+    
+    if ext in IMAGE_EXTENSIONS:
+        return 'image'
+    elif ext in VIDEO_EXTENSIONS:
+        return 'video'
+    elif ext in AUDIO_EXTENSIONS:
+        return 'audio'
+    elif ext in SENSOR_EXTENSIONS:
+        return 'sensor'
+    else:
+        return 'other'
+
+
 def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: list, db: Session):
     """Store file list pushed from device into database.
     
@@ -200,28 +226,26 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
     try:
         stored_count = 0
         for file_info in files:
-            # Skip directories
+            # Skip directories (unless it's a timelapse folder)
             file_type_val = file_info.type if hasattr(file_info, 'type') else file_info.get('type')
-            if file_type_val == 'directory':
-                continue
-            
             filename = file_info.name if hasattr(file_info, 'name') else file_info.get('name', '')
+            
             if not filename:
                 continue
             
-            # Determine file type from prefix
-            file_type = 'other'
-            lower_name = filename.lower()
-            if lower_name.startswith('imu_'):
-                file_type = 'imu'
-            elif lower_name.startswith('csi_'):
-                file_type = 'csi'
-            elif lower_name.startswith('mfcw_'):
-                file_type = 'mfcw'
-            elif lower_name.startswith('img_'):
-                file_type = 'img'
-            elif lower_name.startswith('vid_'):
-                file_type = 'vid'
+            # Handle timelapse folders
+            if file_type_val == 'timelapse' or filename.startswith('timelapse_'):
+                file_type = 'timelapse'
+            elif file_type_val == 'directory':
+                continue
+            else:
+                # Determine file type from extension (not prefix)
+                # First check if data_type was provided by the device
+                data_type = file_info.get('data_type') if isinstance(file_info, dict) else None
+                if data_type:
+                    file_type = data_type
+                else:
+                    file_type = _get_file_type_from_extension(filename)
             
             # Parse timestamps
             created_at = None
@@ -981,3 +1005,56 @@ async def request_file_upload(
         db.rollback()
         log_error(f"Error requesting file upload: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to request upload: {str(e)}")
+
+
+@router.patch("/file/{device_file_id}/type")
+async def update_file_type(
+    device_file_id: int,
+    file_type: str = Body(..., embed=True),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Manually update the type of a device file.
+    
+    Allowed types: image, video, audio, sensor, timelapse, other
+    """
+    ALLOWED_TYPES = {'image', 'video', 'audio', 'sensor', 'timelapse', 'other'}
+    
+    if file_type not in ALLOWED_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Must be one of: {', '.join(ALLOWED_TYPES)}"
+        )
+    
+    try:
+        log_request_start("PATCH", f"/device/file/{device_file_id}/type", current_user.userId)
+        
+        device_file = db.query(DeviceFile).filter(
+            DeviceFile.id == device_file_id,
+            DeviceFile.user_id == current_user.userId
+        ).first()
+        
+        if not device_file:
+            raise HTTPException(status_code=404, detail="Device file not found")
+        
+        old_type = device_file.file_type
+        device_file.file_type = file_type
+        db.commit()
+        
+        logger.info(f"Updated file type for {device_file.filename}: {old_type} -> {file_type}")
+        
+        return {
+            "success": True,
+            "message": f"File type updated to '{file_type}'",
+            "file_id": device_file_id,
+            "filename": device_file.filename,
+            "old_type": old_type,
+            "new_type": file_type
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log_error(f"Error updating file type: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update file type: {str(e)}")
