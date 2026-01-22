@@ -88,6 +88,7 @@ class TrainingConfig(BaseModel):
     device_id: str = "thoth-001"
     save_model: bool = True
     model_name: Optional[str] = None
+    preprocessing_pipeline_id: Optional[int] = None  # ID of preprocessing pipeline to apply
 
 class TrainingJob(BaseModel):
     """Training job information."""

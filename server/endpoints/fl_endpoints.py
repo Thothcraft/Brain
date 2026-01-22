@@ -18,6 +18,9 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .models import StandardResponse
 from ..flower_fl import (
@@ -233,14 +236,21 @@ async def create_fl_session(
     - **qfedavg**: Fair federated learning
     - **dpfedavg_adaptive**: Differential privacy with adaptive clipping
     - **dpfedavg_fixed**: Differential privacy with fixed clipping
+    - **fedxgb_bagging**: XGBoost bagging for tree-based FL
     """
     try:
+        logger.info(f"[FL] Creating session '{request.session_name}' with algorithm={request.algorithm}, "
+                   f"model={request.model_architecture}, dataset={request.data.dataset if request.data else 'cifar10'}")
+        
         config = convert_to_fl_config(request)
         session = fl_manager.create_session(config)
         
+        logger.info(f"[FL] Session created: id={session.session_id}, "
+                   f"rounds={config.server.num_rounds}, partitions={config.data.num_partitions}")
+        
         return StandardResponse(
             success=True,
-            message=f"FL session '{request.session_name}' created successfully",
+            message=f"FL session '{request.session_name}' created successfully with {config.algorithm.value} algorithm",
             data={
                 "session_id": session.session_id,
                 "session_name": config.session_name,
@@ -248,13 +258,18 @@ async def create_fl_session(
                 "model_architecture": config.model_architecture.value,
                 "dataset": config.data.dataset.value,
                 "num_rounds": config.server.num_rounds,
+                "num_partitions": config.data.num_partitions,
+                "partition_strategy": config.data.partition_strategy.value,
                 "status": session.status,
-                "created_at": session.created_at.isoformat()
+                "created_at": session.created_at.isoformat(),
+                "log": f"Session initialized with {config.data.num_partitions} simulated clients"
             }
         )
     except ValueError as e:
+        logger.error(f"[FL] Invalid configuration: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error(f"[FL] Failed to create session: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create FL session: {str(e)}")
 
 
@@ -375,31 +390,36 @@ async def start_fl_session(
     try:
         session = fl_manager.get_session(session_id)
         if not session:
+            logger.warning(f"[FL] Session not found: {session_id}")
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         
         if session.status != "pending":
+            logger.warning(f"[FL] Cannot start session {session_id}: already {session.status}")
             raise HTTPException(status_code=400, detail=f"Session is already {session.status}")
         
-        # For Flower simulation mode, we don't need real clients
-        # The simulation will create virtual clients based on num_partitions
-        # Skip the client check for simulation
+        logger.info(f"[FL] Starting session {session_id} with {session.config.data.num_partitions} clients, "
+                   f"{session.total_rounds} rounds, algorithm={session.config.algorithm.value}")
         
         # Start session in background
         background_tasks.add_task(fl_manager.run_session, session_id)
         
         return StandardResponse(
             success=True,
-            message=f"FL session {session_id} started",
+            message=f"FL training started with {session.config.data.num_partitions} simulated clients",
             data={
                 "session_id": session_id,
                 "status": "running",
                 "num_clients": session.config.data.num_partitions,
-                "total_rounds": session.total_rounds
+                "total_rounds": session.total_rounds,
+                "algorithm": session.config.algorithm.value,
+                "dataset": session.config.data.dataset.value,
+                "log": f"Flower simulation starting with {session.config.algorithm.value} strategy..."
             }
         )
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"[FL] Failed to start session {session_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to start session: {str(e)}")
 
 
