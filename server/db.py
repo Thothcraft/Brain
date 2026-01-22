@@ -242,7 +242,7 @@ class File(Base):
     """Unique identifier for the file"""
     filename = Column("file_name", String, nullable=False)
     """Name of the uploaded file"""
-    userId = Column("user_id", Integer, ForeignKey("user_account.user_id"), nullable=False)
+    userId = Column("user_id", Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
     """Foreign key to the user who uploaded the file"""
     path = Column("path", String, nullable=True)  # Now nullable since we store content in DB
     """Path where the file is stored on the server (nullable)"""
@@ -252,7 +252,7 @@ class File(Base):
     """Binary content of the file"""
     content_type = Column("content_type", String(255), nullable=True)  # MIME type
     """MIME type of the file"""
-    uploaded_at = Column("uploaded_at", DateTime, default=datetime.utcnow)
+    uploaded_at = Column("uploaded_at", DateTime, default=datetime.utcnow, index=True)
     """Timestamp when the file was uploaded"""
     file_hash = Column("file_hash", Text, nullable=True)
     """Hash of the file"""
@@ -334,7 +334,7 @@ class Device(Base):
     __tablename__ = "device"
 
     deviceId = Column("device_id", Integer, primary_key=True, autoincrement=True, index=True)
-    userId = Column("user_id", Integer, ForeignKey("user_account.user_id"), nullable=False)
+    userId = Column("user_id", Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
     # Stable, client-provided identifier, e.g. IOPlatformUUID (mac) or extension ID (chrome)
     device_uuid = Column("device_uuid", String, unique=True, nullable=False, index=True)
     device_name = Column("device_name", String, nullable=False)
@@ -519,9 +519,9 @@ class TrainingJob(Base):
     best_metrics = Column(Text, nullable=True)  # JSON string
     model_path = Column(String(500), nullable=True)
     error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True, index=True)
     
     # Relationships
     user = relationship("User")
