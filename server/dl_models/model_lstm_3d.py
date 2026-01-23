@@ -1,6 +1,7 @@
-"""LSTM Models for 3D Input (batch, seq_len, features).
+"""LSTM Models for 2D Input (batch, seq_len, features).
 
 Bidirectional LSTM models in nano, mini, and max variants.
+Input shape: (batch, seq_len, features) - Sequential/time-series data
 """
 
 import torch
@@ -25,7 +26,7 @@ class LSTMNanoModel(BaseDLModel):
     model_description = "Minimal LSTM (1 layer, ~10K params) for edge deployment"
     architecture = "lstm"
     size = ModelSize.NANO
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -55,7 +56,7 @@ class LSTMMiniModel(BaseDLModel):
     model_description = "Balanced BiLSTM (2 layers, ~100K params)"
     architecture = "lstm"
     size = ModelSize.MINI
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -90,7 +91,7 @@ class LSTMMaxModel(BaseDLModel):
     model_description = "Maximum capacity BiLSTM (3 layers, ~1M params)"
     architecture = "lstm"
     size = ModelSize.MAX
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)

@@ -185,15 +185,24 @@ class PreprocessingPipeline:
         )
     
     def _detect_shape_type(self, data: np.ndarray) -> OutputShape:
-        """Detect the output shape type from data dimensions."""
+        """Detect the output shape type from data dimensions.
+        
+        Shape Conventions:
+        - ndim <= 2: SHAPE_1D (batch, features)
+        - ndim == 3: SHAPE_2D (batch, seq_len, features) - Sequential
+        - ndim == 4: SHAPE_3D (batch, channels, height, width) - Image
+        - ndim == 5: SHAPE_4D (batch, num_frames, channels, height, width) - Video
+        """
         ndim = data.ndim
         
         if ndim <= 2:
             return OutputShape.SHAPE_1D
         elif ndim == 3:
-            return OutputShape.SHAPE_3D
+            return OutputShape.SHAPE_2D  # Sequential data
         elif ndim == 4:
-            return OutputShape.SHAPE_4D
+            return OutputShape.SHAPE_3D  # Image data
+        elif ndim == 5:
+            return OutputShape.SHAPE_4D  # Video data
         else:
             return OutputShape.ANY
     
@@ -236,6 +245,12 @@ def execute_pipeline(
 def get_compatible_models(output_shape: OutputShape) -> Dict[str, List[str]]:
     """Get compatible model architectures for an output shape.
     
+    Shape Conventions:
+    - 1D (batch, features): MLP, ML models
+    - 2D (batch, seq_len, features): LSTM, GRU, CNN1D, Transformer
+    - 3D (batch, channels, height, width): CNN2D, ResNet
+    - 4D (batch, num_frames, channels, height, width): CNN3D
+    
     Args:
         output_shape: The preprocessing output shape
         
@@ -247,15 +262,18 @@ def get_compatible_models(output_shape: OutputShape) -> Dict[str, List[str]]:
             "dl_models": ["mlp_nano", "mlp_mini", "mlp_max"],
             "ml_models": ["svm", "random_forest", "knn", "logistic_regression", "gradient_boosting"],
         },
-        OutputShape.SHAPE_3D: {
+        OutputShape.SHAPE_2D: {
             "dl_models": ["lstm_nano", "lstm_mini", "lstm_max", "gru_nano", "gru_mini", "gru_max", 
                         "cnn1d_nano", "cnn1d_mini", "cnn1d_max", "transformer_nano", "transformer_mini", "transformer_max"],
             "ml_models": [],  # Sequential data typically needs DL
         },
+        OutputShape.SHAPE_3D: {
+            "dl_models": ["cnn2d_nano", "cnn2d_mini", "cnn2d_max", "resnet_nano", "resnet_mini", "resnet_max"],
+            "ml_models": [],  # Image data needs DL
+        },
         OutputShape.SHAPE_4D: {
-            "dl_models": ["cnn2d_nano", "cnn2d_mini", "cnn2d_max", "cnn3d_nano", "cnn3d_mini", "cnn3d_max",
-                        "resnet_nano", "resnet_mini", "resnet_max"],
-            "ml_models": [],  # Image/video data needs DL
+            "dl_models": ["cnn3d_nano", "cnn3d_mini", "cnn3d_max"],
+            "ml_models": [],  # Video data needs DL
         },
     }
     

@@ -1,6 +1,7 @@
-"""CNN2D Models for 4D Input (batch, channels, height, width).
+"""CNN2D Models for 3D Input (batch, channels, height, width).
 
 2D Convolutional models for images in nano, mini, and max variants.
+Input shape: (batch, channels, height, width) - Single images
 """
 
 import torch
@@ -24,7 +25,7 @@ class CNN2DNanoModel(BaseDLModel):
     model_description = "Minimal 2D CNN (3 conv layers, ~30K params)"
     architecture = "cnn2d"
     size = ModelSize.NANO
-    input_shape = InputShape.SHAPE_4D
+    input_shape = InputShape.SHAPE_3D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -57,7 +58,7 @@ class CNN2DMiniModel(BaseDLModel):
     model_description = "Balanced 2D CNN (5 conv layers, ~500K params)"
     architecture = "cnn2d"
     size = ModelSize.MINI
-    input_shape = InputShape.SHAPE_4D
+    input_shape = InputShape.SHAPE_3D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -106,7 +107,7 @@ class CNN2DMaxModel(BaseDLModel):
     model_description = "Maximum 2D CNN with residuals (~5M params)"
     architecture = "cnn2d"
     size = ModelSize.MAX
-    input_shape = InputShape.SHAPE_4D
+    input_shape = InputShape.SHAPE_3D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)

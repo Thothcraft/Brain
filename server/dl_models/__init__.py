@@ -4,13 +4,14 @@ This module provides PyTorch-based DL models for different data shapes.
 Each model has nano, mini, and max variants for different complexity needs.
 
 Naming Convention:
-- File: model_{architecture}_{shape}.py (e.g., model_mlp_1d.py, model_lstm_3d.py)
+- File: model_{architecture}_{shape}.py (e.g., model_mlp_1d.py, model_lstm_2d.py)
 - Class: {Architecture}{Size}Model (e.g., MLPNanoModel, LSTMMiniModel)
 
-Output Shape Compatibility:
-- 1D (batch, features): MLP, simple classifiers
-- 3D (batch, seq_len, features): LSTM, GRU, CNN1D, Transformer
-- 4D (batch, channels, height, width): CNN2D, ResNet, video models
+Shape Conventions:
+- 1D (batch, features): MLP - Flattened feature vectors
+- 2D (batch, seq_len, features): LSTM, GRU, CNN1D, Transformer - Sequential/time-series
+- 3D (batch, channels, height, width): CNN2D, ResNet - Single images
+- 4D (batch, num_frames, channels, height, width): CNN3D - Video/volumetric data
 
 Model Sizes:
 - nano: Minimal parameters, fast inference, edge deployment
@@ -21,11 +22,11 @@ Usage:
     from server.dl_models import DLModelRegistry, create_dl_model
     
     # List models for a specific shape
-    models = DLModelRegistry.list_by_shape("3d")
+    models = DLModelRegistry.list_by_shape("2d")  # Sequential models
     
     # Create model
     model = create_dl_model("lstm_mini", {
-        "input_size": 64,
+        "input_channels": 64,
         "seq_length": 128,
         "num_classes": 4,
     })

@@ -7,10 +7,11 @@ Naming Convention:
 - File: block_{block_name}.py (e.g., block_zscore_normalize.py)
 - Class: {BlockName}Block (e.g., ZScoreNormalizeBlock)
 
-Output Shapes:
-- 1D: (batch, features) - Flattened features
-- 3D: (batch, seq_len, features) - Sequential/time-series
-- 4D: (batch, frames, height, width) or (batch, channels, height, width) - Video/Image
+Output Shapes (matching DL models):
+- 1D: (batch, features) - Flattened features -> MLP models
+- 2D: (batch, seq_len, features) - Sequential/time-series -> LSTM, GRU, CNN1D, Transformer
+- 3D: (batch, channels, height, width) - Single images -> CNN2D, ResNet
+- 4D: (batch, num_frames, channels, height, width) - Video -> CNN3D
 
 Usage:
     from server.preprocessing import PreprocessingRegistry, execute_pipeline

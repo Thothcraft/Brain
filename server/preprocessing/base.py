@@ -14,11 +14,18 @@ logger = logging.getLogger(__name__)
 
 
 class OutputShape(str, Enum):
-    """Output shape types for preprocessing blocks."""
+    """Output shape types for preprocessing blocks.
+    
+    Shape Conventions (matching DL models):
+    - 1D: (batch, features) - Flattened feature vectors
+    - 2D: (batch, seq_len, features) - Sequential/time-series data
+    - 3D: (batch, channels, height, width) - Single images
+    - 4D: (batch, num_frames, channels, height, width) - Video/volumetric data
+    """
     SHAPE_1D = "1d"  # (batch, features) - Flattened
-    SHAPE_2D = "2d"  # (batch, features) - Same as 1D but explicit
-    SHAPE_3D = "3d"  # (batch, seq_len, features) - Sequential
-    SHAPE_4D = "4d"  # (batch, frames/channels, height, width) - Video/Image
+    SHAPE_2D = "2d"  # (batch, seq_len, features) - Sequential
+    SHAPE_3D = "3d"  # (batch, channels, height, width) - Image
+    SHAPE_4D = "4d"  # (batch, num_frames, channels, height, width) - Video
     SAME = "same"    # Same as input
     ANY = "any"      # Any shape
 

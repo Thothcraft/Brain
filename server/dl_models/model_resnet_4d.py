@@ -1,6 +1,7 @@
-"""ResNet Models for 4D Input (batch, channels, height, width).
+"""ResNet Models for 3D Input (batch, channels, height, width).
 
 ResNet-style models in nano, mini, and max variants.
+Input shape: (batch, channels, height, width) - Single images
 """
 
 import torch
@@ -45,7 +46,7 @@ class ResNetNanoModel(BaseDLModel):
     model_description = "Minimal ResNet (8 layers, ~100K params)"
     architecture = "resnet"
     size = ModelSize.NANO
-    input_shape = InputShape.SHAPE_4D
+    input_shape = InputShape.SHAPE_3D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -93,7 +94,7 @@ class ResNetMiniModel(BaseDLModel):
     model_description = "Balanced ResNet-18 style (~1M params)"
     architecture = "resnet"
     size = ModelSize.MINI
-    input_shape = InputShape.SHAPE_4D
+    input_shape = InputShape.SHAPE_3D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -144,7 +145,7 @@ class ResNetMaxModel(BaseDLModel):
     model_description = "Maximum ResNet-50 style (~25M params)"
     architecture = "resnet"
     size = ModelSize.MAX
-    input_shape = InputShape.SHAPE_4D
+    input_shape = InputShape.SHAPE_3D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)

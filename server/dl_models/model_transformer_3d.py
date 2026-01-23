@@ -1,6 +1,7 @@
-"""Transformer Models for 3D Input (batch, seq_len, features).
+"""Transformer Models for 2D Input (batch, seq_len, features).
 
 Transformer encoder models in nano, mini, and max variants.
+Input shape: (batch, seq_len, features) - Sequential/time-series data
 """
 
 import torch
@@ -42,7 +43,7 @@ class TransformerNanoModel(BaseDLModel):
     model_description = "Minimal Transformer (1 layer, 2 heads, ~20K params)"
     architecture = "transformer"
     size = ModelSize.NANO
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -73,7 +74,7 @@ class TransformerMiniModel(BaseDLModel):
     model_description = "Balanced Transformer (3 layers, 4 heads, ~200K params)"
     architecture = "transformer"
     size = ModelSize.MINI
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -109,7 +110,7 @@ class TransformerMaxModel(BaseDLModel):
     model_description = "Maximum Transformer (6 layers, 8 heads, ~2M params)"
     architecture = "transformer"
     size = ModelSize.MAX
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)

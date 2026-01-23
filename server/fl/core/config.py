@@ -22,12 +22,21 @@ class FLAlgorithm(str, Enum):
     FEDMEDIAN = "fedmedian"
     FEDTRIMMEDAVG = "fedtrimmedavg"
     KRUM = "krum"
+    MULTIKRUM = "multikrum"
     BULYAN = "bulyan"
     # Fair FL
     QFEDAVG = "qfedavg"
     # Privacy-preserving
     DPFEDAVG_ADAPTIVE = "dpfedavg_adaptive"
     DPFEDAVG_FIXED = "dpfedavg_fixed"
+    # XGBoost Federated Learning
+    FEDXGB_BAGGING = "fedxgb_bagging"
+    FEDXGB_CYCLIC = "fedxgb_cyclic"
+    FEDXGB_NNAVG = "fedxgb_nnavg"
+    # Mobile/Edge
+    FEDAVG_ANDROID = "fedavg_android"
+    # Fault-tolerant
+    FAULT_TOLERANT_FEDAVG = "fault_tolerant_fedavg"
     # Knowledge Distillation (heterogeneous models)
     FEDDF = "feddf"
     FEDMD = "fedmd"

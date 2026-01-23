@@ -49,14 +49,18 @@ class ReshapeBlock(BasePreprocessingBlock):
             original_shape = data.shape
             reshaped = data.reshape(target_shape)
             
-            # Determine output shape type
+            # Determine output shape type based on new conventions:
+            # 1D: (batch, features), 2D: (batch, seq_len, features)
+            # 3D: (batch, channels, height, width), 4D: (batch, frames, channels, height, width)
             ndim = reshaped.ndim
             if ndim <= 2:
                 out_shape = OutputShape.SHAPE_1D
             elif ndim == 3:
-                out_shape = OutputShape.SHAPE_3D
+                out_shape = OutputShape.SHAPE_2D  # Sequential data
             elif ndim == 4:
-                out_shape = OutputShape.SHAPE_4D
+                out_shape = OutputShape.SHAPE_3D  # Image data
+            elif ndim == 5:
+                out_shape = OutputShape.SHAPE_4D  # Video data
             else:
                 out_shape = OutputShape.ANY
             

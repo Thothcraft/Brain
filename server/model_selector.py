@@ -2,8 +2,14 @@
 
 Selects appropriate models (nano/mini/max) based on:
 - Data type (CSI, Image, Video, etc.)
-- Preprocessing output shape (1D, 3D, 4D)
+- Preprocessing output shape (1D, 2D, 3D, 4D)
 - Available compute resources
+
+Shape Conventions:
+- 1D: (batch, features) - Flattened feature vectors -> MLP
+- 2D: (batch, seq_len, features) - Sequential/time-series -> LSTM, GRU, CNN1D, Transformer
+- 3D: (batch, channels, height, width) - Single images -> CNN2D, ResNet
+- 4D: (batch, num_frames, channels, height, width) - Video -> CNN3D
 """
 
 import logging
@@ -28,8 +34,9 @@ class DataType(str, Enum):
 class OutputShape(str, Enum):
     """Preprocessing output shapes."""
     SHAPE_1D = "1d"  # (batch, features) - Flattened
-    SHAPE_3D = "3d"  # (batch, seq_len, features) - Sequential
-    SHAPE_4D = "4d"  # (batch, channels, height, width) - Image/Video
+    SHAPE_2D = "2d"  # (batch, seq_len, features) - Sequential
+    SHAPE_3D = "3d"  # (batch, channels, height, width) - Image
+    SHAPE_4D = "4d"  # (batch, num_frames, channels, height, width) - Video
 
 
 @dataclass
@@ -68,41 +75,53 @@ class ModelSelector:
         ],
     }
     
-    MODELS_3D = {
+    # Sequential models for 2D data (batch, seq_len, features)
+    MODELS_2D = {
         "nano": [
-            ModelRecommendation("lstm_nano", "LSTM Nano", "nano", "3d", "Minimal LSTM for sequences", 10000, ["csi", "imu", "audio"], 1.0),
-            ModelRecommendation("gru_nano", "GRU Nano", "nano", "3d", "Minimal GRU (faster than LSTM)", 8000, ["csi", "imu"], 0.9),
-            ModelRecommendation("cnn1d_nano", "CNN1D Nano", "nano", "3d", "Minimal 1D CNN for time-series", 15000, ["csi", "imu", "audio"], 0.8),
-            ModelRecommendation("transformer_nano", "Transformer Nano", "nano", "3d", "Minimal Transformer encoder", 20000, ["csi", "imu"], 1.2),
+            ModelRecommendation("lstm_nano", "LSTM Nano", "nano", "2d", "Minimal LSTM for sequences", 10000, ["csi", "imu", "audio"], 1.0),
+            ModelRecommendation("gru_nano", "GRU Nano", "nano", "2d", "Minimal GRU (faster than LSTM)", 8000, ["csi", "imu"], 0.9),
+            ModelRecommendation("cnn1d_nano", "CNN1D Nano", "nano", "2d", "Minimal 1D CNN for time-series", 15000, ["csi", "imu", "audio"], 0.8),
+            ModelRecommendation("transformer_nano", "Transformer Nano", "nano", "2d", "Minimal Transformer encoder", 20000, ["csi", "imu"], 1.2),
         ],
         "mini": [
-            ModelRecommendation("lstm_mini", "LSTM Mini", "mini", "3d", "Balanced BiLSTM", 100000, ["csi", "imu", "audio"], 2.5),
-            ModelRecommendation("gru_mini", "GRU Mini", "mini", "3d", "Balanced BiGRU", 80000, ["csi", "imu"], 2.0),
-            ModelRecommendation("cnn1d_mini", "CNN1D Mini", "mini", "3d", "Balanced 1D CNN with residuals", 150000, ["csi", "imu", "audio"], 1.8),
-            ModelRecommendation("transformer_mini", "Transformer Mini", "mini", "3d", "Balanced Transformer (3 layers)", 200000, ["csi", "imu"], 3.0),
+            ModelRecommendation("lstm_mini", "LSTM Mini", "mini", "2d", "Balanced BiLSTM", 100000, ["csi", "imu", "audio"], 2.5),
+            ModelRecommendation("gru_mini", "GRU Mini", "mini", "2d", "Balanced BiGRU", 80000, ["csi", "imu"], 2.0),
+            ModelRecommendation("cnn1d_mini", "CNN1D Mini", "mini", "2d", "Balanced 1D CNN with residuals", 150000, ["csi", "imu", "audio"], 1.8),
+            ModelRecommendation("transformer_mini", "Transformer Mini", "mini", "2d", "Balanced Transformer (3 layers)", 200000, ["csi", "imu"], 3.0),
         ],
         "max": [
-            ModelRecommendation("lstm_max", "LSTM Max", "max", "3d", "Maximum BiLSTM with attention", 1000000, ["csi", "imu", "audio"], 8.0),
-            ModelRecommendation("gru_max", "GRU Max", "max", "3d", "Maximum BiGRU", 800000, ["csi", "imu"], 6.0),
-            ModelRecommendation("cnn1d_max", "CNN1D Max", "max", "3d", "Maximum 1D CNN with deep residuals", 1000000, ["csi", "imu", "audio"], 5.0),
-            ModelRecommendation("transformer_max", "Transformer Max", "max", "3d", "Maximum Transformer (6 layers)", 2000000, ["csi", "imu"], 10.0),
+            ModelRecommendation("lstm_max", "LSTM Max", "max", "2d", "Maximum BiLSTM with attention", 1000000, ["csi", "imu", "audio"], 8.0),
+            ModelRecommendation("gru_max", "GRU Max", "max", "2d", "Maximum BiGRU", 800000, ["csi", "imu"], 6.0),
+            ModelRecommendation("cnn1d_max", "CNN1D Max", "max", "2d", "Maximum 1D CNN with deep residuals", 1000000, ["csi", "imu", "audio"], 5.0),
+            ModelRecommendation("transformer_max", "Transformer Max", "max", "2d", "Maximum Transformer (6 layers)", 2000000, ["csi", "imu"], 10.0),
         ],
     }
     
+    # Image models for 3D data (batch, channels, height, width)
+    MODELS_3D = {
+        "nano": [
+            ModelRecommendation("cnn2d_nano", "CNN2D Nano", "nano", "3d", "Minimal 2D CNN for images", 30000, ["image"], 1.0),
+            ModelRecommendation("resnet_nano", "ResNet Nano", "nano", "3d", "Minimal ResNet for images", 100000, ["image"], 1.5),
+        ],
+        "mini": [
+            ModelRecommendation("cnn2d_mini", "CNN2D Mini", "mini", "3d", "Balanced 2D CNN", 500000, ["image"], 3.0),
+            ModelRecommendation("resnet_mini", "ResNet Mini", "mini", "3d", "ResNet-18 style", 1000000, ["image"], 4.0),
+        ],
+        "max": [
+            ModelRecommendation("cnn2d_max", "CNN2D Max", "max", "3d", "Maximum 2D CNN with residuals", 5000000, ["image"], 8.0),
+            ModelRecommendation("resnet_max", "ResNet Max", "max", "3d", "ResNet-50 style", 25000000, ["image"], 12.0),
+        ],
+    }
+    
+    # Video models for 4D data (batch, num_frames, channels, height, width)
     MODELS_4D = {
         "nano": [
-            ModelRecommendation("cnn2d_nano", "CNN2D Nano", "nano", "4d", "Minimal 2D CNN for images", 30000, ["image"], 1.0),
-            ModelRecommendation("resnet_nano", "ResNet Nano", "nano", "4d", "Minimal ResNet for images", 100000, ["image"], 1.5),
             ModelRecommendation("cnn3d_nano", "CNN3D Nano", "nano", "4d", "Minimal 3D CNN for video", 50000, ["video"], 2.0),
         ],
         "mini": [
-            ModelRecommendation("cnn2d_mini", "CNN2D Mini", "mini", "4d", "Balanced 2D CNN", 500000, ["image"], 3.0),
-            ModelRecommendation("resnet_mini", "ResNet Mini", "mini", "4d", "ResNet-18 style", 1000000, ["image"], 4.0),
             ModelRecommendation("cnn3d_mini", "CNN3D Mini", "mini", "4d", "Balanced 3D CNN for video", 500000, ["video"], 5.0),
         ],
         "max": [
-            ModelRecommendation("cnn2d_max", "CNN2D Max", "max", "4d", "Maximum 2D CNN with residuals", 5000000, ["image"], 8.0),
-            ModelRecommendation("resnet_max", "ResNet Max", "max", "4d", "ResNet-50 style", 25000000, ["image"], 12.0),
             ModelRecommendation("cnn3d_max", "CNN3D Max", "max", "4d", "Maximum 3D CNN for video", 5000000, ["video"], 15.0),
         ],
     }
@@ -143,6 +162,8 @@ class ModelSelector:
         if output_shape == "1d":
             model_pool = cls.MODELS_1D
             result["ml_models"] = cls.ML_MODELS
+        elif output_shape == "2d":
+            model_pool = cls.MODELS_2D
         elif output_shape == "3d":
             model_pool = cls.MODELS_3D
         elif output_shape == "4d":
@@ -295,23 +316,25 @@ class ModelSelector:
             if block_type == "flatten":
                 return "1d"
             elif block_type == "sliding_window":
-                return "3d"
+                return "2d"  # Sequential data
             elif block_type == "reshape":
                 target = block.get("params", {}).get("target_shape", [])
                 if len(target) == 2:
                     return "1d"
                 elif len(target) == 3:
-                    return "3d"
+                    return "2d"  # Sequential
                 elif len(target) == 4:
-                    return "4d"
+                    return "3d"  # Image
+                elif len(target) == 5:
+                    return "4d"  # Video
         
         # Default based on data type
         defaults = {
-            "csi": "3d",
-            "imu": "3d",
-            "image": "4d",
-            "video": "4d",
-            "audio": "3d",
+            "csi": "2d",    # Sequential
+            "imu": "2d",    # Sequential
+            "image": "3d",  # Image
+            "video": "4d",  # Video
+            "audio": "2d",  # Sequential
             "general_csv": "1d",
         }
         

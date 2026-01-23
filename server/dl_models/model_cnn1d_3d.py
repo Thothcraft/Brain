@@ -1,6 +1,7 @@
-"""CNN1D Models for 3D Input (batch, seq_len, features).
+"""CNN1D Models for 2D Input (batch, seq_len, features).
 
 1D Convolutional models for time-series in nano, mini, and max variants.
+Input shape: (batch, seq_len, features) - Sequential/time-series data
 """
 
 import torch
@@ -24,7 +25,7 @@ class CNN1DNanoModel(BaseDLModel):
     model_description = "Minimal 1D CNN (2 conv layers, ~15K params)"
     architecture = "cnn1d"
     size = ModelSize.NANO
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -56,7 +57,7 @@ class CNN1DMiniModel(BaseDLModel):
     model_description = "Balanced 1D CNN (4 conv layers, ~150K params)"
     architecture = "cnn1d"
     size = ModelSize.MINI
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -102,7 +103,7 @@ class CNN1DMaxModel(BaseDLModel):
     model_description = "Maximum 1D CNN with residuals (~1M params)"
     architecture = "cnn1d"
     size = ModelSize.MAX
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)

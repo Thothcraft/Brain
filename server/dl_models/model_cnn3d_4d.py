@@ -1,6 +1,7 @@
-"""CNN3D Models for 4D Input (batch, channels/frames, depth, height, width).
+"""CNN3D Models for 4D Input (batch, num_frames, channels, height, width).
 
 3D Convolutional models for video/volumetric data in nano, mini, and max variants.
+Input shape: (batch, num_frames, channels, height, width) - Video/volumetric data
 """
 
 import torch
@@ -43,7 +44,8 @@ class CNN3DNanoModel(BaseDLModel):
         self.fc = nn.Linear(64, config.num_classes)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, channels, frames, height, width)
+        # x: (batch, num_frames, channels, height, width) -> (batch, channels, num_frames, height, width)
+        x = x.permute(0, 2, 1, 3, 4)
         x = self.conv(x)
         x = x.view(x.size(0), -1)
         return self.fc(x)
@@ -89,6 +91,8 @@ class CNN3DMiniModel(BaseDLModel):
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, num_frames, channels, height, width) -> (batch, channels, num_frames, height, width)
+        x = x.permute(0, 2, 1, 3, 4)
         x = self.conv(x)
         x = x.view(x.size(0), -1)
         return self.fc(x)
@@ -142,6 +146,8 @@ class CNN3DMaxModel(BaseDLModel):
         return nn.Sequential(*layers)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, num_frames, channels, height, width) -> (batch, channels, num_frames, height, width)
+        x = x.permute(0, 2, 1, 3, 4)
         x = self.stem(x)
         x = self.layer1(x)
         x = self.layer2(x)

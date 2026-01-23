@@ -22,31 +22,48 @@ class ModelSize(str, Enum):
 
 
 class InputShape(str, Enum):
-    """Input shape types."""
-    SHAPE_1D = "1d"  # (batch, features)
-    SHAPE_3D = "3d"  # (batch, seq_len, features)
-    SHAPE_4D = "4d"  # (batch, channels, height, width)
+    """Input shape types for DL models.
+    
+    Shape Conventions:
+    - 1D: (batch, features) - Flattened feature vectors
+    - 2D: (batch, seq_len, features) - Sequential/time-series data
+    - 3D: (batch, channels, height, width) - Single images
+    - 4D: (batch, num_frames, channels, height, width) - Video/volumetric data
+    """
+    SHAPE_1D = "1d"  # (batch, features) - Flattened
+    SHAPE_2D = "2d"  # (batch, seq_len, features) - Sequential
+    SHAPE_3D = "3d"  # (batch, channels, height, width) - Image
+    SHAPE_4D = "4d"  # (batch, num_frames, channels, height, width) - Video
 
 
 @dataclass
 class ModelConfig:
-    """Configuration for DL model creation."""
+    """Configuration for DL model creation.
+    
+    Shape Parameters:
+    - 1D (batch, features): input_features
+    - 2D (batch, seq_len, features): seq_length, input_channels
+    - 3D (batch, channels, height, width): in_channels, image_height, image_width
+    - 4D (batch, num_frames, channels, height, width): num_frames, in_channels, image_height, image_width
+    """
     # Common parameters
     num_classes: int = 2
     dropout: float = 0.3
     
-    # 1D input parameters
+    # 1D input parameters (batch, features)
     input_features: int = 128
     
-    # 3D input parameters (sequential)
+    # 2D input parameters (batch, seq_len, features) - Sequential
     seq_length: int = 128
-    input_channels: int = 64
+    input_channels: int = 64  # features per time step
     
-    # 4D input parameters (image/video)
+    # 3D input parameters (batch, channels, height, width) - Image
+    in_channels: int = 3
     image_height: int = 224
     image_width: int = 224
-    in_channels: int = 3
-    num_frames: int = 16  # For video
+    
+    # 4D input parameters (batch, num_frames, channels, height, width) - Video
+    num_frames: int = 16
     
     # Architecture parameters
     hidden_size: int = 128

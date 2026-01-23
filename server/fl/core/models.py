@@ -544,7 +544,11 @@ def get_models_by_input_shape(input_shape: str) -> List[Dict[str, Any]]:
     """Get models compatible with a specific input shape.
     
     Args:
-        input_shape: One of '1d', '3d', '4d'
+        input_shape: One of '1d', '2d', '3d', '4d'
+            - 1d: (batch, features) - MLP
+            - 2d: (batch, seq_len, features) - LSTM, GRU, CNN1D, Transformer
+            - 3d: (batch, channels, height, width) - CNN2D, ResNet
+            - 4d: (batch, num_frames, channels, height, width) - CNN3D
     
     Returns:
         List of model info dictionaries

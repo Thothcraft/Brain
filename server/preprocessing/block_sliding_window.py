@@ -1,7 +1,7 @@
 """Sliding Window Block.
 
 Creates overlapping windows from time-series data.
-Converts 2D data to 3D sequential format.
+Converts 1D/2D data to 2D sequential format (batch, seq_len, features).
 """
 
 import numpy as np
@@ -25,9 +25,9 @@ class SlidingWindowBlock(BasePreprocessingBlock):
     
     block_type = "sliding_window"
     block_name = "Sliding Window"
-    block_description = "Create overlapping windows from time-series (2D -> 3D)"
-    input_shape = OutputShape.SHAPE_2D
-    output_shape = OutputShape.SHAPE_3D
+    block_description = "Create overlapping windows from time-series (1D -> 2D sequential)"
+    input_shape = OutputShape.ANY
+    output_shape = OutputShape.SHAPE_2D
     category = "windowing"
     version = "1.0.0"
     
@@ -70,7 +70,7 @@ class SlidingWindowBlock(BasePreprocessingBlock):
             if n_samples < window_size:
                 return BlockResult(
                     data=data,
-                    output_shape=OutputShape.SHAPE_2D,
+                    output_shape=OutputShape.SHAPE_1D,
                     success=False,
                     error=f"Data length {n_samples} < window_size {window_size}",
                 )
@@ -98,7 +98,7 @@ class SlidingWindowBlock(BasePreprocessingBlock):
             if not windows:
                 return BlockResult(
                     data=data,
-                    output_shape=OutputShape.SHAPE_2D,
+                    output_shape=OutputShape.SHAPE_1D,
                     success=False,
                     error="No windows created",
                 )
@@ -107,7 +107,7 @@ class SlidingWindowBlock(BasePreprocessingBlock):
             
             return BlockResult(
                 data=result.astype(np.float32),
-                output_shape=OutputShape.SHAPE_3D,
+                output_shape=OutputShape.SHAPE_2D,
                 metadata={
                     "num_windows": len(windows),
                     "window_size": window_size,
@@ -120,7 +120,7 @@ class SlidingWindowBlock(BasePreprocessingBlock):
         except Exception as e:
             return BlockResult(
                 data=data,
-                output_shape=OutputShape.SHAPE_2D,
+                output_shape=OutputShape.SAME,
                 success=False,
                 error=str(e),
             )

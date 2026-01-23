@@ -1,6 +1,7 @@
-"""GRU Models for 3D Input (batch, seq_len, features).
+"""GRU Models for 2D Input (batch, seq_len, features).
 
 Bidirectional GRU models in nano, mini, and max variants.
+Input shape: (batch, seq_len, features) - Sequential/time-series data
 """
 
 import torch
@@ -24,7 +25,7 @@ class GRUNanoModel(BaseDLModel):
     model_description = "Minimal GRU (1 layer, ~8K params) for edge deployment"
     architecture = "gru"
     size = ModelSize.NANO
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -45,7 +46,7 @@ class GRUMiniModel(BaseDLModel):
     model_description = "Balanced BiGRU (2 layers, ~80K params)"
     architecture = "gru"
     size = ModelSize.MINI
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -71,7 +72,7 @@ class GRUMaxModel(BaseDLModel):
     model_description = "Maximum capacity BiGRU (3 layers, ~800K params)"
     architecture = "gru"
     size = ModelSize.MAX
-    input_shape = InputShape.SHAPE_3D
+    input_shape = InputShape.SHAPE_2D
     
     def __init__(self, config: ModelConfig):
         super().__init__(config)
