@@ -6,3 +6,6 @@ logs/
 
 # ignore test_endpoints.sh
 test_endpoints.sh
+
+# ignore backup files
+*.backup
