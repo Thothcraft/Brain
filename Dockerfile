@@ -39,11 +39,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy only necessary application code (exclude tests, docs, etc.)
 COPY server/ ./server/
+COPY run.py .
 COPY start.sh .
 COPY Procfile .
 
-# Create logs directory
-RUN mkdir -p logs
+# Create logs directory and ensure start.sh is executable
+RUN mkdir -p logs && chmod +x start.sh
 
 # Expose port
 EXPOSE 8000
@@ -52,5 +53,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Start the application
-CMD ["bash", "start.sh"]
+# Start the application using Python script (handles PORT env var properly)
+CMD ["python", "run.py"]
