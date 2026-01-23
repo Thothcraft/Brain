@@ -6,9 +6,9 @@ including device events, training jobs, file uploads, and system events.
 
 from fastapi import APIRouter, Depends, Query
 from typing import Dict, List, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, or_, func
 
 from ..db import get_db, Device, File, TrainingJob, TrainedModel, Query as QueryModel
 from ..auth import get_current_user
@@ -32,25 +32,25 @@ async def get_recent_activity(
     - AI queries
     """
     activities = []
-    cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+    cutoff_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
     
     try:
-        # Get recent device activity
+        # Get recent device activity - filter in DB, not Python
         devices = db.query(Device).filter(
-            Device.userId == current_user.userId
-        ).all()
+            Device.userId == current_user.userId,
+            Device.last_seen > cutoff_time
+        ).limit(limit).all()
         
         for device in devices:
-            if device.last_seen and device.last_seen > cutoff_time:
-                activities.append({
-                    "type": "device",
-                    "action": "online" if device.online else "offline",
-                    "title": f"Device {'connected' if device.online else 'disconnected'}",
-                    "description": f"{device.device_name or device.device_uuid}",
-                    "timestamp": device.last_seen.isoformat(),
-                    "icon": "wifi" if device.online else "wifi-off",
-                    "color": "green" if device.online else "slate"
-                })
+            activities.append({
+                "type": "device",
+                "action": "online" if device.online else "offline",
+                "title": f"Device {'connected' if device.online else 'disconnected'}",
+                "description": f"{device.device_name or device.device_uuid}",
+                "timestamp": device.last_seen.isoformat(),
+                "icon": "wifi" if device.online else "wifi-off",
+                "color": "green" if device.online else "slate"
+            })
         
         # Get recent file uploads
         files = db.query(File).filter(

@@ -47,9 +47,9 @@ from .base import (
 from . import model_mlp_1d
 from . import model_lstm_3d
 from . import model_gru_3d
-from . import model_cnn1d_3d
+from . import model_cnn1d_2d
 from . import model_transformer_3d
-from . import model_cnn2d_4d
+from . import model_cnn2d_3d
 from . import model_resnet_4d
 from . import model_cnn3d_4d
 
