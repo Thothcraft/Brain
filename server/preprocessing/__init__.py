@@ -31,6 +31,9 @@ from .base import (
     OutputShape,
     BlockMetadata,
 )
+
+# Alias for backward compatibility
+BlockRegistry = PreprocessingRegistry
 from .pipeline import PreprocessingPipeline, execute_pipeline
 
 # Import all blocks to register them
@@ -50,6 +53,7 @@ from . import block_fft_transform
 __all__ = [
     "BasePreprocessingBlock",
     "PreprocessingRegistry",
+    "BlockRegistry",
     "PreprocessingPipeline",
     "OutputShape",
     "BlockMetadata",
