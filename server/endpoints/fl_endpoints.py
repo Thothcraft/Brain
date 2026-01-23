@@ -23,7 +23,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .models import StandardResponse
-from ..flower_fl import (
+from ..fl import (
     fl_manager,
     FLAlgorithm,
     FLDataset,
