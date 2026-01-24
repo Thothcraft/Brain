@@ -109,7 +109,7 @@ from .visualization import (
 )
 
 # Session manager
-from .session import FLSessionManager, FLSession, SessionStatus, fl_manager
+from .session import FLSessionManager, FLSession, FLClient, SessionStatus, fl_manager
 
 __all__ = [
     # Config
@@ -169,6 +169,7 @@ __all__ = [
     # Session
     "FLSessionManager",
     "FLSession",
+    "FLClient",
     "SessionStatus",
     "fl_manager",
 ]

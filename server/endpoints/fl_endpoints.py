@@ -38,6 +38,7 @@ from ..fl import (
     DataConfig,
     PrivacyConfig,
     MonitoringConfig,
+    SessionStatus,
     get_dataset_info,
     get_algorithm_info,
 )
@@ -163,12 +164,10 @@ class UpdateConfigRequest(BaseModel):
 # ============================================================================
 
 def convert_to_fl_config(request: CreateFLSessionRequest) -> FLSessionConfig:
-    """Convert API request to internal FLSessionConfig."""
+    """Convert API request to internal FLSessionConfig (ExperimentConfig)."""
     # Map string enums to actual enums
     algorithm = FLAlgorithm(request.algorithm.lower())
     model_arch = ModelArchitecture(request.model_architecture.lower())
-    agg_method = AggregationMethod(request.aggregation_method.lower())
-    client_sel = ClientSelectionStrategy(request.client_selection.lower())
     
     # Build sub-configs
     server_config = ServerConfig(
@@ -196,12 +195,11 @@ def convert_to_fl_config(request: CreateFLSessionRequest) -> FLSessionConfig:
         **request.monitoring.model_dump() if request.monitoring else {}
     )
     
+    # FLSessionConfig is an alias for ExperimentConfig
     return FLSessionConfig(
-        session_name=request.session_name,
+        name=request.session_name,
         algorithm=algorithm,
-        model_architecture=model_arch,
-        aggregation_method=agg_method,
-        client_selection=client_sel,
+        model=model_arch,
         server=server_config,
         client=client_config,
         algorithm_params=algo_config,
@@ -256,9 +254,9 @@ async def create_fl_session(
             message=f"FL session '{request.session_name}' created successfully with {config.algorithm.value} algorithm",
             data={
                 "session_id": session.session_id,
-                "session_name": config.session_name,
+                "session_name": config.name,
                 "algorithm": config.algorithm.value,
-                "model_architecture": config.model_architecture.value,
+                "model_architecture": config.model.value,
                 "dataset": config.data.dataset.value,
                 "num_rounds": config.server.num_rounds,
                 "num_partitions": config.data.num_partitions,
@@ -337,9 +335,9 @@ async def get_fl_session(session_id: str):
             "success": True,
             "session": {
                 "session_id": session.session_id,
-                "session_name": session.config.session_name,
+                "session_name": session.config.name,
                 "algorithm": session.config.algorithm.value,
-                "model_architecture": session.config.model_architecture.value,
+                "model_architecture": session.config.model.value,
                 "dataset": session.config.data.dataset.value,
                 "status": session.status,
                 "current_round": session.current_round,
@@ -396,9 +394,9 @@ async def start_fl_session(
             logger.warning(f"[FL] Session not found: {session_id}")
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         
-        if session.status != "pending":
-            logger.warning(f"[FL] Cannot start session {session_id}: already {session.status}")
-            raise HTTPException(status_code=400, detail=f"Session is already {session.status}")
+        if session.status != SessionStatus.PENDING:
+            logger.warning(f"[FL] Cannot start session {session_id}: already {session.status.value}")
+            raise HTTPException(status_code=400, detail=f"Session is already {session.status.value}")
         
         logger.info(f"[FL] Starting session {session_id} with {session.config.data.num_partitions} clients, "
                    f"{session.total_rounds} rounds, algorithm={session.config.algorithm.value}")
@@ -434,10 +432,10 @@ async def stop_fl_session(session_id: str):
         if not session:
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         
-        if session.status != "running":
-            raise HTTPException(status_code=400, detail=f"Session is not running (status: {session.status})")
+        if session.status != SessionStatus.RUNNING:
+            raise HTTPException(status_code=400, detail=f"Session is not running (status: {session.status.value})")
         
-        session.status = "cancelled"
+        session.status = SessionStatus.CANCELLED
         session.completed_at = datetime.now()
         
         return StandardResponse(
@@ -513,8 +511,8 @@ async def join_fl_session(
         if not session:
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         
-        if session.status not in ["pending", "running"]:
-            raise HTTPException(status_code=400, detail=f"Cannot join session with status: {session.status}")
+        if session.status not in [SessionStatus.PENDING, SessionStatus.RUNNING]:
+            raise HTTPException(status_code=400, detail=f"Cannot join session with status: {session.status.value}")
         
         client = fl_manager.add_client(
             session_id=session_id,

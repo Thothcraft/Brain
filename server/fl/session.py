@@ -58,6 +58,28 @@ class RoundMetrics:
     train_loss: float = 0.0
     aggregation_time: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
+    avg_loss: float = 0.0
+    avg_accuracy: float = 0.0
+    min_accuracy: float = 0.0
+    max_accuracy: float = 0.0
+    std_accuracy: float = 0.0
+    communication_cost: float = 0.0
+    convergence_rate: float = 0.0
+    fairness_index: float = 1.0
+
+
+@dataclass
+class FLClient:
+    """State of a federated learning client."""
+    client_id: str
+    device_id: str
+    data_samples: int = 0
+    compute_capability: float = 1.0
+    is_active: bool = True
+    rounds_participated: List[int] = field(default_factory=list)
+    contribution_score: float = 0.0
+    metrics_history: List[Dict[str, Any]] = field(default_factory=list)
+    last_update: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -75,6 +97,9 @@ class FLSession:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
+    clients: Dict[str, FLClient] = field(default_factory=dict)
+    privacy_budget_spent: float = 0.0
+    global_model_path: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert session to dictionary."""
@@ -178,6 +203,41 @@ class FLSessionManager:
         logger.info(f"Deleted session {session_id}")
         return True
     
+    def add_client(
+        self,
+        session_id: str,
+        device_id: str,
+        data_samples: int,
+        compute_capability: float = 1.0
+    ) -> Optional[FLClient]:
+        """Add a client to an FL session.
+        
+        Args:
+            session_id: ID of the session to join
+            device_id: Unique device identifier
+            data_samples: Number of data samples the client has
+            compute_capability: Relative compute capability (1.0 = baseline)
+        
+        Returns:
+            FLClient instance if successful, None otherwise
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        
+        client_id = str(uuid.uuid4())
+        client = FLClient(
+            client_id=client_id,
+            device_id=device_id,
+            data_samples=data_samples,
+            compute_capability=compute_capability,
+        )
+        
+        session.clients[client_id] = client
+        logger.info(f"Client {client_id} ({device_id}) joined session {session_id}")
+        
+        return client
+    
     async def run_session(self, session_id: str) -> FLSession:
         """Run a complete FL session using Flower framework.
         
@@ -265,12 +325,15 @@ class FLSessionManager:
                 loss, accuracy, _ = evaluate_model(model, testloader, self.device)
                 
                 # Update session metrics
-                import time
                 metrics = RoundMetrics(
                     round_num=server_round,
                     loss=loss,
                     accuracy=accuracy,
                     participating_clients=config.data.num_partitions,
+                    avg_loss=loss,
+                    avg_accuracy=accuracy,
+                    min_accuracy=accuracy,
+                    max_accuracy=accuracy,
                 )
                 session.round_metrics[server_round] = metrics
                 session.current_round = server_round
