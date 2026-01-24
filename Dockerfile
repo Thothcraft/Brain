@@ -32,6 +32,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Install only runtime dependencies (no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
