@@ -91,11 +91,14 @@ class AlgorithmConfigRequest(BaseModel):
     beta_1: float = Field(0.9, ge=0.0, le=1.0)
     beta_2: float = Field(0.99, ge=0.0, le=1.0)
     tau: float = Field(1e-3, ge=1e-10, le=1.0)
-    server_lr: float = Field(1.0, ge=1e-6, le=100.0)
+    server_momentum: float = Field(0.9, ge=0.0, le=1.0)
     q_param: float = Field(0.2, ge=0.0, le=10.0)
     byzantine_fraction: float = Field(0.0, ge=0.0, le=0.5)
     trimmed_mean_beta: float = Field(0.1, ge=0.0, le=0.5)
     krum_num_closest: int = Field(2, ge=1, le=100)
+    temperature: float = Field(3.0, ge=0.1, le=20.0)
+    distillation_weight: float = Field(0.5, ge=0.0, le=1.0)
+    public_dataset_size: int = Field(5000, ge=100, le=100000)
 
 
 class DataConfigRequest(BaseModel):

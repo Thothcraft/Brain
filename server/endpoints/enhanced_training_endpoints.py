@@ -727,8 +727,8 @@ async def start_enhanced_training(
         
         # Start real training in background (using ml_training.py functions)
         # Note: db_session needs to be passed for database access
-        from server.db import get_db_session
-        db_session = get_db_session()
+        from server.db import SessionLocal
+        db_session = SessionLocal()
         
         if config.section == TrainingSection.DEEP_LEARNING:
             background_tasks.add_task(run_dl_training, job, db_session)

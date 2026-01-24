@@ -359,8 +359,8 @@ async def setup_training(
         training_jobs[job_id] = job
         
         # Start real training in background
-        from server.db import get_db_session
-        db_session = get_db_session()
+        from server.db import SessionLocal
+        db_session = SessionLocal()
         background_tasks.add_task(run_training, job, db_session)
         
         return StandardResponse(
@@ -407,9 +407,9 @@ async def get_training_status(
             # Return all jobs, optionally filtered by device
             jobs = []
             for jid, job in training_jobs.items():
-                if device_id and job["config"]["device_id"] != device_id:
+                if device_id and job.config.device_id != device_id:
                     continue
-                jobs.append(job)
+                jobs.append(job.model_dump())
             
             return {
                 "success": True,
