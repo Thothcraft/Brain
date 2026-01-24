@@ -1,7 +1,11 @@
 # Optimized Dockerfile for fast Railway deployment
 # Uses multi-stage build and minimal dependencies
+# Build: 2026-01-24-0134
 
 FROM python:3.11-slim as builder
+
+# Cache bust argument - change this to force rebuild
+ARG CACHEBUST=2026012401
 
 WORKDIR /app
 
