@@ -1119,7 +1119,7 @@ def load_dataset_from_db(
         class_names: list of class name strings
     """
     from server.db import TrainingDataset, DatasetFile, File
-    from sqlalchemy.orm import joinedload
+    from sqlalchemy.orm import joinedload, load_only, defer
     from sqlalchemy import text
     
     # Default preprocessing config
@@ -1134,15 +1134,17 @@ def load_dataset_from_db(
     forced_data_type = preprocessing_config.get('data_type', 'auto')
     preprocessing_blocks = preprocessing_config.get('preprocessing_blocks', [])
     
-    # Set a longer statement timeout for loading large files (5 minutes)
+    # Set a longer statement timeout for loading large files (10 minutes)
     try:
-        db_session.execute(text("SET statement_timeout = '300000'"))  # 5 minutes in ms
+        db_session.execute(text("SET statement_timeout = '600000'"))  # 10 minutes in ms
+        db_session.execute(text("SET idle_in_transaction_session_timeout = '600000'"))
     except Exception as e:
         logger.warning(f"Could not set statement timeout: {e}")
     
-    # Use eager loading to fetch dataset with files and their content in fewer queries
+    # Phase 1: Load dataset metadata and file references WITHOUT content (fast query)
+    # Defer the large 'content' column to avoid timeout on initial query
     dataset = db_session.query(TrainingDataset).options(
-        joinedload(TrainingDataset.files).joinedload(DatasetFile.file)
+        joinedload(TrainingDataset.files).joinedload(DatasetFile.file).defer(File.content)
     ).filter(TrainingDataset.id == dataset_id).first()
     
     if not dataset:
@@ -1205,8 +1207,15 @@ def load_dataset_from_db(
         if not dataset_file.file:
             files_failed.append((dataset_file.label, "File reference missing"))
             continue
+        
+        # Load file content on-demand (deferred loading to avoid timeout on large datasets)
+        try:
+            file_content = dataset_file.file.content
+        except Exception as content_err:
+            logger.error(f"Failed to load content for file {dataset_file.file.filename}: {content_err}")
+            files_failed.append((dataset_file.file.filename or "unknown", f"Content load failed: {content_err}"))
+            continue
             
-        file_content = dataset_file.file.content
         if not file_content:
             files_empty.append(dataset_file.file.filename or "unknown")
             continue
