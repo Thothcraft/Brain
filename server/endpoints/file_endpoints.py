@@ -383,6 +383,9 @@ async def upload_file_simple(
 async def upload_file_multipart(
     file: UploadFile = FastAPIFile(...),
     device_id: Optional[str] = Form(None),
+    labels: Optional[str] = Form(None),
+    folder_id: Optional[int] = Form(None),
+    relative_path: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     fastapi_request: Request = None
@@ -394,6 +397,9 @@ async def upload_file_multipart(
     Args:
         file: The uploaded file (multipart form data)
         device_id: Optional device identifier
+        labels: Optional JSON array of labels for the file
+        folder_id: Optional folder ID to place the file in
+        relative_path: Optional relative path within folder
         
     Returns:
         FileUploadResponse: Upload confirmation with file_id and size
@@ -468,6 +474,16 @@ async def upload_file_multipart(
         }
         data_type = type_to_data_type.get(detection.detected_type, "unknown")
         
+        # Parse labels from JSON string if provided
+        parsed_labels = []
+        if labels:
+            try:
+                parsed_labels = json.loads(labels)
+                if not isinstance(parsed_labels, list):
+                    parsed_labels = [str(parsed_labels)]
+            except json.JSONDecodeError:
+                parsed_labels = [labels]  # Use as single label if not valid JSON
+        
         # Create file metadata with detection results
         file_metadata = {
             "original_filename": filename,
@@ -476,14 +492,16 @@ async def upload_file_multipart(
             "device_id": device_id,
             "user_id": current_user.userId,
             "upload_method": "multipart",
+            "folder_id": folder_id,
+            "relative_path": relative_path,
             # Detection metadata
             "detected_type": detection.detected_type.value,
             "detection_confidence": detection.confidence,
             "detection_method": detection.detection_method,
             "is_csi": detection.is_csi,
-            # User-fillable fields (empty by default)
-            "labels": [],
-            "primary_label": "",
+            # User-fillable fields
+            "labels": parsed_labels,
+            "primary_label": parsed_labels[0] if parsed_labels else "",
             "description": "",
             "subject_id": "",
             "environment": "",
@@ -526,7 +544,9 @@ async def upload_file_multipart(
             uploaded_at=datetime.now(),
             file_hash=json.dumps(file_metadata),
             sample_content=sample_content,
-            data_type=data_type
+            data_type=data_type,
+            folder_id=folder_id,
+            labels=json.dumps(parsed_labels) if parsed_labels else None
         )
         db.add(db_file)
         

@@ -1623,8 +1623,26 @@ async def add_files_to_dataset(
             existing_file_ids = {r[0] for r in rows}
         logger.info(f"[ADD_FILES] Batch file-id query took {(time.time() - query_start)*1000:.2f}ms, found {len(existing_file_ids)} files")
         
+        # Query file labels for concatenation
+        file_labels_map = {}
+        if file_ids:
+            file_rows = db.query(File.fileId, File.labels).filter(
+                File.fileId.in_(file_ids),
+                File.userId == current_user.userId
+            ).all()
+            for fid, labels_json in file_rows:
+                if labels_json:
+                    try:
+                        file_labels_map[fid] = json.loads(labels_json)
+                    except:
+                        file_labels_map[fid] = []
+                else:
+                    file_labels_map[fid] = []
+        
         # Process files
         dataset_files_to_add = []
+        all_labels_used = set()
+        
         for file_entry in request.files:
             file_id = file_entry.get("file_id")
             label = file_entry.get("label")
@@ -1639,11 +1657,27 @@ async def add_files_to_dataset(
                 logger.warning(f"[ADD_FILES] File {file_id} not found for user {current_user.userId}")
                 continue
             
+            # Get file's existing labels and create concatenated label if multiple
+            file_labels = file_labels_map.get(file_id, [])
+            final_label = label
+            
+            # If file has multiple labels, create concatenated label (label1_label2)
+            if len(file_labels) > 1:
+                # Concatenate all labels with underscore
+                concatenated = "_".join(file_labels)
+                final_label = concatenated
+                all_labels_used.add(concatenated)
+            elif len(file_labels) == 1:
+                final_label = file_labels[0]
+                all_labels_used.add(file_labels[0])
+            else:
+                all_labels_used.add(label)
+            
             # Prepare dataset file entry
             dataset_file = DatasetFile(
                 dataset_id=dataset_id,
                 file_id=file_id,
-                label=label
+                label=final_label
             )
             dataset_files_to_add.append(dataset_file)
             added_count += 1

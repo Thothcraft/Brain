@@ -41,6 +41,13 @@ from ..fl import (
     SessionStatus,
     get_dataset_info,
     get_algorithm_info,
+    # Remote device support
+    # Reference: https://flower.ai/docs/framework/how-to-run-flower-using-docker.html
+    remote_device_manager,
+    DeviceStatus,
+    generate_client_script,
+    RoundMetrics,
+    ClientRoundMetrics,
 )
 
 router = APIRouter(prefix="/fl", tags=["federated-learning"])
@@ -1077,3 +1084,427 @@ async def apply_fl_preset(
     )
     
     return await create_fl_session(request, background_tasks)
+
+
+# ============================================================================
+# ENDPOINTS - REMOTE DEVICE MANAGEMENT
+# Reference: https://flower.ai/docs/framework/how-to-run-flower-using-docker.html
+# ============================================================================
+
+class RegisterDeviceRequest(BaseModel):
+    """Request to register a Thoth device for FL participation."""
+    device_id: str = Field(..., min_length=1, max_length=255)
+    device_name: str = Field(..., min_length=1, max_length=255)
+    ip_address: str = Field(..., min_length=7, max_length=45)
+    port: int = Field(9094, ge=1024, le=65535)
+    compute_capability: float = Field(1.0, ge=0.1, le=100.0)
+    available_memory_mb: int = Field(0, ge=0)
+    cpu_cores: int = Field(1, ge=1, le=256)
+    has_gpu: bool = False
+    gpu_memory_mb: int = Field(0, ge=0)
+    available_datasets: List[str] = Field(default_factory=list)
+    data_samples_available: int = Field(0, ge=0)
+
+
+class DeviceHeartbeatRequest(BaseModel):
+    """Heartbeat request from a Thoth device."""
+    device_id: str = Field(..., min_length=1)
+    status: Optional[str] = None
+    current_session_id: Optional[str] = None
+    metrics: Optional[Dict[str, Any]] = None
+
+
+@router.post("/devices/register", response_model=StandardResponse)
+async def register_fl_device(request: RegisterDeviceRequest):
+    """Register a Thoth device for FL participation.
+    
+    This endpoint allows Thoth devices to register themselves as available
+    FL clients. Once registered, devices can be selected to participate
+    in FL sessions.
+    
+    Reference: https://flower.ai/docs/framework/how-to-run-flower-using-docker.html
+    In Flower's architecture, this is equivalent to starting a SuperNode
+    that can execute ClientApps.
+    """
+    try:
+        device = remote_device_manager.register_device(
+            device_id=request.device_id,
+            device_name=request.device_name,
+            ip_address=request.ip_address,
+            port=request.port,
+            compute_capability=request.compute_capability,
+            available_memory_mb=request.available_memory_mb,
+            cpu_cores=request.cpu_cores,
+            has_gpu=request.has_gpu,
+            gpu_memory_mb=request.gpu_memory_mb,
+            available_datasets=request.available_datasets,
+            data_samples_available=request.data_samples_available,
+        )
+        
+        logger.info(f"[FL] Device registered: {request.device_name} ({request.device_id}) at {request.ip_address}:{request.port}")
+        
+        return StandardResponse(
+            success=True,
+            message=f"Device '{request.device_name}' registered successfully",
+            data=device.to_dict()
+        )
+    except Exception as e:
+        logger.error(f"[FL] Failed to register device: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to register device: {str(e)}")
+
+
+@router.post("/devices/heartbeat", response_model=StandardResponse)
+async def device_heartbeat(request: DeviceHeartbeatRequest):
+    """Send heartbeat from a Thoth device.
+    
+    Devices should send heartbeats periodically (every 30-60 seconds)
+    to indicate they are still available for FL participation.
+    """
+    try:
+        success = remote_device_manager.update_heartbeat(request.device_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Device {request.device_id} not found")
+        
+        if request.status:
+            try:
+                status = DeviceStatus(request.status)
+                remote_device_manager.update_device_status(request.device_id, status)
+            except ValueError:
+                pass  # Ignore invalid status
+        
+        return StandardResponse(
+            success=True,
+            message="Heartbeat received",
+            data={"device_id": request.device_id, "timestamp": datetime.now().isoformat()}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Heartbeat failed: {str(e)}")
+
+
+@router.get("/devices", response_model=Dict[str, Any])
+async def list_fl_devices(
+    status: Optional[str] = Query(None, description="Filter by status (online, offline, busy)"),
+    min_capability: float = Query(0.0, ge=0.0, description="Minimum compute capability"),
+    has_dataset: Optional[str] = Query(None, description="Filter by dataset availability"),
+):
+    """List all registered FL devices with optional filtering."""
+    try:
+        status_filter = None
+        if status:
+            try:
+                status_filter = DeviceStatus(status)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+        
+        devices = remote_device_manager.list_devices(
+            status=status_filter,
+            min_capability=min_capability,
+            has_dataset=has_dataset,
+        )
+        
+        stats = remote_device_manager.get_device_statistics()
+        
+        return {
+            "success": True,
+            "statistics": stats,
+            "devices": [d.to_dict() for d in devices]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list devices: {str(e)}")
+
+
+@router.get("/devices/available", response_model=Dict[str, Any])
+async def get_available_devices(
+    min_capability: float = Query(0.0, ge=0.0),
+    required_dataset: Optional[str] = Query(None),
+    min_samples: int = Query(0, ge=0),
+):
+    """Get devices currently available for FL participation."""
+    try:
+        devices = remote_device_manager.get_available_devices(
+            min_capability=min_capability,
+            required_dataset=required_dataset,
+            min_samples=min_samples,
+        )
+        
+        return {
+            "success": True,
+            "available_count": len(devices),
+            "devices": [d.to_dict() for d in devices]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get available devices: {str(e)}")
+
+
+@router.get("/devices/{device_id}", response_model=Dict[str, Any])
+async def get_fl_device(device_id: str):
+    """Get details of a specific FL device."""
+    try:
+        device = remote_device_manager.get_device(device_id)
+        if not device:
+            raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+        
+        return {
+            "success": True,
+            "device": device.to_dict()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get device: {str(e)}")
+
+
+@router.delete("/devices/{device_id}", response_model=StandardResponse)
+async def unregister_fl_device(device_id: str):
+    """Unregister a Thoth device from FL participation."""
+    try:
+        success = remote_device_manager.unregister_device(device_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+        
+        return StandardResponse(
+            success=True,
+            message=f"Device {device_id} unregistered successfully",
+            data={"device_id": device_id}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to unregister device: {str(e)}")
+
+
+@router.get("/devices/{device_id}/client-script", response_model=Dict[str, Any])
+async def get_device_client_script(
+    device_id: str,
+    session_id: str = Query(..., description="FL session to join"),
+    partition_id: int = Query(0, ge=0, description="Data partition ID"),
+):
+    """Generate a client script for a Thoth device to participate in FL.
+    
+    This endpoint generates a Python script that can be run on a Thoth device
+    to participate in the specified FL session.
+    
+    Reference: https://flower.ai/docs/framework/how-to-run-flower-using-docker.html
+    """
+    try:
+        device = remote_device_manager.get_device(device_id)
+        if not device:
+            raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+        
+        session = fl_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        
+        # Generate the client script
+        # The server address should be the Brain server's FL endpoint
+        server_address = f"localhost:8080"  # This should be configurable
+        
+        script = generate_client_script(
+            device_id=device_id,
+            server_address=server_address,
+            dataset=session.config.data.dataset.value,
+            partition_id=partition_id,
+            num_partitions=session.config.data.num_partitions,
+        )
+        
+        return {
+            "success": True,
+            "device_id": device_id,
+            "session_id": session_id,
+            "script": script,
+            "instructions": [
+                "1. Save this script to your Thoth device",
+                "2. Ensure flwr and torch are installed: pip install flwr torch torchvision",
+                "3. Ensure thoth_fl_utils module is available with load_local_data, get_model, train_model, evaluate_model",
+                "4. Run the script: python thoth_fl_client.py",
+                "5. The device will connect to the FL server and participate in training",
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate client script: {str(e)}")
+
+
+# ============================================================================
+# ENDPOINTS - DETAILED ROUND AND CLIENT METRICS
+# ============================================================================
+
+@router.get("/sessions/{session_id}/rounds", response_model=Dict[str, Any])
+async def get_session_rounds(
+    session_id: str,
+    include_client_metrics: bool = Query(False, description="Include per-client metrics for each round"),
+):
+    """Get detailed per-round metrics for an FL session."""
+    try:
+        session = fl_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        
+        rounds_data = []
+        for round_num in sorted(session.round_metrics.keys()):
+            metrics = session.round_metrics[round_num]
+            round_info = {
+                "round_num": metrics.round_num,
+                "global_loss": metrics.loss,
+                "global_accuracy": metrics.accuracy,
+                "participating_clients": metrics.participating_clients,
+                "avg_loss": metrics.avg_loss,
+                "avg_accuracy": metrics.avg_accuracy,
+                "min_accuracy": metrics.min_accuracy,
+                "max_accuracy": metrics.max_accuracy,
+                "std_accuracy": metrics.std_accuracy,
+                "aggregation_time_ms": metrics.aggregation_time,
+                "round_duration_ms": metrics.round_duration_ms,
+                "communication_cost": metrics.communication_cost,
+                "convergence_rate": metrics.convergence_rate,
+                "fairness_index": metrics.fairness_index,
+                "round_start_time": metrics.round_start_time.isoformat() if metrics.round_start_time else None,
+                "round_end_time": metrics.round_end_time.isoformat() if metrics.round_end_time else None,
+                "selected_clients": metrics.selected_clients,
+                "failed_clients": metrics.failed_clients,
+                "timestamp": metrics.timestamp.isoformat(),
+            }
+            
+            if include_client_metrics and metrics.client_metrics:
+                round_info["client_metrics"] = {
+                    client_id: {
+                        "train_loss": cm.train_loss,
+                        "train_accuracy": cm.train_accuracy,
+                        "val_loss": cm.val_loss,
+                        "val_accuracy": cm.val_accuracy,
+                        "num_samples": cm.num_samples,
+                        "training_time_ms": cm.training_time_ms,
+                        "communication_time_ms": cm.communication_time_ms,
+                    }
+                    for client_id, cm in metrics.client_metrics.items()
+                }
+            
+            rounds_data.append(round_info)
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "total_rounds": len(rounds_data),
+            "current_round": session.current_round,
+            "rounds": rounds_data
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get round metrics: {str(e)}")
+
+
+@router.get("/sessions/{session_id}/rounds/{round_num}", response_model=Dict[str, Any])
+async def get_round_details(session_id: str, round_num: int):
+    """Get detailed metrics for a specific round."""
+    try:
+        session = fl_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        
+        if round_num not in session.round_metrics:
+            raise HTTPException(status_code=404, detail=f"Round {round_num} not found")
+        
+        metrics = session.round_metrics[round_num]
+        
+        client_details = []
+        for client_id, cm in metrics.client_metrics.items():
+            client_details.append({
+                "client_id": client_id,
+                "train_loss": cm.train_loss,
+                "train_accuracy": cm.train_accuracy,
+                "val_loss": cm.val_loss,
+                "val_accuracy": cm.val_accuracy,
+                "num_samples": cm.num_samples,
+                "training_time_ms": cm.training_time_ms,
+                "communication_time_ms": cm.communication_time_ms,
+                "model_size_bytes": cm.model_size_bytes,
+                "timestamp": cm.timestamp.isoformat(),
+            })
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "round": {
+                "round_num": metrics.round_num,
+                "global_loss": metrics.loss,
+                "global_accuracy": metrics.accuracy,
+                "participating_clients": metrics.participating_clients,
+                "avg_loss": metrics.avg_loss,
+                "avg_accuracy": metrics.avg_accuracy,
+                "min_accuracy": metrics.min_accuracy,
+                "max_accuracy": metrics.max_accuracy,
+                "std_accuracy": metrics.std_accuracy,
+                "aggregation_time_ms": metrics.aggregation_time,
+                "round_duration_ms": metrics.round_duration_ms,
+                "round_start_time": metrics.round_start_time.isoformat() if metrics.round_start_time else None,
+                "round_end_time": metrics.round_end_time.isoformat() if metrics.round_end_time else None,
+                "selected_clients": metrics.selected_clients,
+                "failed_clients": metrics.failed_clients,
+            },
+            "client_metrics": client_details
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get round details: {str(e)}")
+
+
+@router.get("/sessions/{session_id}/clients/{client_id}/history", response_model=Dict[str, Any])
+async def get_client_history(session_id: str, client_id: str):
+    """Get training history for a specific client across all rounds."""
+    try:
+        session = fl_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        
+        if client_id not in session.clients:
+            raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
+        
+        client = session.clients[client_id]
+        
+        # Collect per-round metrics for this client
+        round_history = []
+        for round_num, metrics in sorted(session.round_metrics.items()):
+            if client_id in metrics.client_metrics:
+                cm = metrics.client_metrics[client_id]
+                round_history.append({
+                    "round_num": round_num,
+                    "train_loss": cm.train_loss,
+                    "train_accuracy": cm.train_accuracy,
+                    "val_loss": cm.val_loss,
+                    "val_accuracy": cm.val_accuracy,
+                    "num_samples": cm.num_samples,
+                    "training_time_ms": cm.training_time_ms,
+                    "timestamp": cm.timestamp.isoformat(),
+                })
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "client": {
+                "client_id": client.client_id,
+                "device_id": client.device_id,
+                "data_samples": client.data_samples,
+                "is_remote": client.is_remote,
+                "remote_address": client.remote_address,
+                "rounds_participated": client.rounds_participated,
+                "rounds_failed": client.rounds_failed,
+                "contribution_score": client.contribution_score,
+                "total_training_time_ms": client.total_training_time_ms,
+                "avg_accuracy": client.avg_accuracy,
+                "best_accuracy": client.best_accuracy,
+                "connection_status": client.connection_status,
+            },
+            "round_history": round_history
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get client history: {str(e)}")

@@ -109,7 +109,17 @@ from .visualization import (
 )
 
 # Session manager
-from .session import FLSessionManager, FLSession, FLClient, SessionStatus, fl_manager
+from .session import FLSessionManager, FLSession, FLClient, SessionStatus, fl_manager, RoundMetrics, ClientRoundMetrics
+
+# Remote device support for distributed FL
+# Reference: https://flower.ai/docs/framework/how-to-run-flower-using-docker.html
+from .remote_client import (
+    RemoteFLDevice,
+    RemoteDeviceManager,
+    DeviceStatus,
+    remote_device_manager,
+    generate_client_script,
+)
 
 __all__ = [
     # Config
@@ -172,4 +182,12 @@ __all__ = [
     "FLClient",
     "SessionStatus",
     "fl_manager",
+    "RoundMetrics",
+    "ClientRoundMetrics",
+    # Remote devices
+    "RemoteFLDevice",
+    "RemoteDeviceManager",
+    "DeviceStatus",
+    "remote_device_manager",
+    "generate_client_script",
 ]

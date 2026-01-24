@@ -29,6 +29,19 @@ ENV PYTHONPATH="/app"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Ray configuration for Docker containers
+# Reference: https://docs.ray.io/en/latest/ray-core/configure.html
+# Fixes: "Detecting docker specified CPUs" warning
+ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
+# Fixes: Accelerator visible devices warning when num_gpus=0
+ENV RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+# Disable metrics agent to fix "Failed to establish connection to metrics exporter agent" errors
+ENV RAY_DISABLE_MEMORY_MONITOR=1
+# Use /tmp for object store when /dev/shm is limited (Railway containers have small /dev/shm)
+ENV RAY_OBJECT_STORE_MEMORY=100000000
+# Disable dashboard to reduce resource usage
+ENV RAY_DISABLE_DASHBOARD=1
+
 # Install only runtime dependencies (no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \

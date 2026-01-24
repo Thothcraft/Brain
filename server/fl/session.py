@@ -2,12 +2,19 @@
 
 This module provides the FLSessionManager class that integrates all FL components
 and manages the lifecycle of FL training sessions.
+
+Flower Documentation References:
+- Simulations: https://flower.ai/docs/framework/how-to-run-simulations.html
+- Docker deployment: https://flower.ai/docs/framework/how-to-run-flower-using-docker.html
+- Ray backend: https://docs.ray.io/en/latest/ray-core/configure.html
 """
 
 import asyncio
 import logging
+import os
 import uuid
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -49,8 +56,24 @@ class SessionStatus(str, Enum):
 
 
 @dataclass
+class ClientRoundMetrics:
+    """Metrics for a single client in a single round."""
+    client_id: str
+    round_num: int
+    train_loss: float = 0.0
+    train_accuracy: float = 0.0
+    val_loss: float = 0.0
+    val_accuracy: float = 0.0
+    num_samples: int = 0
+    training_time_ms: float = 0.0
+    communication_time_ms: float = 0.0
+    model_size_bytes: int = 0
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
 class RoundMetrics:
-    """Metrics for a single FL round."""
+    """Metrics for a single FL round with detailed per-client tracking."""
     round_num: int
     loss: float
     accuracy: float
@@ -66,20 +89,35 @@ class RoundMetrics:
     communication_cost: float = 0.0
     convergence_rate: float = 0.0
     fairness_index: float = 1.0
+    round_start_time: Optional[datetime] = None
+    round_end_time: Optional[datetime] = None
+    round_duration_ms: float = 0.0
+    client_metrics: Dict[str, ClientRoundMetrics] = field(default_factory=dict)
+    selected_clients: List[str] = field(default_factory=list)
+    failed_clients: List[str] = field(default_factory=list)
 
 
 @dataclass
 class FLClient:
-    """State of a federated learning client."""
+    """State of a federated learning client with comprehensive tracking."""
     client_id: str
     device_id: str
     data_samples: int = 0
     compute_capability: float = 1.0
     is_active: bool = True
+    is_remote: bool = False  # True if this is a remote Thoth device
+    remote_address: Optional[str] = None  # IP:port for remote clients
     rounds_participated: List[int] = field(default_factory=list)
+    rounds_failed: List[int] = field(default_factory=list)
     contribution_score: float = 0.0
     metrics_history: List[Dict[str, Any]] = field(default_factory=list)
+    per_round_metrics: Dict[int, ClientRoundMetrics] = field(default_factory=dict)
     last_update: datetime = field(default_factory=datetime.now)
+    total_training_time_ms: float = 0.0
+    total_communication_time_ms: float = 0.0
+    avg_accuracy: float = 0.0
+    best_accuracy: float = 0.0
+    connection_status: str = "connected"  # connected, disconnected, timeout
 
 
 @dataclass
@@ -424,22 +462,48 @@ class FLSessionManager:
                 config=FlwrServerConfig(num_rounds=_num_rounds)
             )
         
+        # Configure Ray environment for Docker/container environments
+        # Reference: https://docs.ray.io/en/latest/ray-core/configure.html
+        def configure_ray_env():
+            """Set Ray environment variables to suppress warnings in containers."""
+            os.environ.setdefault("RAY_DISABLE_DOCKER_CPU_WARNING", "1")
+            os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
+            os.environ.setdefault("RAY_DISABLE_MEMORY_MONITOR", "1")
+            # Limit object store memory for containers with small /dev/shm
+            os.environ.setdefault("RAY_OBJECT_STORE_MEMORY", "100000000")
+            # Disable metrics exporter to avoid connection errors
+            os.environ.setdefault("RAY_METRICS_EXPORT_PORT", "-1")
+        
         # Run simulation in thread
         def run_fl():
             try:
+                configure_ray_env()
                 logger.info(f"[Session {_session_id_short}] Starting Flower simulation")
+                logger.info(f"[Session {_session_id_short}] Config: {_num_partitions} clients, {_num_rounds} rounds")
                 
                 server_app = ServerApp(server_fn=server_fn)
                 client_app = ClientApp(client_fn=client_fn)
+                
+                # Backend config with Ray initialization args to suppress warnings
+                # Reference: https://flower.ai/docs/framework/how-to-run-simulations.html
+                backend_config = {
+                    "client_resources": {"num_cpus": 1, "num_gpus": 0.0},
+                    "init_args": {
+                        "include_dashboard": False,
+                        "_metrics_export_port": -1,  # Disable metrics export
+                        "configure_logging": False,
+                        "logging_level": logging.WARNING,
+                    }
+                }
                 
                 run_simulation(
                     server_app=server_app,
                     client_app=client_app,
                     num_supernodes=_num_partitions,
-                    backend_config={"client_resources": {"num_cpus": 1, "num_gpus": 0.0}},
+                    backend_config=backend_config,
                 )
                 
-                logger.info(f"[Session {_session_id_short}] Simulation completed")
+                logger.info(f"[Session {_session_id_short}] Simulation completed successfully")
                 
             except Exception as e:
                 logger.error(f"[Session {_session_id_short}] Simulation failed: {e}")
