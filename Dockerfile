@@ -43,6 +43,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy only necessary application code (exclude tests, docs, etc.)
 COPY server/ ./server/
+COPY aiagent/ ./aiagent/
 COPY run.py .
 COPY start.sh .
 COPY Procfile .
