@@ -37,6 +37,7 @@ from server.endpoints.figure_endpoints import router as figure_router
 from server.endpoints.fl_endpoints import router as fl_router
 from server.endpoints.report_endpoints import router as report_router
 from server.endpoints.validation_endpoints import router as validation_router
+from server.endpoints.plotting_api import router as plotting_router
 
 # Create main router
 router = APIRouter()
@@ -62,6 +63,7 @@ router.include_router(figure_router)             # /figures/* (Publication-ready
 router.include_router(fl_router)                 # /fl/* (Flower Federated Learning)
 router.include_router(report_router)             # /reports/* (Training reports and shareable views)
 router.include_router(validation_router)         # /validation/* (Data validation and file type detection)
+router.include_router(plotting_router)           # /plotting/* (Plot generation and export)
 
 # ============================================================================
 # MODULAR ENDPOINTS LOADED

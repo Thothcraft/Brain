@@ -264,12 +264,64 @@ class File(Base):
     """First few lines of the file for quick preview (max ~10KB)"""
     data_type = Column("data_type", String(50), nullable=True)
     """Detected data type: 'csi', 'imu', 'sensor', etc."""
+    folder_id = Column("folder_id", Integer, ForeignKey("folder.folder_id"), nullable=True, index=True)
+    """Foreign key to the folder containing this file (nullable for root files)"""
+    labels = Column("labels", Text, nullable=True)
+    """JSON array of labels assigned to this file"""
     
     # Relationships
     user = relationship("User", back_populates="files")
     """Relationship to the User who owns this file"""
     file_device_updates = relationship("FileDeviceUpdate", back_populates="file")
     """Relationship to FileDeviceUpdate objects for this file"""
+    folder = relationship("Folder", back_populates="files")
+    """Relationship to the Folder containing this file"""
+
+
+class Folder(Base):
+    """Folder model for organizing files.
+    
+    Attributes:
+        folderId: Unique identifier for the folder
+        name: Name of the folder
+        userId: Foreign key to the user who owns the folder
+        parent_id: Foreign key to parent folder (nullable for root folders)
+        created_at: Timestamp when the folder was created
+        updated_at: Timestamp when the folder was last updated
+    """
+    __tablename__ = "folder"
+    folderId = Column("folder_id", Integer, primary_key=True, autoincrement=True, index=True)
+    """Unique identifier for the folder"""
+    name = Column("name", String(255), nullable=False)
+    """Name of the folder"""
+    userId = Column("user_id", Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    """Foreign key to the user who owns the folder"""
+    parent_id = Column("parent_id", Integer, ForeignKey("folder.folder_id"), nullable=True, index=True)
+    """Foreign key to parent folder (nullable for root folders)"""
+    created_at = Column("created_at", DateTime, default=datetime.utcnow)
+    """Timestamp when the folder was created"""
+    updated_at = Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    """Timestamp when the folder was last updated"""
+    description = Column("description", Text, nullable=True)
+    """Optional description of the folder"""
+    
+    # Relationships
+    user = relationship("User", backref="folders")
+    """Relationship to the User who owns this folder"""
+    files = relationship("File", back_populates="folder")
+    """Relationship to files in this folder"""
+    children = relationship("Folder", backref="parent", remote_side=[folderId])
+    """Relationship to child folders"""
+    
+    def to_dict(self):
+        return {
+            "id": self.folderId,
+            "name": self.name,
+            "parent_id": self.parent_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "description": self.description,
+        }
 
 
 class Query(Base):

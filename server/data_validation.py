@@ -923,31 +923,30 @@ class DataLoaderRegistry:
     
     @classmethod
     def detect_file_type(cls, content: bytes, filename: str) -> FileType:
-        """Detect file type from content and filename."""
-        ext = os.path.splitext(filename)[1].lower()
+        """Detect file type from content and filename.
         
-        # Check by extension first
-        if ext in [".png", ".jpeg", ".jpg", ".gif", ".bmp", ".webp", ".tiff", ".heic"]:
-            return FileType.IMAGE
-        elif ext in [".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"]:
-            return FileType.VIDEO
-        elif ext in [".json", ".jsonl"]:
-            return FileType.IMU
-        elif ext == ".csv":
-            # Distinguish between CSI and general CSV
-            try:
-                text = content.decode('utf-8', errors='ignore')[:2000]
-                if 'CSI_DATA' in text or ('[' in text and ']' in text):
-                    # Check for CSI array pattern
-                    lines = text.split('\n')
-                    for line in lines[1:5]:
-                        if '[' in line and ']' in line:
-                            return FileType.CSI
-                return FileType.GENERAL_CSV
-            except:
-                return FileType.GENERAL_CSV
+        Uses content-based detection (extension + first-line analysis) instead of
+        filename conventions. CSI files are identified by their specific header:
+        type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data
+        """
+        from server.file_type_detector import detect_file_type as detect_type, DetectedFileType
         
-        return FileType.UNKNOWN
+        # Use the new content-based detection
+        detection = detect_type(content, filename)
+        
+        # Map DetectedFileType to FileType
+        type_mapping = {
+            DetectedFileType.CSI: FileType.CSI,
+            DetectedFileType.GENERAL_CSV: FileType.GENERAL_CSV,
+            DetectedFileType.IMU: FileType.IMU,
+            DetectedFileType.IMAGE: FileType.IMAGE,
+            DetectedFileType.VIDEO: FileType.VIDEO,
+            DetectedFileType.AUDIO: FileType.UNKNOWN,  # No AUDIO in FileType enum
+            DetectedFileType.NUMPY: FileType.UNKNOWN,  # No NUMPY in FileType enum
+            DetectedFileType.UNKNOWN: FileType.UNKNOWN,
+        }
+        
+        return type_mapping.get(detection.detected_type, FileType.UNKNOWN)
     
     @classmethod
     def validate_file(cls, content: bytes, filename: str, metadata: Optional[Dict] = None) -> ValidationResult:

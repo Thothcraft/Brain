@@ -228,23 +228,66 @@ async def upload_file_simple(
                     "message": "File already exists"
                 }
         
-        # Create file metadata
+        # Detect file type using content-based analysis (extension + first-line)
+        from server.file_type_detector import detect_file_type, DetectedFileType
+        
+        detection = detect_file_type(content_bytes[:8192], request.filename)
+        
+        # Map detected type to data_type string
+        type_to_data_type = {
+            DetectedFileType.CSI: "csi",
+            DetectedFileType.GENERAL_CSV: "csv",
+            DetectedFileType.IMU: "imu",
+            DetectedFileType.IMAGE: "image",
+            DetectedFileType.VIDEO: "video",
+            DetectedFileType.AUDIO: "audio",
+        }
+        data_type = type_to_data_type.get(detection.detected_type, "unknown")
+        
+        # Create file metadata with detection results
         file_metadata = {
             "original_filename": request.filename,
             "content_type": content_type,
             "upload_timestamp": datetime.now().isoformat(),
             "device_id": request.device_id,
             "user_id": current_user.userId,
-            "is_base64_encoded": request.is_base64
+            "is_base64_encoded": request.is_base64,
+            # Detection metadata
+            "detected_type": detection.detected_type.value,
+            "detection_confidence": detection.confidence,
+            "detection_method": detection.detection_method,
+            "is_csi": detection.is_csi,
+            # User-fillable fields (empty by default)
+            "labels": [],
+            "primary_label": "",
+            "description": "",
+            "subject_id": "",
+            "environment": "",
+            "activity": "",
         }
         
-        # Generate sample content and detect data type for quick preview
+        # Add CSI-specific metadata
+        if detection.is_csi:
+            file_metadata["csi_array_length"] = detection.csi_array_length
+            file_metadata["header_columns"] = detection.header_columns
+        
+        # Add CSV column info for general CSV
+        if detection.detected_type == DetectedFileType.GENERAL_CSV:
+            file_metadata["header_columns"] = detection.header_columns
+            file_metadata["column_types"] = detection.statistics.get("column_types", {})
+        
+        # Add validation statistics
+        if detection.statistics:
+            file_metadata["statistics"] = detection.statistics
+        
+        log_response(200, f"Detected type for {request.filename}: {detection.detected_type.value} (confidence={detection.confidence})", "/file/upload")
+        
+        # Generate sample content for quick preview
         sample_content = None
-        data_type = None
         try:
             from server.ml_training import generate_file_sample
-            sample_content, data_type = generate_file_sample(content_bytes, request.filename)
-            log_response(200, f"Generated sample for {request.filename}: type={data_type}, sample_len={len(sample_content) if sample_content else 0}", "/file/upload")
+            sample_content, _ = generate_file_sample(content_bytes, request.filename)
+            log_response(200, f"Generated sample for {request.filename}: sample_len={len(sample_content) if sample_content else 0}", "/file/upload")
         except Exception as sample_err:
             log_error(f"Failed to generate file sample: {sample_err}")
         
@@ -409,23 +452,66 @@ async def upload_file_multipart(
         # Determine content type
         content_type = file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
         
-        # Create file metadata
+        # Detect file type using content-based analysis (extension + first-line)
+        from server.file_type_detector import detect_file_type, DetectedFileType
+        
+        detection = detect_file_type(content_bytes[:8192], filename)
+        
+        # Map detected type to data_type string
+        type_to_data_type = {
+            DetectedFileType.CSI: "csi",
+            DetectedFileType.GENERAL_CSV: "csv",
+            DetectedFileType.IMU: "imu",
+            DetectedFileType.IMAGE: "image",
+            DetectedFileType.VIDEO: "video",
+            DetectedFileType.AUDIO: "audio",
+        }
+        data_type = type_to_data_type.get(detection.detected_type, "unknown")
+        
+        # Create file metadata with detection results
         file_metadata = {
             "original_filename": filename,
             "content_type": content_type,
             "upload_timestamp": datetime.now().isoformat(),
             "device_id": device_id,
             "user_id": current_user.userId,
-            "upload_method": "multipart"
+            "upload_method": "multipart",
+            # Detection metadata
+            "detected_type": detection.detected_type.value,
+            "detection_confidence": detection.confidence,
+            "detection_method": detection.detection_method,
+            "is_csi": detection.is_csi,
+            # User-fillable fields (empty by default)
+            "labels": [],
+            "primary_label": "",
+            "description": "",
+            "subject_id": "",
+            "environment": "",
+            "activity": "",
         }
         
-        # Generate sample content and detect data type for quick preview
+        # Add CSI-specific metadata
+        if detection.is_csi:
+            file_metadata["csi_array_length"] = detection.csi_array_length
+            file_metadata["header_columns"] = detection.header_columns
+        
+        # Add CSV column info for general CSV
+        if detection.detected_type == DetectedFileType.GENERAL_CSV:
+            file_metadata["header_columns"] = detection.header_columns
+            file_metadata["column_types"] = detection.statistics.get("column_types", {})
+        
+        # Add validation statistics
+        if detection.statistics:
+            file_metadata["statistics"] = detection.statistics
+        
+        logger.info(f"Detected type for {filename}: {detection.detected_type.value} (confidence={detection.confidence})")
+        
+        # Generate sample content for quick preview
         sample_content = None
-        data_type = None
         try:
             from server.ml_training import generate_file_sample
-            sample_content, data_type = generate_file_sample(content_bytes, filename)
-            logger.info(f"Generated sample for {filename}: type={data_type}, sample_len={len(sample_content) if sample_content else 0}")
+            sample_content, _ = generate_file_sample(content_bytes, filename)
+            logger.info(f"Generated sample for {filename}: sample_len={len(sample_content) if sample_content else 0}")
         except Exception as sample_err:
             logger.warning(f"Failed to generate file sample: {sample_err}")
         
@@ -946,4 +1032,290 @@ async def upload_file_from_device(
         db.rollback()
         log_error(f"Error uploading file from device: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+
+# ============================================================================
+# FILE METADATA ENDPOINTS
+# ============================================================================
+
+from pydantic import BaseModel, Field
+from typing import List
+
+class FileMetadataRequest(BaseModel):
+    """Request model for updating file metadata."""
+    labels: Optional[List[str]] = Field(None, description="List of labels for the file")
+    primary_label: Optional[str] = Field(None, description="Primary classification label")
+    description: Optional[str] = Field(None, description="File description")
+    subject_id: Optional[str] = Field(None, description="Subject identifier")
+    environment: Optional[str] = Field(None, description="Environment description")
+    activity: Optional[str] = Field(None, description="Activity label")
+
+
+@router.get("/{file_id}/metadata")
+async def get_file_metadata(
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get metadata for a file including auto-detected type and user labels.
+    
+    Returns both auto-detected metadata (file type, statistics) and user-provided
+    metadata (labels, description, etc.).
+    
+    Args:
+        file_id: The file ID
+        
+    Returns:
+        Dict containing file metadata
+    """
+    try:
+        log_request_start(f"/file/{file_id}/metadata", "GET", None, None, current_user.userId)
+        
+        # Get the file
+        file = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
+        ).first()
+        
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Get file content for type detection
+        content = None
+        if file.content:
+            content = file.content
+        elif file.storage_path:
+            # Try to get from storage
+            try:
+                from server.utils.supabase_storage import download_file_sync, BUCKET_FILES
+                success, result = download_file_sync(BUCKET_FILES, file.storage_path)
+                if success:
+                    content = result
+            except Exception as e:
+                log_error(f"Failed to download file for metadata: {e}")
+        
+        # Detect file type
+        from server.file_type_detector import detect_file_type, create_brain_metadata
+        
+        metadata_response = {
+            "file_id": file.fileId,
+            "filename": file.filename,
+            "size": file.size,
+            "content_type": file.content_type,
+            "uploaded_at": file.uploaded_at.isoformat() if file.uploaded_at else None,
+            "data_type": file.data_type,
+        }
+        
+        # Add detection results if we have content
+        if content:
+            detection = detect_file_type(content[:8192], file.filename)
+            metadata_response["detected_type"] = detection.detected_type.value
+            metadata_response["detection_confidence"] = detection.confidence
+            metadata_response["detection_method"] = detection.detection_method
+            metadata_response["is_csi"] = detection.is_csi
+            
+            if detection.header_columns:
+                metadata_response["header_columns"] = detection.header_columns
+            if detection.statistics:
+                metadata_response["statistics"] = detection.statistics
+        
+        # Parse existing metadata from file_hash
+        existing_metadata = {}
+        if file.file_hash:
+            try:
+                existing_metadata = json.loads(file.file_hash)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Add user-provided metadata
+        metadata_response["labels"] = existing_metadata.get("labels", [])
+        metadata_response["primary_label"] = existing_metadata.get("primary_label", "")
+        metadata_response["description"] = existing_metadata.get("description", "")
+        metadata_response["subject_id"] = existing_metadata.get("subject_id", "")
+        metadata_response["environment"] = existing_metadata.get("environment", "")
+        metadata_response["activity"] = existing_metadata.get("activity", "")
+        
+        log_response(200, f"Retrieved metadata for file {file_id}", f"/file/{file_id}/metadata")
+        return {
+            "success": True,
+            "metadata": metadata_response
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error getting file metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get file metadata: {str(e)}")
+
+
+@router.put("/{file_id}/metadata")
+async def update_file_metadata(
+    file_id: int,
+    request: FileMetadataRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Update user-provided metadata for a file.
+    
+    Allows users to add labels, description, and other metadata to files.
+    Labels can be used when adding files to datasets.
+    
+    Args:
+        file_id: The file ID
+        request: Metadata update request
+        
+    Returns:
+        Dict containing updated metadata
+    """
+    try:
+        log_request_start(f"/file/{file_id}/metadata", "PUT", None, None, current_user.userId)
+        
+        # Get the file
+        file = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
+        ).first()
+        
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Parse existing metadata
+        existing_metadata = {}
+        if file.file_hash:
+            try:
+                existing_metadata = json.loads(file.file_hash)
+            except (json.JSONDecodeError, TypeError):
+                existing_metadata = {}
+        
+        # Update metadata fields
+        if request.labels is not None:
+            existing_metadata["labels"] = request.labels
+        if request.primary_label is not None:
+            existing_metadata["primary_label"] = request.primary_label
+        if request.description is not None:
+            existing_metadata["description"] = request.description
+        if request.subject_id is not None:
+            existing_metadata["subject_id"] = request.subject_id
+        if request.environment is not None:
+            existing_metadata["environment"] = request.environment
+        if request.activity is not None:
+            existing_metadata["activity"] = request.activity
+        
+        # Add update timestamp
+        existing_metadata["metadata_updated_at"] = datetime.now().isoformat()
+        
+        # Save back to file_hash
+        file.file_hash = json.dumps(existing_metadata)
+        db.commit()
+        
+        log_response(200, f"Updated metadata for file {file_id}", f"/file/{file_id}/metadata")
+        return {
+            "success": True,
+            "message": "File metadata updated successfully",
+            "metadata": existing_metadata
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log_error(f"Error updating file metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update file metadata: {str(e)}")
+
+
+@router.post("/{file_id}/detect-type")
+async def detect_file_type_endpoint(
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Detect and return the file type based on content analysis.
+    
+    Uses extension + first-line content analysis to determine file type.
+    CSI files are identified by their specific header format.
+    General CSV files have columns treated as time-dependent features.
+    
+    Args:
+        file_id: The file ID
+        
+    Returns:
+        Dict containing detection results
+    """
+    try:
+        log_request_start(f"/file/{file_id}/detect-type", "POST", None, None, current_user.userId)
+        
+        # Get the file
+        file = db.query(File).filter(
+            File.fileId == file_id,
+            File.userId == current_user.userId
+        ).first()
+        
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Get file content
+        content = None
+        if file.content:
+            content = file.content
+        elif file.storage_path:
+            try:
+                from server.utils.supabase_storage import download_file_sync, BUCKET_FILES
+                success, result = download_file_sync(BUCKET_FILES, file.storage_path)
+                if success:
+                    content = result
+            except Exception as e:
+                log_error(f"Failed to download file for detection: {e}")
+        
+        if not content:
+            raise HTTPException(status_code=400, detail="File content not available for detection")
+        
+        # Detect file type
+        from server.file_type_detector import detect_file_type, DetectedFileType
+        
+        detection = detect_file_type(content[:8192], file.filename)
+        
+        # Update file's data_type field
+        type_to_data_type = {
+            DetectedFileType.CSI: "csi",
+            DetectedFileType.GENERAL_CSV: "csv",
+            DetectedFileType.IMU: "imu",
+            DetectedFileType.IMAGE: "image",
+            DetectedFileType.VIDEO: "video",
+            DetectedFileType.AUDIO: "audio",
+        }
+        
+        new_data_type = type_to_data_type.get(detection.detected_type, "unknown")
+        if file.data_type != new_data_type:
+            file.data_type = new_data_type
+            db.commit()
+        
+        response = {
+            "success": True,
+            "file_id": file_id,
+            "filename": file.filename,
+            "detected_type": detection.detected_type.value,
+            "confidence": detection.confidence,
+            "detection_method": detection.detection_method,
+            "is_csi": detection.is_csi,
+        }
+        
+        if detection.header_columns:
+            response["header_columns"] = detection.header_columns
+        if detection.csi_array_length:
+            response["csi_array_length"] = detection.csi_array_length
+        if detection.statistics:
+            response["statistics"] = detection.statistics
+        if detection.errors:
+            response["errors"] = detection.errors
+        if detection.warnings:
+            response["warnings"] = detection.warnings
+        
+        log_response(200, f"Detected type for file {file_id}: {detection.detected_type.value}", f"/file/{file_id}/detect-type")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error detecting file type: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to detect file type: {str(e)}")
 

@@ -124,6 +124,11 @@ class CNN1DMaxModel(BaseDLModel):
         self.res2 = self._make_res_block(128, 256)
         self.res3 = self._make_res_block(256, 512)
         
+        # Projection layers for residual connections (1x1 conv to match channels)
+        self.proj1 = nn.Conv1d(64, 128, kernel_size=1)
+        self.proj2 = nn.Conv1d(128, 256, kernel_size=1)
+        self.proj3 = nn.Conv1d(256, 512, kernel_size=1)
+        
         self.pool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Sequential(
             nn.Linear(512, 256),
@@ -146,12 +151,20 @@ class CNN1DMaxModel(BaseDLModel):
         x = x.permute(0, 2, 1)
         x = torch.relu(self.bn1(self.input_conv(x)))
         
-        # Residual connections with projection
-        identity = nn.functional.interpolate(x, size=x.size(-1)//2)
+        # Residual block 1 with projection
+        identity1 = nn.functional.max_pool1d(self.proj1(x), 2)
         x = nn.functional.max_pool1d(self.res1(x), 2)
+        x = torch.relu(x + identity1)
         
+        # Residual block 2 with projection
+        identity2 = nn.functional.max_pool1d(self.proj2(x), 2)
         x = nn.functional.max_pool1d(self.res2(x), 2)
+        x = torch.relu(x + identity2)
+        
+        # Residual block 3 with projection
+        identity3 = nn.functional.max_pool1d(self.proj3(x), 2)
         x = nn.functional.max_pool1d(self.res3(x), 2)
+        x = torch.relu(x + identity3)
         
         x = self.pool(x).squeeze(-1)
         return self.fc(x)

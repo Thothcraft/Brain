@@ -544,55 +544,164 @@ class ReportPlotter:
         return self._fig_to_base64(fig)
     
     def generate_all_plots(self, report: TrainingReport) -> Dict[str, str]:
-        """Generate all applicable plots for a report."""
+        """Generate all applicable plots for a report.
+        
+        Dynamically adapts based on model type:
+        - DL models (CNN, LSTM, etc.): Show epoch-based training curves
+        - ML models (SVM, RF, etc.): Show metrics comparison (no epoch curves)
+        - FL models: Show convergence across rounds
+        """
         plots = {}
         
         if not MATPLOTLIB_AVAILABLE:
             logger.warning("matplotlib not available, skipping plot generation")
             return plots
         
-        # Training curves
-        plot = self.plot_training_curves(report)
-        if plot:
-            plots["training_curves"] = plot
+        # Detect model category for appropriate plotting
+        model_category = self._detect_model_category(report.model_type)
         
-        # Confusion matrix
+        # Training curves - ONLY for DL models with epochs
+        if model_category == "dl_iterative" and report.epoch_metrics:
+            plot = self.plot_training_curves(report)
+            if plot:
+                plots["training_curves"] = plot
+        elif model_category == "ml_single_fit":
+            # For ML models, generate metrics summary instead of epoch curves
+            plot = self.plot_ml_metrics_summary(report)
+            if plot:
+                plots["metrics_summary"] = plot
+        
+        # Confusion matrix - applicable to all classification models
         plot = self.plot_confusion_matrix(report)
         if plot:
             plots["confusion_matrix"] = plot
         
-        # ROC curves
+        # ROC curves - applicable to all classification models
         plot = self.plot_roc_curves(report)
         if plot:
             plots["roc_curves"] = plot
         
-        # PR curves
+        # PR curves - applicable to all classification models
         plot = self.plot_pr_curves(report)
         if plot:
             plots["pr_curves"] = plot
         
-        # Class metrics
+        # Class metrics - applicable to all classification models
         plot = self.plot_class_metrics(report)
         if plot:
             plots["class_metrics"] = plot
         
-        # FL convergence
+        # FL convergence - only for federated learning
         if report.training_mode == "federated":
             plot = self.plot_fl_convergence(report)
             if plot:
                 plots["fl_convergence"] = plot
         
-        # Learning rate
-        plot = self.plot_learning_rate_schedule(report)
-        if plot:
-            plots["learning_rate"] = plot
+        # Learning rate - only for DL models with epochs
+        if model_category == "dl_iterative":
+            plot = self.plot_learning_rate_schedule(report)
+            if plot:
+                plots["learning_rate"] = plot
         
-        # Timing breakdown
+        # Timing breakdown - applicable to all models
         plot = self.plot_timing_breakdown(report)
         if plot:
             plots["timing_breakdown"] = plot
         
         return plots
+    
+    def _detect_model_category(self, model_type: str) -> str:
+        """Detect model category for appropriate plotting.
+        
+        Returns:
+            'dl_iterative': DL models with epoch-based training
+            'ml_single_fit': ML models without epochs
+            'fl_rounds': Federated learning models
+            'clustering': Unsupervised clustering models
+        """
+        model_lower = model_type.lower().replace('-', '_').replace(' ', '_')
+        
+        # ML models that don't have epoch-based training
+        ml_single_fit = {
+            'svm', 'svc', 'random_forest', 'rf', 'knn', 'k_nearest_neighbors',
+            'logistic_regression', 'lr', 'decision_tree', 'dt', 'gradient_boosting',
+            'gb', 'adaboost', 'naive_bayes', 'nb', 'linear_svm', 'rbf_svm',
+            'xgboost', 'lightgbm', 'catboost'
+        }
+        
+        # Clustering models
+        clustering = {
+            'kmeans', 'k_means', 'dbscan', 'hierarchical', 'agglomerative',
+            'spectral_clustering', 'mean_shift', 'optics', 'birch'
+        }
+        
+        # Check for FL
+        if 'fed' in model_lower or 'fl_' in model_lower:
+            return "fl_rounds"
+        
+        # Check for clustering
+        for cluster_model in clustering:
+            if cluster_model in model_lower:
+                return "clustering"
+        
+        # Check for ML single-fit
+        for ml_model in ml_single_fit:
+            if ml_model in model_lower:
+                return "ml_single_fit"
+        
+        # Default to DL iterative
+        return "dl_iterative"
+    
+    def plot_ml_metrics_summary(self, report: TrainingReport) -> str:
+        """Plot metrics summary for ML models (no epoch curves).
+        
+        Creates a bar chart showing final metrics instead of epoch-based curves.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return ""
+        
+        fig, ax = plt.subplots(figsize=(8, 5))
+        
+        # Collect metrics
+        metrics = {
+            'Accuracy': report.final_train_accuracy if report.final_train_accuracy else 0,
+        }
+        
+        # Add per-class metrics if available
+        if report.class_metrics:
+            avg_precision = np.mean([m.precision for m in report.class_metrics])
+            avg_recall = np.mean([m.recall for m in report.class_metrics])
+            avg_f1 = np.mean([m.f1_score for m in report.class_metrics])
+            metrics['Precision'] = avg_precision
+            metrics['Recall'] = avg_recall
+            metrics['F1-Score'] = avg_f1
+        
+        if report.final_val_accuracy:
+            metrics['Val Accuracy'] = report.final_val_accuracy
+        
+        x = np.arange(len(metrics))
+        values = list(metrics.values())
+        labels = list(metrics.keys())
+        
+        bars = ax.bar(x, values, color=self.COLORS[:len(values)], alpha=0.8, edgecolor='black')
+        
+        # Add value labels
+        for bar, val in zip(bars, values):
+            height = bar.get_height()
+            ax.annotate(f'{val:.3f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                       xytext=(0, 3), textcoords="offset points",
+                       ha='center', va='bottom', fontsize=10)
+        
+        ax.set_ylabel('Score')
+        ax.set_xlabel('Metric')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_ylim([0, 1.15])
+        ax.set_title(f'{report.model_type} - Performance Metrics')
+        
+        plt.tight_layout()
+        return self._fig_to_base64(fig)
 
 
 # ============================================================================

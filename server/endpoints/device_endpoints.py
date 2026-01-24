@@ -72,16 +72,30 @@ def get_client_ip(request: Request) -> str:
     return ip if validate_ip_address(ip) else None
 
 
-def _scan_device_files(device_uuid: str, data_path: str = None) -> List[Dict[str, Any]]:
+def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata: bool = False) -> List[Dict[str, Any]]:
     """Scan device data directory for files and return file information.
+    
+    Uses content-based file type detection (extension + first-line analysis)
+    instead of filename prefix conventions. Files are identified by:
+    1. File extension
+    2. First-line/header content analysis for CSV files
+    3. Content structure analysis for JSON files
     
     Args:
         device_uuid: Device UUID for identification
         data_path: Path to scan (defaults to thoth/data if None)
+        require_metadata: If True, only return files with valid .meta.json
     
     Returns:
-        List of file information dictionaries
+        List of file information dictionaries with detected types
     """
+    from server.file_type_detector import (
+        detect_file_type, 
+        DetectedFileType,
+        get_thoth_metadata_filename,
+        validate_thoth_metadata
+    )
+    
     if not data_path:
         # Default to thoth/data relative to current working directory
         data_path = os.path.join("thoth", "data")
@@ -93,45 +107,108 @@ def _scan_device_files(device_uuid: str, data_path: str = None) -> List[Dict[str
             logger.warning(f"Data directory not found: {data_path}")
             return files
         
+        data_dir = Path(data_path)
+        
         # Scan for files in the data directory
-        for file_path in Path(data_path).iterdir():
+        for file_path in data_dir.iterdir():
             if file_path.is_file():
+                filename = file_path.name
+                
+                # Skip metadata files, config files, and system files
+                if filename.endswith('.meta.json') or filename.endswith('.brain.json'):
+                    continue
+                if filename in ['device_id.txt']:
+                    continue
+                if filename.startswith('.'):
+                    continue
+                
                 try:
                     stat = file_path.stat()
                     
-                    # Determine file type
-                    file_type = 'other'
-                    filename = file_path.name.lower()
-                    if filename.startswith('imu_'):
-                        file_type = 'imu'
-                    elif filename.startswith('csi_'):
-                        file_type = 'csi'
-                    elif filename.startswith('mfcw_'):
-                        file_type = 'mfcw'
-                    elif filename.startswith('img_'):
-                        file_type = 'img'
-                    elif filename.startswith('vid_'):
-                        file_type = 'vid'
-                    elif filename.endswith('.json'):
-                        file_type = 'json'
-                    elif filename.endswith('.csv'):
-                        file_type = 'csv'
+                    # Check for corresponding thoth metadata file
+                    meta_filename = get_thoth_metadata_filename(filename)
+                    meta_path = data_dir / meta_filename
+                    has_metadata = meta_path.exists()
+                    
+                    # If metadata is required but missing, skip this file
+                    if require_metadata and not has_metadata:
+                        logger.debug(f"Skipping {filename}: no metadata file")
+                        continue
+                    
+                    # Read file content for type detection (first 8KB)
+                    with open(file_path, 'rb') as f:
+                        content_sample = f.read(8192)
+                    
+                    # Detect file type using content-based analysis
+                    detection = detect_file_type(content_sample, filename)
+                    
+                    # Map detected type to file_type string
+                    type_mapping = {
+                        DetectedFileType.CSI: 'csi',
+                        DetectedFileType.GENERAL_CSV: 'csv',
+                        DetectedFileType.IMU: 'imu',
+                        DetectedFileType.IMAGE: 'image',
+                        DetectedFileType.VIDEO: 'video',
+                        DetectedFileType.AUDIO: 'audio',
+                        DetectedFileType.NUMPY: 'numpy',
+                        DetectedFileType.UNKNOWN: 'other',
+                    }
+                    file_type = type_mapping.get(detection.detected_type, 'other')
+                    
+                    # Load thoth metadata if available
+                    thoth_metadata = None
+                    metadata_valid = False
+                    if has_metadata:
+                        is_valid, thoth_metadata, meta_errors = validate_thoth_metadata(meta_path)
+                        metadata_valid = is_valid
+                        if not is_valid:
+                            logger.warning(f"Invalid metadata for {filename}: {meta_errors}")
                     
                     file_info = {
-                        'name': file_path.name,
+                        'name': filename,
                         'size': stat.st_size,
                         'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
                         'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         'type': file_type,
-                        'path': str(file_path)
+                        'path': str(file_path),
+                        # New fields from content-based detection
+                        'detected_type': detection.detected_type.value,
+                        'detection_confidence': detection.confidence,
+                        'detection_method': detection.detection_method,
+                        'has_metadata': has_metadata,
+                        'metadata_valid': metadata_valid,
                     }
+                    
+                    # Add CSI-specific info if detected
+                    if detection.is_csi:
+                        file_info['is_csi'] = True
+                        file_info['csi_array_length'] = detection.csi_array_length
+                        file_info['header_columns'] = detection.header_columns
+                    
+                    # Add CSV column info for general CSV
+                    if detection.detected_type == DetectedFileType.GENERAL_CSV:
+                        file_info['header_columns'] = detection.header_columns
+                        file_info['column_types'] = detection.statistics.get('column_types', {})
+                    
+                    # Add validation statistics
+                    if detection.statistics:
+                        file_info['statistics'] = detection.statistics
+                    
+                    # Include thoth metadata labels if available
+                    if thoth_metadata:
+                        labels = thoth_metadata.get('labels', {})
+                        if labels:
+                            file_info['activity'] = labels.get('activity')
+                            file_info['subject_id'] = labels.get('subject_id')
+                            file_info['class_name'] = labels.get('class_name')
+                    
                     files.append(file_info)
                     
                 except Exception as e:
                     logger.error(f"Error scanning file {file_path}: {e}")
                     continue
         
-        logger.info(f"Scanned {len(files)} files in {data_path}")
+        logger.info(f"Scanned {len(files)} files in {data_path} (content-based detection)")
         
     except Exception as e:
         logger.error(f"Error scanning device files: {e}")
