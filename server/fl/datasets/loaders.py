@@ -175,7 +175,7 @@ def apply_transforms(batch: Dict[str, Any], dataset: FLDataset, train: bool = Tr
     """Apply PyTorch transforms to a batch from FederatedDataset.
     
     Args:
-        batch: Batch from HuggingFace dataset
+        batch: Batch from HuggingFace dataset (can be single example or batch)
         dataset: Dataset type for selecting correct transforms
         train: Whether this is training data
     
@@ -185,13 +185,25 @@ def apply_transforms(batch: Dict[str, Any], dataset: FLDataset, train: bool = Tr
     image_key = DATASET_IMAGE_KEY.get(dataset, "image")
     transforms = get_transforms(dataset, train=train)
     
-    # Apply transforms to each image
-    transformed_images = [transforms(img) for img in batch[image_key]]
-    batch["img"] = torch.stack(transformed_images)
+    images = batch[image_key]
+    
+    # Handle both single examples and batches
+    # with_transform can pass either a single image or a list of images
+    if isinstance(images, list):
+        # Batch of images
+        transformed_images = [transforms(img) for img in images]
+        batch["img"] = torch.stack(transformed_images)
+    else:
+        # Single image (PIL Image or similar)
+        batch["img"] = transforms(images)
     
     # Ensure labels are tensors
-    if "label" in batch and not isinstance(batch["label"], torch.Tensor):
-        batch["label"] = torch.tensor(batch["label"])
+    if "label" in batch:
+        labels = batch["label"]
+        if isinstance(labels, list):
+            batch["label"] = torch.tensor(labels)
+        elif not isinstance(labels, torch.Tensor):
+            batch["label"] = torch.tensor(labels)
     
     return batch
 
