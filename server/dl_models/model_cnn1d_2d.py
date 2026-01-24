@@ -2,6 +2,14 @@
 
 1D Convolutional models for time-series in nano, mini, and max variants.
 Input shape: (batch, seq_len, features) - Sequential/time-series data
+
+Verification References:
+- PyTorch Conv1d: https://pytorch.org/docs/stable/generated/torch.nn.Conv1d.html
+- PyTorch MaxPool1d: https://pytorch.org/docs/stable/generated/torch.nn.MaxPool1d.html
+- PyTorch BatchNorm1d: https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm1d.html
+- PyTorch AdaptiveAvgPool1d: https://pytorch.org/docs/stable/generated/torch.nn.AdaptiveAvgPool1d.html
+- Parameters verified: in_channels, out_channels, kernel_size, padding, stride
+- Note: Input permuted from (batch, seq_len, features) to (batch, features, seq_len) for Conv1d
 """
 
 import torch

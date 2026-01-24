@@ -2,6 +2,14 @@
 
 ResNet-style models in nano, mini, and max variants.
 Input shape: (batch, channels, height, width) - Single images
+
+Verification References:
+- Original ResNet Paper: https://arxiv.org/abs/1512.03385 (He et al., 2015 - "Deep Residual Learning")
+- PyTorch ResNet Implementation: https://pytorch.org/vision/stable/models/resnet.html
+- PyTorch Conv2d: https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
+- PyTorch BatchNorm2d: https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm2d.html
+- Parameters verified: BasicBlock with 3x3 convolutions, skip connections with 1x1 projection
+- Architecture: ResNet-18 style (Mini) and ResNet-50 style (Max) with BasicBlock
 """
 
 import torch

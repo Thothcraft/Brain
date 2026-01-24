@@ -1,6 +1,13 @@
 """FedAdam - Adaptive Federated Optimization with Adam.
 
 Paper: Reddi et al., 2021 - "Adaptive Federated Optimization"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedAdam.html
+- Original Paper: https://arxiv.org/abs/2003.00295
+- Parameters verified: eta (server learning rate), eta_l (client learning rate),
+  beta_1 (first moment decay, default 0.9), beta_2 (second moment decay, default 0.99),
+  tau (controls adaptivity, default 1e-9)
 """
 
 from typing import Dict, Any

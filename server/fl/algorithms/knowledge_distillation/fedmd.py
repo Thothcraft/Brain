@@ -5,6 +5,13 @@ Each client trains on their private data and shares predictions on the public da
 
 Reference: Li & Wang, "FedMD: Heterogeneous Federated Learning via Model Distillation" (2019)
 
+Verification References:
+- Original Paper: https://arxiv.org/abs/1910.03581
+- Implementation based on Flower Strategy interface
+- Parameters verified: temperature (softmax temperature), num_classes, public_dataset_size,
+  digest_epochs (private data training), revisit_epochs (distillation training)
+- Note: Custom implementation following FedMD paper; not a built-in Flower strategy
+
 Key Features:
 - Two-phase training: private data + public data distillation
 - Clients can have completely different model architectures

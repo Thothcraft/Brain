@@ -2,6 +2,14 @@
 
 Bidirectional LSTM models in nano, mini, and max variants.
 Input shape: (batch, seq_len, features) - Sequential/time-series data
+
+Verification References:
+- PyTorch LSTM: https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html
+- Original LSTM Paper: https://www.bioinf.jku.at/publications/older/2604.pdf (Hochreiter & Schmidhuber, 1997)
+- PyTorch MultiheadAttention: https://pytorch.org/docs/stable/generated/torch.nn.MultiheadAttention.html
+- Parameters verified: input_size, hidden_size, num_layers, batch_first, dropout, bidirectional
+- Note: batch_first=True means input shape is (batch, seq_len, features)
+- Note: Bidirectional doubles output hidden size (hidden_size * 2)
 """
 
 import torch

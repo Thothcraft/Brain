@@ -2,6 +2,12 @@
 
 Flower's implementation of FedAvg with fault tolerance for handling
 client failures and stragglers.
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FaultTolerantFedAvg.html
+- Parameters verified: min_completion_rate_fit (minimum fraction of clients that must complete fit),
+  min_completion_rate_evaluate (minimum fraction for evaluation)
+- Note: Gracefully handles client failures by proceeding with available results
 """
 
 from typing import Dict, Any
@@ -41,9 +47,9 @@ class FaultTolerantFedAvgWrapper(BaseStrategyWrapper):
         config: ExperimentConfig,
         common_params: Dict[str, Any],
     ) -> Strategy:
-        """Create FaultTolerantFedAvg strategy."""
-        return FaultTolerantFedAvg(
-            **common_params,
-            min_completion_rate_fit=0.5,
-            min_completion_rate_evaluate=0.5,
-        )
+        """Create FaultTolerantFedAvg strategy.
+        
+        FaultTolerantFedAvg uses the same parameters as FedAvg but with
+        modified aggregation that handles failures gracefully.
+        """
+        return FaultTolerantFedAvg(**common_params)

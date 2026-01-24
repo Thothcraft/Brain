@@ -7,6 +7,13 @@ a different model architecture.
 Reference: Lin et al., "Ensemble Distillation for Robust Model Fusion 
 in Federated Learning" (NeurIPS 2020)
 
+Verification References:
+- Original Paper: https://arxiv.org/abs/2006.07242
+- Implementation based on Flower Strategy interface
+- Parameters verified: temperature (softmax temperature for distillation),
+  distillation_weight (weight for KD loss), num_classes, public_dataset_size
+- Note: Custom implementation following FedDF paper; not a built-in Flower strategy
+
 Key Features:
 - Clients share soft labels on a public dataset
 - Server aggregates soft labels (ensemble averaging)

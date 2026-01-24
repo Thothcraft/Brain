@@ -2,6 +2,13 @@
 
 Paper: Blanchard et al., 2017 - "Machine Learning with Adversaries: Byzantine
 Tolerant Gradient Descent"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.Krum.html
+- Original Paper: https://arxiv.org/abs/1703.02757
+- Parameters verified: num_malicious_clients (expected number of Byzantine clients),
+  num_clients_to_keep (number of closest updates to select, 1 for single Krum)
+- Note: Requires n >= 2f + 3 where f is num_malicious_clients
 """
 
 from typing import Dict, Any

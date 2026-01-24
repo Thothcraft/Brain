@@ -2,6 +2,12 @@
 
 Paper: Hsu et al., 2019 - "Measuring the Effects of Non-Identical Data Distribution
 for Federated Visual Classification"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedAvgM.html
+- Original Paper: https://arxiv.org/abs/1909.06335
+- Parameters verified: server_momentum (momentum factor for server-side updates, default 0.0)
+- Note: Extends FedAvg with momentum to accelerate convergence
 """
 
 from typing import Dict, Any

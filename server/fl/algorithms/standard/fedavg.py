@@ -2,6 +2,13 @@
 
 Paper: McMahan et al., 2017 - "Communication-Efficient Learning of Deep Networks
 from Decentralized Data"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedAvg.html
+- Original Paper: https://arxiv.org/abs/1602.05629
+- Parameters verified: fraction_fit, fraction_evaluate, min_fit_clients, min_evaluate_clients,
+  min_available_clients, evaluate_fn, on_fit_config_fn, on_evaluate_config_fn,
+  accept_failures, initial_parameters, fit_metrics_aggregation_fn, evaluate_metrics_aggregation_fn
 """
 
 from typing import Dict, Any

@@ -1,6 +1,13 @@
 """DPFedAvgAdaptive - Differential Privacy with Adaptive Gradient Clipping.
 
 Paper: Andrew et al., 2021 - "Differentially Private Learning with Adaptive Clipping"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.DPFedAvgAdaptive.html
+- Original Paper: https://arxiv.org/abs/1905.03871
+- Parameters verified: strategy (base strategy), num_sampled_clients,
+  init_clip_norm (initial clipping threshold), noise_multiplier, target_clipped_quantile
+- Note: Deprecated in Flower; consider DifferentialPrivacyServerSideAdaptiveClipping
 """
 
 from typing import Dict, Any
@@ -40,10 +47,17 @@ class DPFedAvgAdaptiveWrapper(BaseStrategyWrapper):
         config: ExperimentConfig,
         common_params: Dict[str, Any],
     ) -> Strategy:
-        """Create DPFedAvgAdaptive strategy."""
+        """Create DPFedAvgAdaptive strategy.
+        
+        Note: DPFedAvgAdaptive is deprecated in Flower and will be removed.
+        Consider using DifferentialPrivacyServerSideAdaptiveClipping instead.
+        """
         server = config.server
+        privacy = config.privacy
         base_strategy = FedAvg(**common_params)
         return DPFedAvgAdaptive(
             strategy=base_strategy,
             num_sampled_clients=server.min_fit_clients,
+            init_clip_norm=privacy.max_grad_norm,
+            noise_multiplier=privacy.noise_multiplier,
         )

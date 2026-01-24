@@ -2,6 +2,12 @@
 
 Flower's implementation of federated XGBoost using bagging for
 ensemble aggregation.
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedXgbBagging.html
+- Flower XGBoost Tutorial: https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html
+- Parameters verified: evaluate_function (server-side evaluation), plus standard strategy params
+- Note: Uses evaluate_function instead of evaluate_fn for XGBoost compatibility
 """
 
 from typing import Dict, Any
@@ -41,5 +47,10 @@ class FedXgbBaggingWrapper(BaseStrategyWrapper):
         config: ExperimentConfig,
         common_params: Dict[str, Any],
     ) -> Strategy:
-        """Create FedXgbBagging strategy."""
-        return FedXgbBagging(**common_params)
+        """Create FedXgbBagging strategy.
+        
+        Note: FedXgbBagging uses evaluate_function instead of evaluate_fn.
+        """
+        # Extract evaluate_fn and rename to evaluate_function for XGBoost strategy
+        evaluate_function = common_params.pop("evaluate_fn", None)
+        return FedXgbBagging(evaluate_function=evaluate_function, **common_params)

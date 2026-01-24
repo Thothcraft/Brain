@@ -2,6 +2,13 @@
 
 Bidirectional GRU models in nano, mini, and max variants.
 Input shape: (batch, seq_len, features) - Sequential/time-series data
+
+Verification References:
+- PyTorch GRU: https://pytorch.org/docs/stable/generated/torch.nn.GRU.html
+- Original GRU Paper: https://arxiv.org/abs/1406.1078 (Cho et al., 2014)
+- Parameters verified: input_size, hidden_size, num_layers, batch_first, dropout, bidirectional
+- Note: batch_first=True means input shape is (batch, seq_len, features)
+- Note: Bidirectional doubles output hidden size (hidden_size * 2)
 """
 
 import torch

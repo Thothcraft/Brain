@@ -2,6 +2,15 @@
 
 3D Convolutional models for video/volumetric data in nano, mini, and max variants.
 Input shape: (batch, num_frames, channels, height, width) - Video/volumetric data
+
+Verification References:
+- PyTorch Conv3d: https://pytorch.org/docs/stable/generated/torch.nn.Conv3d.html
+- PyTorch MaxPool3d: https://pytorch.org/docs/stable/generated/torch.nn.MaxPool3d.html
+- PyTorch BatchNorm3d: https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm3d.html
+- PyTorch AdaptiveAvgPool3d: https://pytorch.org/docs/stable/generated/torch.nn.AdaptiveAvgPool3d.html
+- 3D ResNet Paper: https://arxiv.org/abs/1711.11248 (Hara et al., 2017)
+- Parameters verified: in_channels, out_channels, kernel_size (3-tuple), stride, padding, bias
+- Note: Input permuted from (batch, frames, C, H, W) to (batch, C, frames, H, W) for Conv3d
 """
 
 import torch

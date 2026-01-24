@@ -2,6 +2,13 @@
 
 Paper: McMahan et al., 2018 - "Learning Differentially Private Recurrent
 Language Models"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.DPFedAvgFixed.html
+- Original Paper: https://arxiv.org/abs/1710.06963
+- Parameters verified: strategy (base strategy to wrap), num_sampled_clients,
+  clip_norm (gradient clipping threshold), noise_multiplier (Gaussian noise scale)
+- Note: Provides (ε, δ)-differential privacy guarantees
 """
 
 from typing import Dict, Any

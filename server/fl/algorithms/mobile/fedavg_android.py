@@ -1,6 +1,12 @@
 """FedAvgAndroid - FedAvg Optimized for Android Mobile Devices.
 
 Flower's implementation of FedAvg optimized for Android mobile devices.
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedAvgAndroid.html
+- Flower Android SDK: https://flower.ai/docs/framework/how-to-run-flower-on-android.html
+- Parameters verified: Same as FedAvg (fraction_fit, fraction_evaluate, etc.)
+- Note: Optimized for Android TFLite models; may not be available in all Flower versions
 """
 
 import logging

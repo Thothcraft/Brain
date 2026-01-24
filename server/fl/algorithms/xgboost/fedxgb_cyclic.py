@@ -2,6 +2,12 @@
 
 Flower's implementation of federated XGBoost using cyclic training
 across clients.
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedXgbCyclic.html
+- Flower XGBoost Tutorial: https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html
+- Parameters verified: evaluate_function (server-side evaluation), plus standard strategy params
+- Note: Clients train sequentially in cyclic order; uses evaluate_function instead of evaluate_fn
 """
 
 from typing import Dict, Any
@@ -41,5 +47,9 @@ class FedXgbCyclicWrapper(BaseStrategyWrapper):
         config: ExperimentConfig,
         common_params: Dict[str, Any],
     ) -> Strategy:
-        """Create FedXgbCyclic strategy."""
-        return FedXgbCyclic(**common_params)
+        """Create FedXgbCyclic strategy.
+        
+        Note: FedXgbCyclic uses evaluate_function instead of evaluate_fn.
+        """
+        evaluate_function = common_params.pop("evaluate_fn", None)
+        return FedXgbCyclic(evaluate_function=evaluate_function, **common_params)

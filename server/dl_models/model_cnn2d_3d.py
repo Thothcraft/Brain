@@ -2,6 +2,14 @@
 
 2D Convolutional models for images in nano, mini, and max variants.
 Input shape: (batch, channels, height, width) - Single images
+
+Verification References:
+- PyTorch Conv2d: https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
+- PyTorch MaxPool2d: https://pytorch.org/docs/stable/generated/torch.nn.MaxPool2d.html
+- PyTorch BatchNorm2d: https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm2d.html
+- PyTorch AdaptiveAvgPool2d: https://pytorch.org/docs/stable/generated/torch.nn.AdaptiveAvgPool2d.html
+- ResNet Architecture: https://arxiv.org/abs/1512.03385 (He et al., 2015)
+- Parameters verified: in_channels, out_channels, kernel_size, stride, padding, bias
 """
 
 import torch

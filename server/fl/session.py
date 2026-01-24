@@ -358,53 +358,76 @@ class FLSessionManager:
             evaluate_fn=get_evaluate_fn(global_model)
         )
         
-        # Client function
+        # Extract ALL values as primitive types to avoid Ray serialization issues
+        # Ray's cloudpickle cannot serialize thread locks, enums may also cause issues
+        _device_type = str(self.device.type)
+        _local_epochs = int(config.client.local_epochs)
+        _learning_rate = float(config.client.learning_rate)
+        _num_partitions = int(config.data.num_partitions)
+        _dataset_value = config.data.dataset.value  # Convert enum to string
+        _partition_strategy_value = config.data.partition_strategy.value  # Convert enum to string
+        _batch_size = int(config.client.local_batch_size)
+        _dirichlet_alpha = float(config.data.dirichlet_alpha)
+        _seed = int(config.seed)
+        _is_fedprox = config.algorithm == FLAlgorithm.FEDPROX
+        _proximal_mu = float(config.algorithm_params.proximal_mu) if _is_fedprox else 0.0
+        _model_value = str(config.model.value)
+        _num_classes = int(num_classes)
+        _in_channels = int(in_channels)
+        
+        # Client function - only captures serializable primitives (strings, ints, floats, bools)
         def client_fn(context):
             partition_id = context.node_config.get("partition-id", 0)
             if isinstance(partition_id, str):
                 partition_id = int(partition_id)
             
+            # Import enums inside the function to reconstruct from string values
+            from .core.config import FLDataset, PartitionStrategy
+            
             trainloader, valloader = load_partition(
                 partition_id=partition_id,
-                num_partitions=config.data.num_partitions,
-                dataset=config.data.dataset,
-                partition_strategy=config.data.partition_strategy,
-                batch_size=config.client.local_batch_size,
-                dirichlet_alpha=config.data.dirichlet_alpha,
-                seed=config.seed,
+                num_partitions=_num_partitions,
+                dataset=FLDataset(_dataset_value),
+                partition_strategy=PartitionStrategy(_partition_strategy_value),
+                batch_size=_batch_size,
+                dirichlet_alpha=_dirichlet_alpha,
+                seed=_seed,
             )
             
             client_model = get_model(
-                config.model.value,
-                num_classes=num_classes,
-                in_channels=in_channels
+                _model_value,
+                num_classes=_num_classes,
+                in_channels=_in_channels
             )
             
-            proximal_mu = 0.0
-            if config.algorithm == FLAlgorithm.FEDPROX:
-                proximal_mu = config.algorithm_params.proximal_mu
+            # Recreate device inside the function to avoid serialization issues
+            client_device = torch.device(_device_type)
             
             return FlowerClient(
                 model=client_model,
                 trainloader=trainloader,
                 valloader=valloader,
-                local_epochs=config.client.local_epochs,
-                learning_rate=config.client.learning_rate,
-                device=self.device,
-                proximal_mu=proximal_mu,
+                local_epochs=_local_epochs,
+                learning_rate=_learning_rate,
+                device=client_device,
+                proximal_mu=_proximal_mu,
             )
         
-        # Server function
+        # Extract server config as primitives
+        _num_rounds = int(config.server.num_rounds)
+        _session_id_short = session.session_id[:8]
+        
+        # Server function - strategy is created fresh, not serialized
         def server_fn(context):
             return ServerAppComponents(
                 strategy=strategy,
-                config=FlwrServerConfig(num_rounds=config.server.num_rounds)
+                config=FlwrServerConfig(num_rounds=_num_rounds)
             )
         
         # Run simulation in thread
         def run_fl():
             try:
-                logger.info(f"[Session {session.session_id[:8]}] Starting Flower simulation")
+                logger.info(f"[Session {_session_id_short}] Starting Flower simulation")
                 
                 server_app = ServerApp(server_fn=server_fn)
                 client_app = ClientApp(client_fn=client_fn)
@@ -412,14 +435,14 @@ class FLSessionManager:
                 run_simulation(
                     server_app=server_app,
                     client_app=client_app,
-                    num_supernodes=config.data.num_partitions,
+                    num_supernodes=_num_partitions,
                     backend_config={"client_resources": {"num_cpus": 1, "num_gpus": 0.0}},
                 )
                 
-                logger.info(f"[Session {session.session_id[:8]}] Simulation completed")
+                logger.info(f"[Session {_session_id_short}] Simulation completed")
                 
             except Exception as e:
-                logger.error(f"[Session {session.session_id[:8]}] Simulation failed: {e}")
+                logger.error(f"[Session {_session_id_short}] Simulation failed: {e}")
                 session.error_message = str(e)
                 session.status = SessionStatus.FAILED
         

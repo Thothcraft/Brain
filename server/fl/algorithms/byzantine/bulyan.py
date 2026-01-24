@@ -2,6 +2,12 @@
 
 Paper: Mhamdi et al., 2018 - "The Hidden Vulnerability of Distributed Learning
 in Byzantium"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.Bulyan.html
+- Original Paper: https://arxiv.org/abs/1802.07927
+- Parameters verified: num_malicious_clients (expected number of Byzantine clients)
+- Note: Requires n >= 4f + 3 where f is num_malicious_clients; combines Krum selection with trimmed mean
 """
 
 from typing import Dict, Any

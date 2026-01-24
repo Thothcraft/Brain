@@ -1,6 +1,13 @@
 """MLP Models for 1D Input (batch, features).
 
 Multi-Layer Perceptron models in nano, mini, and max variants.
+
+Verification References:
+- PyTorch Linear: https://pytorch.org/docs/stable/generated/torch.nn.Linear.html
+- PyTorch BatchNorm1d: https://pytorch.org/docs/stable/generated/torch.nn.BatchNorm1d.html
+- PyTorch Dropout: https://pytorch.org/docs/stable/generated/torch.nn.Dropout.html
+- PyTorch ReLU: https://pytorch.org/docs/stable/generated/torch.nn.ReLU.html
+- Parameters verified: in_features, out_features for Linear; num_features for BatchNorm1d; p for Dropout
 """
 
 import torch

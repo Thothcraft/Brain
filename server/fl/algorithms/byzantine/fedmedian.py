@@ -2,6 +2,12 @@
 
 Paper: Yin et al., 2018 - "Byzantine-Robust Distributed Learning: Towards Optimal
 Statistical Rates"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedMedian.html
+- Original Paper: https://arxiv.org/abs/1803.01498
+- Parameters verified: Uses standard FedAvg parameters (no additional params needed)
+- Note: Computes coordinate-wise median instead of mean for Byzantine robustness
 """
 
 from typing import Dict, Any

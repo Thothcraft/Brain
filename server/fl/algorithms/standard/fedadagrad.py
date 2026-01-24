@@ -1,6 +1,12 @@
 """FedAdagrad - Adaptive FL with Adagrad Optimizer.
 
 Paper: Reddi et al., 2021 - "Adaptive Federated Optimization"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedAdagrad.html
+- Original Paper: https://arxiv.org/abs/2003.00295
+- Parameters verified: eta (server learning rate), eta_l (client learning rate),
+  tau (controls adaptivity/numerical stability, default 1e-9)
 """
 
 from typing import Dict, Any

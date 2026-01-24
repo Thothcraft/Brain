@@ -2,6 +2,14 @@
 
 Transformer encoder models in nano, mini, and max variants.
 Input shape: (batch, seq_len, features) - Sequential/time-series data
+
+Verification References:
+- Original Transformer Paper: https://arxiv.org/abs/1706.03762 (Vaswani et al., 2017 - "Attention Is All You Need")
+- PyTorch TransformerEncoder: https://pytorch.org/docs/stable/generated/torch.nn.TransformerEncoder.html
+- PyTorch TransformerEncoderLayer: https://pytorch.org/docs/stable/generated/torch.nn.TransformerEncoderLayer.html
+- Positional Encoding: Sinusoidal encoding from original paper (Section 3.5)
+- Parameters verified: d_model, nhead, dim_feedforward, dropout, num_layers, batch_first
+- Note: batch_first=True for PyTorch >= 1.9 compatibility
 """
 
 import torch

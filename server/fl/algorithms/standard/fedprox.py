@@ -1,6 +1,12 @@
 """FedProx - Federated Optimization with Proximal Term.
 
 Paper: Li et al., 2020 - "Federated Optimization in Heterogeneous Networks"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedProx.html
+- Original Paper: https://arxiv.org/abs/1812.06127
+- Parameters verified: proximal_mu (μ parameter for proximal term), plus all FedAvg parameters
+- Note: proximal_mu controls how much local models can deviate from global model
 """
 
 from typing import Dict, Any

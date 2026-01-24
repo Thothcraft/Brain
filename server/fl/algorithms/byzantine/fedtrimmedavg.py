@@ -2,6 +2,12 @@
 
 Paper: Yin et al., 2018 - "Byzantine-Robust Distributed Learning: Towards Optimal
 Statistical Rates"
+
+Verification References:
+- Flower Documentation: https://flower.ai/docs/framework/ref-api/flwr.server.strategy.FedTrimmedAvg.html
+- Original Paper: https://arxiv.org/abs/1803.01498
+- Parameters verified: beta (fraction of extreme values to trim from each end, default 0.2)
+- Note: Trims beta fraction of highest and lowest values before averaging
 """
 
 from typing import Dict, Any
