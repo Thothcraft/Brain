@@ -3,6 +3,7 @@
 import base64
 import json
 import mimetypes
+import os
 import time
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -416,12 +417,22 @@ async def upload_file_multipart(
             user_id=current_user.userId
         )
         
-        filename = file.filename or "unnamed_file"
-        logger.info(f"Starting multipart upload: {filename}")
+        raw_filename = file.filename or "unnamed_file"
+        logger.info(f"Starting multipart upload: {raw_filename}")
         
-        # Basic security check on filename
-        if '..' in filename or '/' in filename or '\\' in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename - no path separators allowed")
+        # Extract base filename from path (frontend may send relative paths like "train/drink.csv")
+        # Use the last component as the actual filename
+        filename = os.path.basename(raw_filename.replace('\\', '/'))
+        if not filename:
+            filename = "unnamed_file"
+        
+        # Store the original relative path for folder organization
+        if relative_path is None and '/' in raw_filename:
+            relative_path = raw_filename
+        
+        # Basic security check on the base filename only
+        if '..' in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename - path traversal not allowed")
         
         # Check for dangerous extensions
         dangerous_extensions = ['.exe', '.bat', '.cmd', '.scr', '.pif', '.com']
