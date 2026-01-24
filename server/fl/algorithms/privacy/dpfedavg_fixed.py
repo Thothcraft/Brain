@@ -13,7 +13,9 @@ Verification References:
 
 from typing import Dict, Any
 
-from flwr.server.strategy import FedAvg, DPFedAvgFixed, Strategy
+from flwr.server.strategy import DPFedAvgFixed, Strategy
+
+from ..standard.fedavg import FedAvgExplicit
 
 from ...core.config import ExperimentConfig, FLAlgorithm
 from ..base import BaseStrategyWrapper, AlgorithmMetadata, register_algorithm
@@ -51,7 +53,7 @@ class DPFedAvgFixedWrapper(BaseStrategyWrapper):
         """Create DPFedAvgFixed strategy."""
         server = config.server
         privacy = config.privacy
-        base_strategy = FedAvg(**common_params)
+        base_strategy = FedAvgExplicit(**common_params)
         return DPFedAvgFixed(
             strategy=base_strategy,
             num_sampled_clients=server.min_fit_clients,

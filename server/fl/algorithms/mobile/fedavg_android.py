@@ -12,7 +12,9 @@ Verification References:
 import logging
 from typing import Dict, Any
 
-from flwr.server.strategy import FedAvg, Strategy
+from flwr.server.strategy import Strategy
+
+from ..standard.fedavg import FedAvgExplicit
 
 from ...core.config import ExperimentConfig, FLAlgorithm
 from ..base import BaseStrategyWrapper, AlgorithmMetadata, register_algorithm
@@ -65,6 +67,6 @@ class FedAvgAndroidWrapper(BaseStrategyWrapper):
         """Create FedAvgAndroid strategy (falls back to FedAvg if unavailable)."""
         if not HAS_FEDAVG_ANDROID:
             logger.warning("FedAvgAndroid not available, falling back to FedAvg")
-            return FedAvg(**common_params)
+            return FedAvgExplicit(**common_params)
         
         return FedAvgAndroid(**common_params)

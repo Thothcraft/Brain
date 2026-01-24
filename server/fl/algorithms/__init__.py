@@ -100,10 +100,12 @@ def create_strategy(
     if wrapper_class is not None:
         return wrapper_class.create_strategy(config, common_params)
     
-    # Fallback to FedAvg for unknown algorithms
-    logger.warning(f"Unknown algorithm {algorithm}, defaulting to FedAvg")
-    from flwr.server.strategy import FedAvg
-    return FedAvg(**common_params)
+    # Unknown algorithm - raise clear error
+    available_algorithms = [algo.value for algo in FLAlgorithm]
+    raise ValueError(
+        f"Unknown FL algorithm: '{algorithm}'. "
+        f"Available algorithms: {', '.join(available_algorithms)}"
+    )
 
 
 def list_algorithms() -> List[Dict[str, Any]]:
