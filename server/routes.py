@@ -31,8 +31,6 @@ from server.endpoints.curriculum_endpoints import router as curriculum_router
 from server.endpoints.dataset_endpoints import router as dataset_router
 from server.endpoints.processing_endpoints import router as processing_router
 from server.endpoints.activity_endpoints import router as activity_router
-from server.endpoints.enhanced_training_endpoints import router as enhanced_training_router
-from server.endpoints.enhanced_processing_endpoints import router as enhanced_processing_router
 from server.endpoints.figure_endpoints import router as figure_router
 from server.endpoints.fl_endpoints import router as fl_router
 from server.endpoints.report_endpoints import router as report_router
@@ -58,8 +56,6 @@ router.include_router(curriculum_router)  # /curriculum/* (Education content)
 router.include_router(dataset_router)     # /datasets/* (Training datasets and cloud training)
 router.include_router(processing_router)  # /processing/* (Data processing pipelines)
 router.include_router(activity_router)    # /activity/* (Activity feed and stats)
-router.include_router(enhanced_training_router)  # /enhanced-training/* (DL/ML training with CSI support)
-router.include_router(enhanced_processing_router) # /enhanced-processing/* (CSI preprocessing pipelines)
 router.include_router(figure_router)             # /figures/* (Publication-ready figure export)
 router.include_router(fl_router)                 # /fl/* (Flower Federated Learning)
 router.include_router(report_router)             # /reports/* (Training reports and shareable views)
