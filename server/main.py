@@ -265,10 +265,18 @@ ALLOWED_ORIGINS = [
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for now to debug
-    allow_credentials=False,  # Must be False when using "*"
-    allow_methods=["*"],  # Allow all methods including OPTIONS
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=ALLOWED_ORIGINS,  # Use specific origins instead of "*"
+    allow_credentials=True,  # Allow credentials for specific origins
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicitly list methods
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "X-CSRF-Token",
+        "X-Request-ID",
+    ],
     expose_headers=[
         "Content-Range",
         "X-Total-Count",
@@ -381,6 +389,24 @@ async def root():
             "openapi_schema": "/openapi.json"
         }
     }
+
+# Global OPTIONS handler for CORS preflight requests
+@app.options("/{path:path}")
+async def options_handler(path: str, request: Request):
+    """Handle CORS preflight requests for all paths."""
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Origin, X-Requested-With, X-CSRF-Token, X-Request-ID",
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Max-Age": "600",
+            }
+        )
+    return Response(status_code=400)
 
 # Include API router without prefix
 app.include_router(router, prefix="")
