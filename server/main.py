@@ -258,8 +258,6 @@ ALLOWED_ORIGINS = [
     "https://thoth-frontend-sable.vercel.app",
     "https://portal-three-rho.vercel.app",  # Research Portal on Vercel
     "https://web-production-d7d37.up.railway.app",  # Backend domain
-    "https://web-production-d7d37.up.railway.app",  # Railway backend URL
-    "https://portal-three-rho.vercel.app",  # Frontend trying to access Railway
 ]
 
 # --------------------------------------------------
@@ -267,8 +265,8 @@ ALLOWED_ORIGINS = [
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,  # Use specific origins to allow credentials
-    allow_credentials=True,  # Allow credentials with specific origins
+    allow_origins=["*"],  # Allow all origins for now to debug
+    allow_credentials=False,  # Must be False when using "*"
     allow_methods=["*"],  # Allow all methods including OPTIONS
     allow_headers=["*"],  # Allow all headers
     expose_headers=[
