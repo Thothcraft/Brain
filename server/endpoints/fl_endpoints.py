@@ -48,6 +48,9 @@ from ..fl import (
     generate_client_script,
     RoundMetrics,
     ClientRoundMetrics,
+    # Participation request system
+    fl_participation_manager,
+    RequestStatus,
 )
 
 router = APIRouter(prefix="/fl", tags=["federated-learning"])
@@ -1508,3 +1511,213 @@ async def get_client_history(session_id: str, client_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get client history: {str(e)}")
+
+
+# ============================================================================
+# ENDPOINTS - FL PARTICIPATION REQUESTS (for Thoth devices)
+# ============================================================================
+
+class CreateParticipationRequestsRequest(BaseModel):
+    """Request to create participation requests for multiple devices."""
+    session_id: str
+    device_ids: List[str]
+
+
+class RespondToRequestRequest(BaseModel):
+    """Request to respond to an FL participation request."""
+    approved: bool
+    rejection_reason: Optional[str] = None
+
+
+@router.post("/participation/create-requests", response_model=Dict[str, Any])
+async def create_participation_requests(request: CreateParticipationRequestsRequest):
+    """Create FL participation requests for selected Thoth devices.
+    
+    This is called when starting an FL session that includes remote Thoth devices.
+    Each device will receive a notification asking for permission to participate.
+    """
+    try:
+        session = fl_manager.get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
+        
+        created_requests = []
+        
+        for device_id in request.device_ids:
+            device = remote_device_manager.get_device(device_id)
+            if not device:
+                logger.warning(f"[FL] Device {device_id} not found, skipping")
+                continue
+            
+            # Estimate duration based on rounds and typical round time
+            estimated_duration = session.config.server.num_rounds * 2  # ~2 min per round estimate
+            
+            fl_request = fl_participation_manager.create_request(
+                session_id=request.session_id,
+                session_name=session.config.name,
+                device_id=device_id,
+                algorithm=session.config.algorithm.value,
+                dataset=session.config.data.dataset.value,
+                num_rounds=session.config.server.num_rounds,
+                estimated_duration_minutes=estimated_duration,
+                data_samples_needed=session.config.data.min_samples_per_client,
+            )
+            
+            created_requests.append(fl_request.to_dict())
+        
+        return {
+            "success": True,
+            "message": f"Created {len(created_requests)} participation requests",
+            "requests": created_requests
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[FL] Failed to create participation requests: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create requests: {str(e)}")
+
+
+@router.get("/participation/pending/{device_id}", response_model=Dict[str, Any])
+async def get_pending_requests(device_id: str):
+    """Get all pending FL participation requests for a device.
+    
+    This endpoint is polled by Thoth devices to check for new FL requests.
+    """
+    try:
+        pending = fl_participation_manager.get_pending_requests(device_id)
+        
+        return {
+            "success": True,
+            "device_id": device_id,
+            "pending_count": len(pending),
+            "requests": [r.to_dict() for r in pending]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get pending requests: {str(e)}")
+
+
+@router.post("/participation/respond/{request_id}", response_model=StandardResponse)
+async def respond_to_request(request_id: str, request: RespondToRequestRequest):
+    """Respond to an FL participation request (approve or reject).
+    
+    Called by Thoth devices when the user responds to the notification.
+    """
+    try:
+        fl_request = fl_participation_manager.get_request(request_id)
+        if not fl_request:
+            raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
+        
+        if fl_request.status != RequestStatus.PENDING:
+            raise HTTPException(status_code=400, detail=f"Request already responded to: {fl_request.status.value}")
+        
+        if request.approved:
+            success = fl_participation_manager.approve_request(request_id)
+            message = "Participation approved"
+        else:
+            success = fl_participation_manager.reject_request(request_id, request.rejection_reason)
+            message = "Participation rejected"
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to process response")
+        
+        return StandardResponse(
+            success=True,
+            message=message,
+            data={
+                "request_id": request_id,
+                "status": fl_request.status.value,
+                "session_id": fl_request.session_id
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to respond to request: {str(e)}")
+
+
+@router.get("/participation/progress/{device_id}", response_model=Dict[str, Any])
+async def get_fl_progress(device_id: str):
+    """Get FL training progress for a device.
+    
+    This endpoint is polled by Thoth devices to get real-time progress updates.
+    """
+    try:
+        # Check if device has an active session
+        active_session_id = fl_participation_manager.get_active_session(device_id)
+        
+        if not active_session_id:
+            return {
+                "success": True,
+                "device_id": device_id,
+                "active": False,
+                "message": "No active FL session"
+            }
+        
+        # Get progress update
+        progress = fl_participation_manager.get_progress_update(device_id)
+        
+        # Also get session info
+        session = fl_manager.get_session(active_session_id)
+        
+        response = {
+            "success": True,
+            "device_id": device_id,
+            "active": True,
+            "session_id": active_session_id,
+        }
+        
+        if progress:
+            response["progress"] = progress.to_dict()
+        
+        if session:
+            response["session"] = {
+                "name": session.config.name,
+                "status": session.status.value,
+                "current_round": session.current_round,
+                "total_rounds": session.total_rounds,
+                "best_accuracy": session.best_accuracy,
+            }
+        
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get progress: {str(e)}")
+
+
+@router.post("/participation/send-progress", response_model=StandardResponse)
+async def send_progress_update(
+    session_id: str,
+    device_id: str,
+    current_round: int,
+    total_rounds: int,
+    status: str,
+    global_accuracy: float = 0.0,
+    global_loss: float = 0.0,
+    device_accuracy: float = 0.0,
+    device_loss: float = 0.0,
+    message: str = "",
+):
+    """Send a progress update to a participating device.
+    
+    Called by the FL session manager to update devices on training progress.
+    """
+    try:
+        update = fl_participation_manager.send_progress_update(
+            session_id=session_id,
+            device_id=device_id,
+            current_round=current_round,
+            total_rounds=total_rounds,
+            status=status,
+            global_accuracy=global_accuracy,
+            global_loss=global_loss,
+            device_accuracy=device_accuracy,
+            device_loss=device_loss,
+            message=message,
+        )
+        
+        return StandardResponse(
+            success=True,
+            message="Progress update sent",
+            data=update.to_dict()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send progress: {str(e)}")

@@ -121,6 +121,15 @@ from .remote_client import (
     generate_client_script,
 )
 
+# FL participation request system for Thoth devices
+from .participation_request import (
+    FLParticipationRequest,
+    FLProgressUpdate,
+    FLParticipationManager,
+    RequestStatus,
+    fl_participation_manager,
+)
+
 __all__ = [
     # Config
     "FLConfig",
@@ -190,4 +199,10 @@ __all__ = [
     "DeviceStatus",
     "remote_device_manager",
     "generate_client_script",
+    # Participation requests
+    "FLParticipationRequest",
+    "FLProgressUpdate",
+    "FLParticipationManager",
+    "RequestStatus",
+    "fl_participation_manager",
 ]
