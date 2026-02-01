@@ -1,13 +1,16 @@
 """Federated Learning Endpoints using Flower Framework.
 
-Comprehensive FL API with:
-- Multiple FL strategies from Flower (FedAvg, FedProx, FedAdam, FedYogi, FedAdagrad, etc.)
-- Byzantine-robust aggregation (Krum, Bulyan, FedMedian, FedTrimmedAvg)
-- Differential privacy support (DPFedAvgAdaptive, DPFedAvgFixed)
-- Fair FL (QFedAvg)
+FL API with custom strategy implementations (no Flower built-ins):
+- FedAvg: Federated Averaging (McMahan et al., 2017)
+- FedProx: FedAvg with proximal term (Li et al., 2020)
+- FedAvgM: FedAvg with server momentum (Hsu et al., 2019)
+- FedXgbBagging: Federated XGBoost with bagging
+
+Features:
 - Built-in datasets via Flower Datasets (CIFAR-10, MNIST, Fashion-MNIST, etc.)
 - Dynamic configuration and parameter control
 - Real-time monitoring and metrics
+- Multi-algorithm selection (creates separate job per algorithm)
 
 Requires: flwr[simulation], flwr-datasets, torch, torchvision
 """
@@ -96,20 +99,16 @@ class ServerConfigRequest(BaseModel):
 
 
 class AlgorithmConfigRequest(BaseModel):
-    """Algorithm-specific hyperparameters."""
+    """Algorithm-specific hyperparameters.
+    
+    Only parameters for supported algorithms (FedAvg, FedProx, FedAvgM, FedXgbBagging):
+    - proximal_mu: FedProx regularization strength
+    - server_momentum: FedAvgM momentum coefficient
+    - server_learning_rate: FedAvgM server learning rate
+    """
     proximal_mu: float = Field(0.01, ge=0.0, le=10.0)
-    server_learning_rate: float = Field(1.0, ge=1e-6, le=100.0)
-    beta_1: float = Field(0.9, ge=0.0, le=1.0)
-    beta_2: float = Field(0.99, ge=0.0, le=1.0)
-    tau: float = Field(1e-3, ge=1e-10, le=1.0)
     server_momentum: float = Field(0.9, ge=0.0, le=1.0)
-    q_param: float = Field(0.2, ge=0.0, le=10.0)
-    byzantine_fraction: float = Field(0.0, ge=0.0, le=0.5)
-    trimmed_mean_beta: float = Field(0.1, ge=0.0, le=0.5)
-    krum_num_closest: int = Field(2, ge=1, le=100)
-    temperature: float = Field(3.0, ge=0.1, le=20.0)
-    distillation_weight: float = Field(0.5, ge=0.0, le=1.0)
-    public_dataset_size: int = Field(5000, ge=100, le=100000)
+    server_learning_rate: float = Field(1.0, ge=1e-6, le=100.0)
 
 
 class DataConfigRequest(BaseModel):
@@ -150,6 +149,25 @@ class CreateFLSessionRequest(BaseModel):
     data: Optional[DataConfigRequest] = None
     privacy: Optional[PrivacyConfigRequest] = None
     monitoring: Optional[MonitoringConfigRequest] = None
+    
+    seed: int = Field(42, ge=0)
+    device: str = Field("auto", pattern="^(auto|cpu|cuda|mps)$")
+
+
+class CreateMultiAlgorithmSessionRequest(BaseModel):
+    """Request to create multiple FL sessions, one per algorithm.
+    
+    This allows selecting multiple algorithms via checkboxes in the UI,
+    and each selected algorithm will create a separate training job.
+    """
+    session_name_prefix: str = Field(..., min_length=1, max_length=80)
+    algorithms: List[str] = Field(..., min_length=1, description="List of algorithm IDs to run")
+    model_architecture: str = "cnn"
+    
+    server: Optional[ServerConfigRequest] = None
+    client: Optional[ClientConfigRequest] = None
+    algorithm_params: Optional[AlgorithmConfigRequest] = None
+    data: Optional[DataConfigRequest] = None
     
     seed: int = Field(42, ge=0)
     device: str = Field("auto", pattern="^(auto|cpu|cuda|mps)$")
@@ -232,22 +250,17 @@ async def create_fl_session(
 ):
     """Create a new Federated Learning session using Flower framework.
     
-    Supports multiple FL strategies from Flower:
-    - **fedavg**: Standard Federated Averaging
+    Supports the following FL strategies (custom implementations, no Flower built-ins):
+    - **fedavg**: Federated Averaging - weighted average of client updates
     - **fedprox**: FedAvg with proximal term for non-IID data
-    - **fedadam**: Adaptive FL with Adam optimizer
-    - **fedyogi**: Adaptive FL with controlled adaptivity
-    - **fedadagrad**: Adaptive FL with Adagrad
-    - **fedavgm**: FedAvg with server momentum
-    - **fedopt**: Generalized federated optimization
-    - **fedmedian**: Byzantine-robust median aggregation
-    - **fedtrimmedavg**: Byzantine-robust trimmed mean
-    - **krum**: Byzantine-robust Krum aggregation
-    - **bulyan**: Byzantine-robust Bulyan aggregation
-    - **qfedavg**: Fair federated learning
-    - **dpfedavg_adaptive**: Differential privacy with adaptive clipping
-    - **dpfedavg_fixed**: Differential privacy with fixed clipping
-    - **fedxgb_bagging**: XGBoost bagging for tree-based FL
+    - **fedavgm**: FedAvg with server-side momentum
+    - **fedxgb_bagging**: Federated XGBoost with bagging aggregation
+    
+    References:
+    - FedAvg: https://arxiv.org/abs/1602.05629
+    - FedProx: https://arxiv.org/abs/1812.06127
+    - FedAvgM: https://arxiv.org/abs/1909.06335
+    - XGBoost: https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html
     """
     try:
         logger.info(f"[FL] Creating session '{request.session_name}' with algorithm={request.algorithm}, "
@@ -282,6 +295,78 @@ async def create_fl_session(
     except Exception as e:
         logger.error(f"[FL] Failed to create session: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create FL session: {str(e)}")
+
+
+@router.post("/sessions/multi", response_model=StandardResponse)
+async def create_multi_algorithm_sessions(
+    request: CreateMultiAlgorithmSessionRequest,
+    background_tasks: BackgroundTasks
+):
+    """Create multiple FL sessions, one per selected algorithm.
+    
+    This endpoint supports multi-select algorithm checkboxes in the UI.
+    Each selected algorithm creates a separate training job with the same
+    configuration but different FL strategy.
+    
+    Supported algorithms:
+    - **fedavg**: Federated Averaging
+    - **fedprox**: FedAvg with proximal term
+    - **fedavgm**: FedAvg with server momentum
+    - **fedxgb_bagging**: Federated XGBoost with bagging
+    """
+    try:
+        # Validate algorithms
+        valid_algorithms = ["fedavg", "fedprox", "fedavgm", "fedxgb_bagging"]
+        invalid = [a for a in request.algorithms if a.lower() not in valid_algorithms]
+        if invalid:
+            raise ValueError(f"Invalid algorithms: {invalid}. Valid: {valid_algorithms}")
+        
+        created_sessions = []
+        
+        for algo in request.algorithms:
+            # Create session name with algorithm suffix
+            session_name = f"{request.session_name_prefix}_{algo}"
+            
+            # Build single session request
+            single_request = CreateFLSessionRequest(
+                session_name=session_name,
+                algorithm=algo.lower(),
+                model_architecture=request.model_architecture,
+                server=request.server,
+                client=request.client,
+                algorithm_params=request.algorithm_params,
+                data=request.data,
+                seed=request.seed,
+                device=request.device,
+            )
+            
+            config = convert_to_fl_config(single_request)
+            session = fl_manager.create_session(config)
+            
+            created_sessions.append({
+                "session_id": session.session_id,
+                "session_name": session_name,
+                "algorithm": algo,
+                "status": session.status,
+            })
+            
+            logger.info(f"[FL] Created session '{session_name}' with {algo}")
+        
+        return StandardResponse(
+            success=True,
+            message=f"Created {len(created_sessions)} FL sessions",
+            data={
+                "sessions": created_sessions,
+                "total_created": len(created_sessions),
+                "algorithms": request.algorithms,
+            }
+        )
+    except ValueError as e:
+        logger.error(f"[FL] Invalid configuration: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[FL] Failed to create sessions: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create FL sessions: {str(e)}")
 
 
 @router.get("/sessions", response_model=Dict[str, Any])
@@ -965,13 +1050,12 @@ async def list_fl_presets():
             "name": "Production",
             "description": "Optimized settings for production deployment",
             "config": {
-                "algorithm": "fedadam",
+                "algorithm": "fedavgm",
                 "model_architecture": "resnet18",
                 "dataset": "cifar10",
                 "num_rounds": 100,
                 "local_epochs": 5,
-                "num_partitions": 10,
-                "differential_privacy": True
+                "num_partitions": 10
             }
         },
         {
@@ -1003,15 +1087,16 @@ async def list_fl_presets():
             }
         },
         {
-            "id": "fair_learning",
-            "name": "Fair Learning",
-            "description": "Optimized for fairness across clients",
+            "id": "xgboost",
+            "name": "XGBoost FL",
+            "description": "Federated XGBoost with bagging aggregation",
             "config": {
-                "algorithm": "qfedavg",
-                "model_architecture": "cnn",
+                "algorithm": "fedxgb_bagging",
+                "model_architecture": "xgboost",
                 "dataset": "cifar10",
-                "q_param": 0.5,
-                "num_rounds": 100
+                "num_rounds": 10,
+                "local_epochs": 1,
+                "num_partitions": 5
             }
         }
     ]
@@ -1039,12 +1124,11 @@ async def apply_fl_preset(
             "client": {"local_epochs": 1}
         },
         "production": {
-            "algorithm": "fedadam",
+            "algorithm": "fedavgm",
             "model_architecture": "resnet18",
             "data": {"dataset": "cifar10", "num_partitions": 10},
             "server": {"num_rounds": 100},
-            "client": {"local_epochs": 5},
-            "privacy": {"differential_privacy": True}
+            "client": {"local_epochs": 5}
         },
         "non_iid": {
             "algorithm": "fedprox",
@@ -1057,15 +1141,14 @@ async def apply_fl_preset(
             "algorithm": "fedavg",
             "model_architecture": "cnn",
             "data": {"dataset": "mnist"},
-            "server": {"num_rounds": 50},
-            "privacy": {"differential_privacy": True, "noise_multiplier": 1.5, "secure_aggregation": True}
+            "server": {"num_rounds": 50}
         },
-        "fair_learning": {
-            "algorithm": "qfedavg",
-            "model_architecture": "cnn",
-            "data": {"dataset": "cifar10"},
-            "server": {"num_rounds": 100},
-            "algorithm_params": {"q_param": 0.5}
+        "xgboost": {
+            "algorithm": "fedxgb_bagging",
+            "model_architecture": "xgboost",
+            "data": {"dataset": "cifar10", "num_partitions": 5},
+            "server": {"num_rounds": 10},
+            "client": {"local_epochs": 1}
         }
     }
     

@@ -2437,7 +2437,7 @@ async def run_full_training(
         raise
     
     # Determine if using ML or DL model
-    is_ml_model = model_type in ['adaboost', 'knn', 'svc', 'xgboost']
+    is_ml_model = model_type in ['adaboost', 'knn', 'svc', 'xgboost', 'random_forest']
     is_dl_model = model_type in ['dl_cnn_lstm', 'cnn_lstm', 'deep_learning']
     
     logger.info(f"Model category: {'ML' if is_ml_model else 'DL' if is_dl_model else 'UNKNOWN'}")

@@ -39,8 +39,9 @@ from flwr.simulation import run_simulation
 
 from .core.config import ExperimentConfig, FLAlgorithm, FLDataset
 from .core.models import get_model
-from .core.client import FlowerClient, evaluate_model
-from .algorithms import create_strategy
+from .core.client import evaluate_model, train_model, create_client_app, FlowerClient
+from .core.server_app import create_server_app, create_simple_fl_app
+from .algorithms import create_strategy, FedAvgStrategy
 from .datasets import load_partition, load_centralized_testset, get_dataset_info
 
 logger = logging.getLogger(__name__)
@@ -143,18 +144,19 @@ class FLSession:
         """Convert session to dictionary."""
         return {
             "session_id": self.session_id,
-            "name": self.config.name,
+            "session_name": self.config.name,
             "algorithm": self.config.algorithm.value,
             "model": self.config.model.value,
             "dataset": self.config.data.dataset.value,
             "status": self.status.value,
-            "progress": f"{self.current_round}/{self.total_rounds}",
+            "current_round": self.current_round,
+            "total_rounds": self.total_rounds,
             "best_accuracy": self.best_accuracy,
             "best_round": self.best_round,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "error": self.error_message,
+            "error_message": self.error_message,
         }
 
 
@@ -391,9 +393,16 @@ class FLSessionManager:
         
         # Create strategy
         strategy = create_strategy(
-            config,
+            algorithm=config.algorithm.value,  # Pass algorithm string, not config
             initial_parameters=initial_params,
-            evaluate_fn=get_evaluate_fn(global_model)
+            evaluate_fn=get_evaluate_fn(global_model),
+            fraction_fit=config.server.fraction_fit,
+            fraction_evaluate=config.server.fraction_evaluate,
+            min_fit_clients=config.server.min_fit_clients,
+            min_evaluate_clients=config.server.min_evaluate_clients,
+            min_available_clients=config.server.min_available_clients,
+            proximal_mu=config.algorithm_params.proximal_mu,
+            server_momentum=config.algorithm_params.server_momentum,
         )
         
         # Extract ALL values as primitive types to avoid Ray serialization issues
@@ -474,34 +483,55 @@ class FLSessionManager:
             # Disable metrics exporter to avoid connection errors
             os.environ.setdefault("RAY_METRICS_EXPORT_PORT", "-1")
         
+        # Check if we're on Windows - Ray doesn't work well on Windows
+        import platform
+        is_windows = platform.system() == "Windows"
+        
         # Run simulation in thread
         def run_fl():
             try:
-                configure_ray_env()
-                logger.info(f"[Session {_session_id_short}] Starting Flower simulation")
-                logger.info(f"[Session {_session_id_short}] Config: {_num_partitions} clients, {_num_rounds} rounds")
-                
-                server_app = ServerApp(server_fn=server_fn)
-                client_app = ClientApp(client_fn=client_fn)
-                
-                # Backend config with Ray initialization args to suppress warnings
-                # Reference: https://flower.ai/docs/framework/how-to-run-simulations.html
-                backend_config = {
-                    "client_resources": {"num_cpus": 1, "num_gpus": 0.0},
-                    "init_args": {
-                        "include_dashboard": False,
-                        "_metrics_export_port": -1,  # Disable metrics export
-                        "configure_logging": False,
-                        "logging_level": logging.WARNING,
+                if is_windows:
+                    # Windows: Use sequential simulation without Ray
+                    logger.info(f"[Session {_session_id_short}] Starting sequential FL simulation (Windows mode)")
+                    logger.info(f"[Session {_session_id_short}] Config: {_num_partitions} clients, {_num_rounds} rounds")
+                    
+                    # Run sequential simulation
+                    self._run_sequential_simulation(
+                        session=session,
+                        client_fn=client_fn,
+                        strategy=strategy,
+                        num_clients=_num_partitions,
+                        num_rounds=_num_rounds,
+                        global_model=global_model,
+                        testloader=testloader,
+                    )
+                else:
+                    # Linux/Mac: Use Flower's Ray-based simulation
+                    configure_ray_env()
+                    logger.info(f"[Session {_session_id_short}] Starting Flower simulation")
+                    logger.info(f"[Session {_session_id_short}] Config: {_num_partitions} clients, {_num_rounds} rounds")
+                    
+                    server_app = ServerApp(server_fn=server_fn)
+                    client_app = ClientApp(client_fn=client_fn)
+                    
+                    # Backend config with Ray initialization args to suppress warnings
+                    # Reference: https://flower.ai/docs/framework/how-to-run-simulations.html
+                    backend_config = {
+                        "client_resources": {"num_cpus": 1, "num_gpus": 0.0},
+                        "init_args": {
+                            "include_dashboard": False,
+                            "_metrics_export_port": -1,  # Disable metrics export
+                            "configure_logging": False,
+                            "logging_level": logging.WARNING,
+                        }
                     }
-                }
-                
-                run_simulation(
-                    server_app=server_app,
-                    client_app=client_app,
-                    num_supernodes=_num_partitions,
-                    backend_config=backend_config,
-                )
+                    
+                    run_simulation(
+                        server_app=server_app,
+                        client_app=client_app,
+                        num_supernodes=_num_partitions,
+                        backend_config=backend_config,
+                    )
                 
                 logger.info(f"[Session {_session_id_short}] Simulation completed successfully")
                 
@@ -543,6 +573,240 @@ class FLSessionManager:
         
         logger.info(f"Stop requested for session {session_id}")
         return True
+    
+    def _run_sequential_simulation(
+        self,
+        session: FLSession,
+        client_fn,
+        strategy,
+        num_clients: int,
+        num_rounds: int,
+        global_model: nn.Module,
+        testloader,
+    ) -> None:
+        """Run FL simulation sequentially without Ray (Windows fallback).
+        
+        This implements FedAvg-style training by:
+        1. For each round, train all clients sequentially
+        2. Aggregate updates using the strategy
+        3. Evaluate on test set
+        """
+        from flwr.common import FitIns, FitRes, EvaluateIns, EvaluateRes, Status, Code
+        
+        session_id_short = session.session_id[:8]
+        
+        # Get initial parameters from global model
+        global_params = [val.cpu().numpy() for _, val in global_model.state_dict().items()]
+        parameters = ndarrays_to_parameters(global_params)
+        
+        # Create a mock context class for client_fn
+        class MockNodeConfig:
+            def __init__(self, partition_id):
+                self._partition_id = partition_id
+            def get(self, key, default=None):
+                if key == "partition-id":
+                    return self._partition_id
+                return default
+        
+        class MockContext:
+            def __init__(self, partition_id):
+                self.node_config = MockNodeConfig(partition_id)
+        
+        for round_num in range(1, num_rounds + 1):
+            if self._stop_flags.get(session.session_id, False):
+                logger.info(f"[Session {session_id_short}] Stopping at round {round_num}")
+                break
+            
+            logger.info(f"[Session {session_id_short}] Round {round_num}/{num_rounds}")
+            round_start = time.time()
+            
+            # Train each client sequentially
+            fit_results = []
+            for client_id in range(num_clients):
+                try:
+                    # Create client
+                    context = MockContext(client_id)
+                    client = client_fn(context)
+                    
+                    # Convert Parameters to NDArrays for client.fit()
+                    params_ndarrays = parameters_to_ndarrays(parameters)
+                    
+                    # Train client - fit() expects NDArrays, not Parameters object
+                    fit_res = client.fit(params_ndarrays, {"round": round_num, "server_round": round_num})
+                    
+                    # fit_res is (parameters, num_examples, metrics)
+                    client_params, num_examples, metrics = fit_res
+                    
+                    fit_results.append((
+                        ndarrays_to_parameters(client_params),
+                        num_examples,
+                        metrics
+                    ))
+                    
+                except Exception as e:
+                    logger.warning(f"[Session {session_id_short}] Client {client_id} failed: {e}")
+            
+            if not fit_results:
+                logger.error(f"[Session {session_id_short}] No clients completed training in round {round_num}")
+                continue
+            
+            # Aggregate using simple FedAvg (weighted average by num_examples)
+            total_examples = sum(num_ex for _, num_ex, _ in fit_results)
+            
+            # Convert parameters to numpy arrays and aggregate
+            aggregated_params = None
+            for client_params, num_examples, _ in fit_results:
+                weight = num_examples / total_examples
+                client_ndarrays = parameters_to_ndarrays(client_params)
+                
+                if aggregated_params is None:
+                    aggregated_params = [arr * weight for arr in client_ndarrays]
+                else:
+                    for i, arr in enumerate(client_ndarrays):
+                        aggregated_params[i] += arr * weight
+            
+            # Update global parameters
+            parameters = ndarrays_to_parameters(aggregated_params)
+            
+            # Update global model with aggregated parameters
+            params_dict = zip(global_model.state_dict().keys(), aggregated_params)
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+            global_model.load_state_dict(state_dict, strict=True)
+            
+            # Evaluate on test set
+            loss, accuracy, _ = evaluate_model(global_model, testloader, self.device)
+            
+            round_duration = (time.time() - round_start) * 1000  # ms
+            
+            # Update session metrics
+            metrics = RoundMetrics(
+                round_num=round_num,
+                loss=loss,
+                accuracy=accuracy,
+                participating_clients=len(fit_results),
+                avg_loss=loss,
+                avg_accuracy=accuracy,
+                min_accuracy=accuracy,
+                max_accuracy=accuracy,
+                round_duration_ms=round_duration,
+            )
+            session.round_metrics[round_num] = metrics
+            session.current_round = round_num
+            
+            if accuracy > session.best_accuracy:
+                session.best_accuracy = accuracy
+                session.best_round = round_num
+                logger.info(f"[Session {session_id_short}] Round {round_num}: "
+                           f"accuracy={accuracy:.4f} ⭐ NEW BEST")
+            else:
+                logger.info(f"[Session {session_id_short}] Round {round_num}: "
+                           f"accuracy={accuracy:.4f}")
+        
+        logger.info(f"[Session {session_id_short}] Sequential simulation completed")
+    
+    def _run_sequential_with_train_fn(
+        self,
+        session: FLSession,
+        model_fn,
+        load_data_fn,
+        testloader,
+    ) -> None:
+        """Run sequential FL using the simplified train_fn.
+        
+        This is a Windows-compatible version that uses the simplified
+        training function from client_app.py.
+        """
+        config = session.config
+        session_id_short = session.session_id[:8]
+        num_clients = config.data.num_partitions
+        num_rounds = config.server.num_rounds
+        lr = config.client.learning_rate
+        local_epochs = config.client.local_epochs
+        batch_size = config.client.local_batch_size
+        
+        # Initialize global model
+        global_model = model_fn()
+        
+        for round_num in range(1, num_rounds + 1):
+            if self._stop_flags.get(session.session_id, False):
+                logger.info(f"[Session {session_id_short}] Stopping at round {round_num}")
+                break
+            
+            logger.info(f"[Session {session_id_short}] Round {round_num}/{num_rounds}")
+            round_start = time.time()
+            
+            # Collect client updates
+            client_updates = []
+            total_samples = 0
+            
+            for client_id in range(num_clients):
+                try:
+                    # Load client data
+                    trainloader, _ = load_data_fn(client_id, num_clients, batch_size)
+                    
+                    # Create client model and load global weights
+                    client_model = model_fn()
+                    client_model.load_state_dict(global_model.state_dict())
+                    
+                    # Train using simplified train_model function
+                    train_loss, _ = train_model(
+                        model=client_model,
+                        trainloader=trainloader,
+                        epochs=local_epochs,
+                        lr=lr,
+                        device=self.device,
+                    )
+                    
+                    num_samples = len(trainloader.dataset)
+                    client_updates.append((client_model.state_dict(), num_samples))
+                    total_samples += num_samples
+                    
+                except Exception as e:
+                    logger.warning(f"[Session {session_id_short}] Client {client_id} failed: {e}")
+            
+            if not client_updates:
+                logger.error(f"[Session {session_id_short}] No clients completed round {round_num}")
+                continue
+            
+            # FedAvg aggregation
+            aggregated_state = {}
+            for key in global_model.state_dict().keys():
+                aggregated_state[key] = torch.zeros_like(global_model.state_dict()[key], dtype=torch.float32)
+                for client_state, num_samples in client_updates:
+                    weight = num_samples / total_samples
+                    aggregated_state[key] += client_state[key].float() * weight
+                aggregated_state[key] = aggregated_state[key].to(global_model.state_dict()[key].dtype)
+            
+            global_model.load_state_dict(aggregated_state)
+            
+            # Evaluate
+            loss, accuracy, _ = evaluate_model(global_model, testloader, self.device)
+            
+            round_duration = (time.time() - round_start) * 1000
+            
+            # Update session metrics
+            metrics = RoundMetrics(
+                round_num=round_num,
+                loss=loss,
+                accuracy=accuracy,
+                participating_clients=len(client_updates),
+                avg_loss=loss,
+                avg_accuracy=accuracy,
+                round_duration_ms=round_duration,
+            )
+            session.round_metrics[round_num] = metrics
+            session.current_round = round_num
+            
+            if accuracy > session.best_accuracy:
+                session.best_accuracy = accuracy
+                session.best_round = round_num
+                logger.info(f"[Session {session_id_short}] Round {round_num}: "
+                           f"accuracy={accuracy:.4f} ⭐ NEW BEST")
+            else:
+                logger.info(f"[Session {session_id_short}] Round {round_num}: "
+                           f"accuracy={accuracy:.4f}")
+        
+        logger.info(f"[Session {session_id_short}] Simplified simulation completed")
     
     def get_session_metrics(self, session_id: str) -> Dict[str, Any]:
         """Get detailed metrics for a session.

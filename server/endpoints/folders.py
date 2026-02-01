@@ -105,6 +105,7 @@ def get_folder_stats(db: Session, folder_id: int) -> Dict[str, int]:
         "size_bytes": size_bytes
     }
 
+@router.post("", response_model=FolderResponse)
 @router.post("/", response_model=FolderResponse)
 async def create_folder(
     folder: FolderCreate,
@@ -170,9 +171,11 @@ async def create_folder(
         log_error(f"Error creating folder: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
 
+@router.get("", response_model=List[FolderResponse])
 @router.get("/", response_model=List[FolderResponse])
 async def list_folders(
     parent_id: Optional[int] = Query(None, description="Filter by parent folder (use -1 for root)"),
+    all: bool = Query(False, description="Get all folders without parent filtering"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> List[FolderResponse]:
@@ -183,11 +186,13 @@ async def list_folders(
         # Query folders from database
         query = db.query(Folder).filter(Folder.userId == current_user.userId)
         
-        # Filter by parent_id (-1 or None means root level)
-        if parent_id is None or parent_id == -1:
-            query = query.filter(Folder.parent_id == None)
-        else:
-            query = query.filter(Folder.parent_id == parent_id)
+        # If 'all' is True, don't filter by parent_id
+        if not all:
+            # Filter by parent_id (-1 or None means root level)
+            if parent_id is None or parent_id == -1:
+                query = query.filter(Folder.parent_id == None)
+            else:
+                query = query.filter(Folder.parent_id == parent_id)
         
         folders = query.order_by(Folder.name).all()
         

@@ -7,9 +7,11 @@ Uses flwr-datasets for efficient federated data handling.
 import logging
 from typing import Dict, Any, Tuple, Optional, Callable
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, ToTensor, Normalize, RandomHorizontalFlip, RandomCrop
+from torchvision import datasets as tv_datasets
 
 from flwr_datasets import FederatedDataset
 
@@ -220,7 +222,10 @@ def load_partition(
     seed: int = 42,
     num_workers: int = 0,
 ) -> Tuple[DataLoader, DataLoader]:
-    """Load a single partition for a client using Flower Datasets.
+    """Load a single partition for a client.
+    
+    Uses torchvision directly to avoid Python 3.14 pickle compatibility
+    issues with flwr-datasets/HuggingFace datasets.
     
     Args:
         partition_id: The partition ID (0 to num_partitions-1)
@@ -242,51 +247,134 @@ def load_partition(
     if isinstance(partition_strategy, str):
         partition_strategy = PartitionStrategy(partition_strategy)
     
-    dataset_name = DATASET_MAPPING.get(dataset, "uoft-cs/cifar10")
+    # Get dataset info for normalization
+    info = DATASET_INFO.get(dataset, DATASET_INFO[FLDataset.CIFAR10])
     
-    # Create partitioner
-    partitioner = get_partitioner(
-        strategy=partition_strategy,
-        num_partitions=num_partitions,
-        alpha=dirichlet_alpha,
-        num_shards_per_partition=num_shards_per_partition,
-        seed=seed,
-    )
+    # Build transforms
+    if len(info["input_shape"]) == 3 and info["input_shape"][0] == 3:
+        # Color images - add augmentation
+        train_transform = Compose([
+            RandomCrop(info["input_shape"][1], padding=4),
+            RandomHorizontalFlip(),
+            ToTensor(),
+            Normalize(info["mean"], info["std"]),
+        ])
+    else:
+        # Grayscale images
+        train_transform = Compose([
+            ToTensor(),
+            Normalize(info["mean"], info["std"]),
+        ])
     
-    # Load federated dataset
-    fds = FederatedDataset(
-        dataset=dataset_name,
-        partitioners={"train": partitioner}
-    )
+    val_transform = Compose([
+        ToTensor(),
+        Normalize(info["mean"], info["std"]),
+    ])
     
-    # Load this client's partition
-    partition = fds.load_partition(partition_id)
+    # Load full training dataset using torchvision
+    data_dir = "./data"
     
-    # Split into train/val
-    partition_split = partition.train_test_split(test_size=val_split, seed=seed)
+    if dataset == FLDataset.CIFAR10:
+        full_trainset = tv_datasets.CIFAR10(root=data_dir, train=True, download=True, transform=train_transform)
+        full_valset = tv_datasets.CIFAR10(root=data_dir, train=True, download=True, transform=val_transform)
+    elif dataset == FLDataset.CIFAR100:
+        full_trainset = tv_datasets.CIFAR100(root=data_dir, train=True, download=True, transform=train_transform)
+        full_valset = tv_datasets.CIFAR100(root=data_dir, train=True, download=True, transform=val_transform)
+    elif dataset == FLDataset.MNIST:
+        full_trainset = tv_datasets.MNIST(root=data_dir, train=True, download=True, transform=train_transform)
+        full_valset = tv_datasets.MNIST(root=data_dir, train=True, download=True, transform=val_transform)
+    elif dataset == FLDataset.FASHION_MNIST:
+        full_trainset = tv_datasets.FashionMNIST(root=data_dir, train=True, download=True, transform=train_transform)
+        full_valset = tv_datasets.FashionMNIST(root=data_dir, train=True, download=True, transform=val_transform)
+    elif dataset == FLDataset.SVHN:
+        full_trainset = tv_datasets.SVHN(root=data_dir, split="train", download=True, transform=train_transform)
+        full_valset = tv_datasets.SVHN(root=data_dir, split="train", download=True, transform=val_transform)
+    else:
+        logger.warning(f"Unknown dataset {dataset}, falling back to CIFAR-10")
+        full_trainset = tv_datasets.CIFAR10(root=data_dir, train=True, download=True, transform=train_transform)
+        full_valset = tv_datasets.CIFAR10(root=data_dir, train=True, download=True, transform=val_transform)
     
-    # Apply transforms
-    partition_split = partition_split.with_transform(
-        lambda batch: apply_transforms(batch, dataset, train=True)
-    )
+    # Get labels for partitioning
+    if hasattr(full_trainset, 'targets'):
+        labels = np.array(full_trainset.targets)
+    elif hasattr(full_trainset, 'labels'):
+        labels = np.array(full_trainset.labels)
+    else:
+        # Fallback - iterate through dataset
+        labels = np.array([full_trainset[i][1] for i in range(len(full_trainset))])
+    
+    num_samples = len(full_trainset)
+    
+    # Partition the data
+    np.random.seed(seed)
+    
+    if partition_strategy == PartitionStrategy.IID:
+        # IID: random uniform split
+        indices = np.random.permutation(num_samples)
+        partition_size = num_samples // num_partitions
+        start_idx = partition_id * partition_size
+        end_idx = start_idx + partition_size if partition_id < num_partitions - 1 else num_samples
+        partition_indices = indices[start_idx:end_idx]
+    
+    elif partition_strategy == PartitionStrategy.DIRICHLET:
+        # Non-IID Dirichlet distribution
+        num_classes = len(np.unique(labels))
+        class_indices = [np.where(labels == c)[0] for c in range(num_classes)]
+        
+        # Sample proportions from Dirichlet
+        proportions = np.random.dirichlet([dirichlet_alpha] * num_partitions, num_classes)
+        
+        partition_indices = []
+        for c in range(num_classes):
+            class_idx = class_indices[c]
+            np.random.shuffle(class_idx)
+            
+            # Split class indices according to proportions
+            splits = (proportions[c] * len(class_idx)).astype(int)
+            splits[-1] = len(class_idx) - splits[:-1].sum()  # Ensure all samples used
+            
+            start = sum(splits[:partition_id])
+            end = start + splits[partition_id]
+            partition_indices.extend(class_idx[start:end])
+        
+        partition_indices = np.array(partition_indices)
+        np.random.shuffle(partition_indices)
+    
+    else:
+        # Default to IID for other strategies
+        indices = np.random.permutation(num_samples)
+        partition_size = num_samples // num_partitions
+        start_idx = partition_id * partition_size
+        end_idx = start_idx + partition_size if partition_id < num_partitions - 1 else num_samples
+        partition_indices = indices[start_idx:end_idx]
+    
+    # Split partition into train/val
+    np.random.shuffle(partition_indices)
+    val_size = int(len(partition_indices) * val_split)
+    val_indices = partition_indices[:val_size]
+    train_indices = partition_indices[val_size:]
+    
+    # Create subset datasets
+    trainset = torch.utils.data.Subset(full_trainset, train_indices.tolist())
+    valset = torch.utils.data.Subset(full_valset, val_indices.tolist())
     
     # Create data loaders
     trainloader = DataLoader(
-        partition_split["train"],
+        trainset,
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
         num_workers=num_workers,
     )
     valloader = DataLoader(
-        partition_split["test"],
+        valset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
     )
     
     logger.debug(f"Loaded partition {partition_id}/{num_partitions}: "
-                f"{len(partition_split['train'])} train, {len(partition_split['test'])} val")
+                f"{len(trainset)} train, {len(valset)} val")
     
     return trainloader, valloader
 
@@ -297,6 +385,9 @@ def load_centralized_testset(
     num_workers: int = 0,
 ) -> DataLoader:
     """Load centralized test set for server-side evaluation.
+    
+    Uses torchvision directly to avoid Python 3.14 pickle compatibility
+    issues with flwr-datasets/HuggingFace datasets.
     
     Args:
         dataset: Dataset to load
@@ -309,19 +400,32 @@ def load_centralized_testset(
     if isinstance(dataset, str):
         dataset = FLDataset(dataset)
     
-    dataset_name = DATASET_MAPPING.get(dataset, "uoft-cs/cifar10")
+    # Get dataset info for normalization
+    info = DATASET_INFO.get(dataset, DATASET_INFO[FLDataset.CIFAR10])
     
-    # Load with single partition to get full dataset
-    fds = FederatedDataset(
-        dataset=dataset_name,
-        partitioners={"train": get_partitioner(PartitionStrategy.IID, 1)}
-    )
+    # Build transform
+    transform = Compose([
+        ToTensor(),
+        Normalize(info["mean"], info["std"]),
+    ])
     
-    # Get test split
-    testset = fds.load_split("test")
-    testset = testset.with_transform(
-        lambda batch: apply_transforms(batch, dataset, train=False)
-    )
+    # Map to torchvision dataset class
+    data_dir = "./data"
+    
+    if dataset == FLDataset.CIFAR10:
+        testset = tv_datasets.CIFAR10(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.CIFAR100:
+        testset = tv_datasets.CIFAR100(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.MNIST:
+        testset = tv_datasets.MNIST(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.FASHION_MNIST:
+        testset = tv_datasets.FashionMNIST(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.SVHN:
+        testset = tv_datasets.SVHN(root=data_dir, split="test", download=True, transform=transform)
+    else:
+        # Fallback to CIFAR-10
+        logger.warning(f"Unknown dataset {dataset}, falling back to CIFAR-10")
+        testset = tv_datasets.CIFAR10(root=data_dir, train=False, download=True, transform=transform)
     
     return DataLoader(
         testset,
@@ -340,8 +444,8 @@ def load_public_dataset(
 ) -> DataLoader:
     """Load a public dataset for knowledge distillation FL.
     
-    This creates a subset of the test set to be used as a shared
-    public dataset for FedDF/FedMD algorithms.
+    Uses torchvision directly to avoid Python 3.14 pickle compatibility
+    issues with flwr-datasets/HuggingFace datasets.
     
     Args:
         dataset: Dataset to load
@@ -356,24 +460,37 @@ def load_public_dataset(
     if isinstance(dataset, str):
         dataset = FLDataset(dataset)
     
-    dataset_name = DATASET_MAPPING.get(dataset, "uoft-cs/cifar10")
+    # Get dataset info for normalization
+    info = DATASET_INFO.get(dataset, DATASET_INFO[FLDataset.CIFAR10])
     
-    fds = FederatedDataset(
-        dataset=dataset_name,
-        partitioners={"train": get_partitioner(PartitionStrategy.IID, 1)}
-    )
+    # Build transform
+    transform = Compose([
+        ToTensor(),
+        Normalize(info["mean"], info["std"]),
+    ])
     
-    # Get test split and sample
-    testset = fds.load_split("test")
+    # Map to torchvision dataset class
+    data_dir = "./data"
     
-    # Shuffle and take subset
-    testset = testset.shuffle(seed=seed)
+    if dataset == FLDataset.CIFAR10:
+        testset = tv_datasets.CIFAR10(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.CIFAR100:
+        testset = tv_datasets.CIFAR100(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.MNIST:
+        testset = tv_datasets.MNIST(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.FASHION_MNIST:
+        testset = tv_datasets.FashionMNIST(root=data_dir, train=False, download=True, transform=transform)
+    elif dataset == FLDataset.SVHN:
+        testset = tv_datasets.SVHN(root=data_dir, split="test", download=True, transform=transform)
+    else:
+        logger.warning(f"Unknown dataset {dataset}, falling back to CIFAR-10")
+        testset = tv_datasets.CIFAR10(root=data_dir, train=False, download=True, transform=transform)
+    
+    # Sample subset
+    torch.manual_seed(seed)
     if len(testset) > size:
-        testset = testset.select(range(size))
-    
-    testset = testset.with_transform(
-        lambda batch: apply_transforms(batch, dataset, train=False)
-    )
+        indices = torch.randperm(len(testset))[:size].tolist()
+        testset = torch.utils.data.Subset(testset, indices)
     
     return DataLoader(
         testset,

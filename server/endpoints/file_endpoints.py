@@ -68,7 +68,9 @@ async def list_files(
             File.size,
             File.content_type,
             File.uploaded_at,
-            File.file_hash
+            File.file_hash,
+            File.labels,
+            File.folder_id
         ).order_by(File.uploaded_at.desc()).offset(offset).limit(limit + 1).all()
         
         has_more = len(files) > limit
@@ -77,8 +79,8 @@ async def list_files(
         
         file_list = []
         for file in files:
-            # file is now a tuple: (file_id, filename, size, content_type, uploaded_at, file_hash)
-            file_id, filename, size, content_type, uploaded_at, file_hash = file
+            # file is now a tuple: (file_id, filename, size, content_type, uploaded_at, file_hash, labels, folder_id)
+            file_id, filename, size, content_type, uploaded_at, file_hash, labels, folder_id = file
             
             # Extract original filename from stored filename
             parts = filename.split('_', 3)
@@ -97,6 +99,14 @@ async def list_files(
                 except (json.JSONDecodeError, TypeError):
                     pass
             
+            # Parse labels from JSON string
+            parsed_labels = []
+            if labels:
+                try:
+                    parsed_labels = json.loads(labels)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
             file_info = {
                 "file_id": file_id,
                 "filename": original_filename,
@@ -105,7 +115,9 @@ async def list_files(
                 "uploaded_at": uploaded_at.isoformat(),
                 "device_id": extracted_device_id,
                 "on_cloud": True,  # Files in this list are always on cloud
-                "metadata": metadata
+                "metadata": metadata,
+                "labels": parsed_labels,
+                "folder_id": folder_id
             }
             file_list.append(file_info)
         

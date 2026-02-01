@@ -13,6 +13,7 @@ import logging
 import traceback
 from typing import Dict, List, Any, Optional, Tuple
 from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
@@ -49,6 +50,10 @@ class MLModelWrapper:
                 self.model = self._create_knn(config)
             elif model_type == 'svc':
                 self.model = self._create_svc(config)
+            elif model_type == 'random_forest':
+                self.model = self._create_random_forest(config)
+            elif model_type == 'xgboost':
+                self.model = self._create_xgboost(config)
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
             
@@ -115,6 +120,66 @@ class MLModelWrapper:
             max_iter=max_iter,
             random_state=42,
             cache_size=1000  # MB
+        )
+
+    def _create_random_forest(self, config: Dict[str, Any]) -> RandomForestClassifier:
+        """Create Random Forest classifier."""
+        n_estimators = config.get('n_estimators', 100)
+        max_depth = config.get('max_depth', None)
+        min_samples_split = config.get('min_samples_split', 2)
+        min_samples_leaf = config.get('min_samples_leaf', 1)
+        max_features = config.get('max_features', 'sqrt')
+
+        logger.debug(
+            f"RandomForest params: n_estimators={n_estimators}, max_depth={max_depth}, "
+            f"min_samples_split={min_samples_split}, min_samples_leaf={min_samples_leaf}, "
+            f"max_features={max_features}"
+        )
+
+        return RandomForestClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            max_features=max_features,
+            n_jobs=-1,
+            random_state=42,
+        )
+
+    def _create_xgboost(self, config: Dict[str, Any]):
+        """Create XGBoost classifier (requires xgboost dependency)."""
+        try:
+            from xgboost import XGBClassifier  # type: ignore
+        except Exception as e:
+            raise ValueError(
+                "Model type 'xgboost' requires the optional 'xgboost' Python package. "
+                "Install it to use XGBoost training."
+            ) from e
+
+        n_estimators = config.get('n_estimators', 200)
+        max_depth = config.get('max_depth', 6)
+        learning_rate = config.get('learning_rate', 0.1)
+        subsample = config.get('subsample', 1.0)
+        colsample_bytree = config.get('colsample_bytree', 1.0)
+        reg_alpha = config.get('reg_alpha', 0.0)
+        reg_lambda = config.get('reg_lambda', 1.0)
+
+        logger.debug(
+            f"XGBoost params: n_estimators={n_estimators}, max_depth={max_depth}, lr={learning_rate}, "
+            f"subsample={subsample}, colsample_bytree={colsample_bytree}, reg_alpha={reg_alpha}, reg_lambda={reg_lambda}"
+        )
+
+        return XGBClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            reg_alpha=reg_alpha,
+            reg_lambda=reg_lambda,
+            n_jobs=-1,
+            random_state=42,
+            eval_metric='mlogloss',
         )
     
     def flatten_timeseries(self, X: np.ndarray) -> np.ndarray:
@@ -304,6 +369,14 @@ class MLModelWrapper:
         elif self.model_type == 'svc':
             info['kernel'] = self.config.get('kernel', 'rbf')
             info['C'] = self.config.get('C', 1.0)
+        elif self.model_type == 'random_forest':
+            info['n_estimators'] = self.config.get('n_estimators', 100)
+            info['max_depth'] = self.config.get('max_depth', None)
+            info['max_features'] = self.config.get('max_features', 'sqrt')
+        elif self.model_type == 'xgboost':
+            info['n_estimators'] = self.config.get('n_estimators', 200)
+            info['max_depth'] = self.config.get('max_depth', 6)
+            info['learning_rate'] = self.config.get('learning_rate', 0.1)
         
         return info
 
@@ -331,6 +404,22 @@ def get_default_ml_config(model_type: str) -> Dict[str, Any]:
             'degree': 3,
             'probability': True,
             'max_iter': -1
+        },
+        'random_forest': {
+            'n_estimators': 100,
+            'max_depth': None,
+            'min_samples_split': 2,
+            'min_samples_leaf': 1,
+            'max_features': 'sqrt'
+        },
+        'xgboost': {
+            'n_estimators': 200,
+            'max_depth': 6,
+            'learning_rate': 0.1,
+            'subsample': 1.0,
+            'colsample_bytree': 1.0,
+            'reg_alpha': 0.0,
+            'reg_lambda': 1.0
         }
     }
     

@@ -9,3 +9,11 @@ test_endpoints.sh
 
 # ignore backup files
 *.backup
+
+# ignore large data files
+data/cifar-10-python.tar.gz
+data/cifar-100-python.tar.gz
+data/cifar-100-python/
+data/cifar-10-batches-py/
+data/MNIST/
+*.tar.gz

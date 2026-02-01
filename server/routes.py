@@ -14,6 +14,7 @@ All endpoint logic has been moved to dedicated modules:
 - Shared models: server/endpoints/models.py
 """
 
+import os
 from fastapi import APIRouter
 
 # Import all endpoint routers
@@ -32,7 +33,14 @@ from server.endpoints.dataset_endpoints import router as dataset_router
 from server.endpoints.processing_endpoints import router as processing_router
 from server.endpoints.activity_endpoints import router as activity_router
 from server.endpoints.figure_endpoints import router as figure_router
-from server.endpoints.fl_endpoints import router as fl_router
+ENABLE_FL = os.getenv("ENABLE_FL", "").strip().lower() in {"1", "true", "yes", "on"}
+if ENABLE_FL:
+    try:
+        from server.endpoints.fl_endpoints import router as fl_router
+    except Exception:
+        fl_router = None
+else:
+    fl_router = None
 from server.endpoints.report_endpoints import router as report_router
 from server.endpoints.validation_endpoints import router as validation_router
 from server.endpoints.plotting_api import router as plotting_router
@@ -57,7 +65,8 @@ router.include_router(dataset_router)     # /datasets/* (Training datasets and c
 router.include_router(processing_router)  # /processing/* (Data processing pipelines)
 router.include_router(activity_router)    # /activity/* (Activity feed and stats)
 router.include_router(figure_router)             # /figures/* (Publication-ready figure export)
-router.include_router(fl_router)                 # /fl/* (Flower Federated Learning)
+if fl_router is not None:
+    router.include_router(fl_router)                 # /fl/* (Flower Federated Learning)
 router.include_router(report_router)             # /reports/* (Training reports and shareable views)
 router.include_router(validation_router)         # /validation/* (Data validation and file type detection)
 router.include_router(plotting_router)           # /plotting/* (Plot generation and export)

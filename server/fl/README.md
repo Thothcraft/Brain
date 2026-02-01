@@ -1,282 +1,324 @@
 # Federated Learning Module
 
-A comprehensive, modular FL system built on top of **Flower (flwr)** framework.
+A simplified, well-documented federated learning system built on [Flower](https://flower.ai/).
 
-## Features
+## Key Design Principles
 
-- **Multiple FL Algorithms**: FedAvg, FedProx, FedAdam, FedYogi, FedAdagrad, FedAvgM, FedMedian, Krum, Bulyan, QFedAvg, DP-FedAvg
-- **Knowledge Distillation**: FedDF, FedMD for heterogeneous model architectures (clients can have different models)
-- **Multi-Model Experiments**: Queue multiple experiments with different models/parameters
-- **Statistical Analysis**: Multiple runs per experiment with std, confidence intervals, shadow plots
-- **Visualization**: Accuracy curves, sample distribution heatmaps, comparative bar charts
-- **Default Pipelines**: Pre-configured experiments that are easy to extend
+1. **ClientApp with Decorators Only** - Uses modern Flower `@app.train` and `@app.evaluate` decorators
+2. **No Built-in Flower Strategies** - All FL algorithms are custom implementations with explicit aggregation logic
+3. **XGBoost Support** - Includes federated XGBoost based on Flower tutorial
+4. **Comprehensive Documentation** - Every function includes detailed docstrings with algorithm explanations
+5. **Online References** - All implementations cite original papers and link to Flower examples
 
-## Project Structure
-
-```
-fl/
-├── __init__.py              # Main exports
-├── README.md                # This file
-├── examples.py              # Usage examples
-├── session.py               # FLSessionManager for session lifecycle
-│
-├── core/                    # Core components
-│   ├── __init__.py
-│   ├── config.py            # All configuration dataclasses
-│   ├── models.py            # PyTorch models (CNN, ResNet, LSTM, etc.)
-│   └── client.py            # Flower NumPyClient implementation
-│
-├── algorithms/              # FL algorithms using flwr strategies
-│   ├── __init__.py          # Strategy factory and registry
-│   └── knowledge_distillation/
-│       ├── __init__.py
-│       ├── client.py        # KD client for heterogeneous models
-│       ├── feddf.py         # FedDF strategy
-│       ├── fedmd.py         # FedMD strategy
-│       └── strategy.py      # KD strategy factory
-│
-├── datasets/                # Dataset loading with flwr-datasets
-│   ├── __init__.py
-│   ├── loaders.py           # Partition loading, centralized test set
-│   └── partitioners.py      # IID, Dirichlet, Shard, Pathological
-│
-├── experiments/             # Experiment running and reporting
-│   ├── __init__.py
-│   ├── runner.py            # FLExperimentRunner for multi-model queue
-│   ├── pipelines.py         # Default hardcoded pipelines
-│   └── reports.py           # Per-model and comparative reports
-│
-└── visualization/           # Plotting and statistics
-    ├── __init__.py
-    ├── plots.py             # Accuracy curves, distribution, shadow plots
-    └── statistics.py        # Statistical analysis, effect sizes
-```
+---
 
 ## Quick Start
 
-### 1. Run a Single Experiment
-
-```python
-import asyncio
-from server.fl import create_experiment, FLExperimentRunner
-
-async def main():
-    # Create experiment configuration
-    experiment = create_experiment(
-        name="CIFAR10-FedAvg",
-        algorithm="fedavg",
-        model="resnet18",
-        dataset="cifar10",
-        num_partitions=10,
-        num_rounds=100,
-        local_epochs=5,
-        num_runs=3,  # Run 3 times for statistical significance
-    )
-    
-    # Run experiment
-    runner = FLExperimentRunner()
-    result = await runner.run(experiment)
-    
-    print(f"Mean accuracy: {result.mean_accuracy:.4f} ± {result.std_accuracy:.4f}")
-
-asyncio.run(main())
-```
-
-### 2. Compare Multiple Algorithms
-
-```python
-from server.fl import create_experiment, FLExperimentRunner, generate_comparative_report
-
-async def compare_algorithms():
-    experiments = [
-        create_experiment(name="FedAvg", algorithm="fedavg", num_runs=3),
-        create_experiment(name="FedProx", algorithm="fedprox", proximal_mu=0.01, num_runs=3),
-        create_experiment(name="FedAdam", algorithm="fedadam", server_learning_rate=0.1, num_runs=3),
-    ]
-    
-    runner = FLExperimentRunner()
-    results = await runner.run_queue(experiments)
-    
-    report = generate_comparative_report(results)
-    print(f"Best: {report['best_performer']['name']}")
-```
-
-### 3. Use Default Pipelines
-
-```python
-from server.fl import list_pipelines, pipeline_to_experiments, FLExperimentRunner
-
-# List available pipelines
-for p in list_pipelines():
-    print(f"{p['id']}: {p['name']}")
-
-# Run a pipeline
-experiments = pipeline_to_experiments("cifar10_fedavg")
-runner = FLExperimentRunner()
-results = await runner.run_queue(experiments)
-```
-
-### 4. Knowledge Distillation (Heterogeneous Models)
-
-```python
-from server.fl import create_experiment, FLExperimentRunner
-
-# FedDF allows different model architectures per client
-experiment = create_experiment(
-    name="FedDF-Heterogeneous",
-    algorithm="feddf",
-    dataset="cifar10",
-    num_partitions=10,
-    temperature=3.0,
-    distillation_weight=0.5,
-)
-
-runner = FLExperimentRunner()
-result = await runner.run(experiment)
-```
-
-### 5. Visualize Results
-
 ```python
 from server.fl import (
-    plot_accuracy_curves,
-    plot_sample_distribution,
-    plot_shadow_curves,
-    get_all_label_distributions,
+    create_client_app,
+    create_xgboost_client_app,
+    FedAvgStrategy,
+    FedXgbBaggingStrategy,
+    get_model,
+    load_partition,
+    create_strategy,
 )
 
-# Plot accuracy curves with std bands
-plot_data = [{"name": r.config.name, "curves": [[m.accuracy for m in run.round_metrics] for run in r.runs]} for r in results]
-fig = plot_accuracy_curves(plot_data, title="Algorithm Comparison")
-fig.savefig("accuracy_curves.png")
+# 1. Create a model
+model = get_model("cnn", num_classes=10)
 
-# Plot sample distribution for non-IID
-distributions = get_all_label_distributions(
-    num_partitions=10,
-    dataset="cifar10",
-    partition_strategy="non_iid_dirichlet",
-    dirichlet_alpha=0.5,
+# 2. Create a strategy (custom implementation, NOT Flower built-in)
+strategy = create_strategy(
+    algorithm="fedavg",  # or "fedprox", "fedavgm", "fedxgb_bagging"
+    fraction_fit=1.0,
 )
-fig = plot_sample_distribution(distributions, num_classes=10)
-fig.savefig("sample_distribution.png")
+
+# 3. Create a client app (uses @app.train decorator)
+client_app = create_client_app(
+    model_fn=lambda: get_model("cnn", num_classes=10),
+    load_data_fn=load_partition,
+    default_epochs=5,
+    default_lr=0.01,
+)
 ```
+
+---
 
 ## Available Algorithms
 
-| Algorithm | Description | Heterogeneous Models |
-|-----------|-------------|---------------------|
-| `fedavg` | Federated Averaging (baseline) | No |
-| `fedprox` | FedAvg with proximal term | No |
-| `fedadam` | Adaptive FL with Adam | No |
-| `fedyogi` | Adaptive FL with Yogi | No |
-| `fedadagrad` | Adaptive FL with Adagrad | No |
-| `fedavgm` | FedAvg with server momentum | No |
-| `fedmedian` | Byzantine-robust median | No |
-| `fedtrimmedavg` | Byzantine-robust trimmed mean | No |
-| `krum` | Byzantine-robust Krum | No |
-| `bulyan` | Byzantine-robust Bulyan | No |
-| `qfedavg` | Fair FL with q-fair aggregation | No |
-| `dpfedavg_adaptive` | DP with adaptive clipping | No |
-| `dpfedavg_fixed` | DP with fixed clipping | No |
-| `feddf` | Federated Distillation | **Yes** |
-| `fedmd` | Federated Model Distillation | **Yes** |
+| Algorithm | Description | Paper | Reference |
+|-----------|-------------|-------|-----------|
+| **FedAvg** | Federated Averaging - weighted average of client updates | McMahan et al., 2017 | [arXiv](https://arxiv.org/abs/1602.05629) |
+| **FedProx** | FedAvg with proximal term for heterogeneous data | Li et al., 2020 | [arXiv](https://arxiv.org/abs/1812.06127) |
+| **FedAvgM** | FedAvg with server-side momentum | Hsu et al., 2019 | [arXiv](https://arxiv.org/abs/1909.06335) |
+| **FedXgbBagging** | Federated XGBoost with bagging aggregation | Flower Tutorial | [Tutorial](https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html) |
 
-## Available Models
+---
 
-- **Image**: `cnn`, `resnet18`, `mobilenet_v2`
-- **Sequence**: `lstm`, `gru`, `cnn_lstm`, `tcn`
-- **Simple**: `mlp`, `logistic`
-
-## Available Datasets
-
-- `cifar10`, `cifar100`
-- `mnist`, `fashion_mnist`, `emnist`
-- `svhn`
-
-## Partitioning Strategies
-
-| Strategy | Description |
-|----------|-------------|
-| `iid` | Random uniform distribution |
-| `non_iid_dirichlet` | Label skew via Dirichlet(α) |
-| `shard` | Each client gets specific label shards |
-| `pathological` | Extreme non-IID (few classes per client) |
-
-## Default Pipelines
-
-| Pipeline | Description |
-|----------|-------------|
-| `quick_test` | Fast test (5 rounds, 3 clients) |
-| `cifar10_fedavg` | Standard CIFAR-10 benchmark |
-| `cifar10_noniid_fedprox` | Non-IID with FedProx |
-| `cifar10_fedadam` | Adaptive optimization |
-| `mnist_fedavg` | MNIST quick benchmark |
-| `cifar10_krum` | Byzantine-robust |
-| `cifar10_feddf` | Knowledge distillation |
-| `algorithm_comparison` | Compare FedAvg, FedProx, FedAdam, FedYogi |
-| `noniid_comparison` | Compare IID vs various non-IID levels |
-| `model_comparison` | Compare CNN, ResNet, MobileNet |
-
-## Dependencies
+## Module Structure
 
 ```
-flwr>=1.5.0
-flwr-datasets>=0.1.0
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.24.0
-matplotlib>=3.7.0  # Optional, for plotting
+server/fl/
+├── __init__.py              # Main exports
+├── README.md                # This file
+├── session.py               # FL session management
+│
+├── algorithms/              # Custom FL strategies
+│   ├── __init__.py
+│   └── strategies.py        # FedAvg, FedProx, FedAvgM, FedXgbBagging
+│
+├── core/                    # Core components
+│   ├── __init__.py
+│   ├── client.py            # ClientApp with @app.train/@app.evaluate decorators
+│   ├── server_app.py        # ServerApp with @app.main decorator
+│   ├── config.py            # Configuration dataclasses
+│   └── models.py            # Model architectures (CNN, ResNet, MLP, etc.)
+│
+└── datasets/                # Data loading and partitioning
+    ├── __init__.py
+    ├── loaders.py           # Dataset loaders (CIFAR10, MNIST, etc.)
+    ├── partitioners.py      # IID/non-IID partitioning
+    └── preprocessing.py     # Data preprocessing
 ```
 
-## Extending the System
+---
 
-### Add a New Model
+## Client Implementation (ClientApp with Decorators)
+
+The client uses the modern Flower ClientApp API with `@app.train` and `@app.evaluate` decorators.
+
+### PyTorch Client
 
 ```python
-from server.fl.core.models import ModelRegistry
-import torch.nn as nn
+from server.fl import create_client_app, get_model
 
-class MyCustomModel(nn.Module):
-    def __init__(self, num_classes=10, in_channels=3):
-        super().__init__()
-        # ... define layers
-    
-    def forward(self, x):
-        # ... forward pass
-        return x
-
-# Register the model
-ModelRegistry.register("my_model", MyCustomModel)
-
-# Use it
-experiment = create_experiment(model="my_model", ...)
+# Create client app for PyTorch models
+client_app = create_client_app(
+    model_fn=lambda: get_model("cnn", num_classes=10),
+    load_data_fn=load_partition,  # (partition_id, num_partitions, batch_size) -> (train, val)
+    default_epochs=5,
+    default_lr=0.01,
+    proximal_mu=0.0,  # Set > 0 for FedProx
+)
 ```
 
-### Add a New Pipeline
+### XGBoost Client
 
 ```python
-from server.fl.experiments.pipelines import DEFAULT_PIPELINES
+from server.fl import create_xgboost_client_app
 
-DEFAULT_PIPELINES["my_pipeline"] = {
-    "name": "My Custom Pipeline",
-    "description": "Description of what this pipeline does",
-    "config": {
-        "algorithm": FLAlgorithm.FEDAVG,
-        "model": ModelArchitecture.RESNET18,
-        "server": {"num_rounds": 100},
-        "client": {"local_epochs": 5},
-        "data": {"dataset": FLDataset.CIFAR10, "num_partitions": 10},
-    },
-}
+# Create client app for XGBoost
+xgb_app = create_xgboost_client_app(
+    load_data_fn=load_xgb_partition,  # Returns DMatrix objects
+    params={"objective": "binary:logistic", "max_depth": 8},
+    default_local_rounds=1,
+)
 ```
 
-## Migration from Old Implementation
+**Reference**: [Flower XGBoost Tutorial](https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html)
 
-The old `flower_fl.py` and `fl_algorithms/` directory are now superseded by this modular system. Key changes:
+---
 
-1. **Configuration**: Use `ExperimentConfig` instead of `FLSessionConfig`
-2. **Running experiments**: Use `FLExperimentRunner` for multi-run support
-3. **Algorithms**: Use `create_strategy()` which wraps Flower's built-in strategies
-4. **Datasets**: Use `load_partition()` which uses `flwr-datasets`
+## Strategies
 
-The old files can be kept for backward compatibility but new code should use this module.
+### FedAvg (Federated Averaging)
+
+```python
+from server.fl import FedAvgStrategy
+
+strategy = FedAvgStrategy(
+    fraction_fit=1.0,
+    min_fit_clients=2,
+    initial_parameters=params,
+)
+```
+
+**Algorithm**:
+```
+w_global = Σ (n_k / n_total) * w_k  # Weighted average by examples
+```
+
+### FedProx
+
+```python
+from server.fl import FedProxStrategy
+
+strategy = FedProxStrategy(
+    proximal_mu=0.1,  # Regularization strength
+    fraction_fit=1.0,
+)
+```
+
+**Key Difference**: Adds proximal term to client loss:
+```
+L_total = L_task + (μ/2) * ||w - w_global||²
+```
+
+### FedAvgM (Server Momentum)
+
+```python
+from server.fl import FedAvgMStrategy
+
+strategy = FedAvgMStrategy(
+    server_momentum=0.9,
+    fraction_fit=1.0,
+)
+```
+
+### FedXgbBagging (XGBoost)
+
+```python
+from server.fl import FedXgbBaggingStrategy
+
+strategy = FedXgbBaggingStrategy(
+    fraction_fit=1.0,
+    min_fit_clients=2,
+)
+```
+
+**Reference**: [Flower XGBoost Tutorial](https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html)
+
+---
+
+## Data Selection
+
+Supported datasets with automatic partitioning:
+
+| Dataset | Classes | Shape | Samples |
+|---------|---------|-------|---------|
+| CIFAR-10 | 10 | 3x32x32 | 60,000 |
+| CIFAR-100 | 100 | 3x32x32 | 60,000 |
+| MNIST | 10 | 1x28x28 | 70,000 |
+| Fashion-MNIST | 10 | 1x28x28 | 70,000 |
+| SVHN | 10 | 3x32x32 | 99,289 |
+| EMNIST | 62 | 1x28x28 | 814,255 |
+
+```python
+from server.fl import load_partition, get_dataset_info, FLDataset
+
+# Get dataset info
+info = get_dataset_info(FLDataset.CIFAR10)
+print(info["num_classes"])  # 10
+
+# Load a partition
+trainloader, valloader = load_partition(
+    partition_id=0,
+    num_partitions=10,
+    dataset=FLDataset.CIFAR10,
+    partition_strategy="iid",  # or "non_iid_dirichlet"
+    batch_size=32,
+)
+```
+
+---
+
+## Model Selection
+
+Available models:
+
+| Model | Type | Use Case |
+|-------|------|----------|
+| `cnn` | SimpleCNN | CIFAR-10, MNIST |
+| `resnet18` | ResNet-18 | Image classification |
+| `mobilenet_v2` | MobileNetV2 | Mobile/edge devices |
+| `mlp` | Multi-layer Perceptron | Tabular data |
+| `lstm` | LSTM | Sequences |
+| `gru` | GRU | Sequences |
+| `tcn` | Temporal CNN | Time series |
+
+```python
+from server.fl import get_model
+
+# Image models
+model = get_model("cnn", num_classes=10, in_channels=3)
+model = get_model("resnet18", num_classes=100)
+
+# Sequence models
+model = get_model("lstm", num_classes=10, in_channels=52, seq_length=100)
+
+# Tabular models
+model = get_model("mlp", input_dim=784, num_classes=10)
+```
+
+---
+
+## Training Functions
+
+```python
+from server.fl import train_pytorch, evaluate_pytorch
+
+# Train a model
+loss, num_samples = train_pytorch(
+    model=model,
+    trainloader=train_loader,
+    epochs=5,
+    lr=0.01,
+    device=torch.device("cuda"),
+    proximal_mu=0.0,  # FedProx coefficient
+)
+
+# Evaluate a model
+loss, accuracy, num_samples = evaluate_pytorch(
+    model=model,
+    testloader=test_loader,
+    device=torch.device("cuda"),
+)
+```
+
+---
+
+## Configuration
+
+```python
+from server.fl import ExperimentConfig, FLAlgorithm, FLDataset
+
+config = ExperimentConfig(
+    name="my_experiment",
+    algorithm=FLAlgorithm.FEDAVG,  # FEDAVG, FEDPROX, FEDAVGM
+    server=ServerConfig(
+        num_rounds=100,
+        fraction_fit=1.0,
+        min_fit_clients=2,
+    ),
+    client=ClientConfig(
+        local_epochs=5,
+        learning_rate=0.01,
+        local_batch_size=32,
+    ),
+    algorithm_params=AlgorithmConfig(
+        proximal_mu=0.01,      # FedProx
+        server_momentum=0.9,   # FedAvgM
+    ),
+    data=DataConfig(
+        dataset=FLDataset.CIFAR10,
+        num_partitions=10,
+        partition_strategy=PartitionStrategy.IID,
+    ),
+)
+```
+
+---
+
+## References
+
+### Papers
+
+| Algorithm | Paper | ArXiv |
+|-----------|-------|-------|
+| FedAvg | McMahan et al., 2017 | [1602.05629](https://arxiv.org/abs/1602.05629) |
+| FedProx | Li et al., 2020 | [1812.06127](https://arxiv.org/abs/1812.06127) |
+| FedAvgM | Hsu et al., 2019 | [1909.06335](https://arxiv.org/abs/1909.06335) |
+
+### Flower Documentation
+
+- [Quickstart PyTorch Tutorial](https://flower.ai/docs/framework/tutorial-quickstart-pytorch.html)
+- [Quickstart XGBoost Tutorial](https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html)
+- [How to Run Simulations](https://flower.ai/docs/framework/how-to-run-simulations.html)
+- [ClientApp API Reference](https://flower.ai/docs/framework/ref-api/flwr.client.ClientApp.html)
+
+### Flower Examples
+
+- [quickstart-pytorch](https://github.com/adap/flower/tree/main/examples/quickstart-pytorch)
+- [xgboost-quickstart](https://github.com/adap/flower/tree/main/examples/xgboost-quickstart)
+- [advanced-pytorch](https://github.com/adap/flower/tree/main/examples/advanced-pytorch)

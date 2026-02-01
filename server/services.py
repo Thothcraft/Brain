@@ -167,26 +167,58 @@ def auto_disconnect_stale_devices():
                 pass
 
 
+def stop_scheduler():
+    """Stop the background scheduler gracefully."""
+    global scheduler
+    if scheduler is not None:
+        try:
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+                logger.info("Scheduler stopped successfully")
+        except Exception as e:
+            logger.warning(f"Error stopping scheduler: {e}")
+        finally:
+            scheduler = None
+
+
 def start_scheduler():
     """Start the background scheduler for periodic tasks."""
     global scheduler
+    
+    # Stop existing scheduler if running
     if scheduler is not None:
-        logger.warning("Scheduler already running")
-        return scheduler
+        if scheduler.running:
+            logger.warning("Scheduler already running")
+            return scheduler
+        else:
+            # Scheduler exists but not running, clean it up
+            stop_scheduler()
     
     try:
-        scheduler = BackgroundScheduler()
+        from apscheduler.executors.pool import ThreadPoolExecutor
+        
+        # Configure with explicit executor settings
+        executors = {
+            'default': ThreadPoolExecutor(max_workers=2)
+        }
+        job_defaults = {
+            'coalesce': True,
+            'max_instances': 1,
+            'misfire_grace_time': 60
+        }
+        
+        scheduler = BackgroundScheduler(
+            executors=executors,
+            job_defaults=job_defaults
+        )
         
         # Add device status check job (every 2 minutes to reduce database load)
         scheduler.add_job(
             auto_disconnect_stale_devices,
-            trigger=IntervalTrigger(seconds=120),  # Increased from 30 to 120 seconds
+            trigger=IntervalTrigger(seconds=120),
             id='auto_disconnect_job',
             name='Auto disconnect stale devices',
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,  # Combine missed runs into one
-            misfire_grace_time=30  # Allow 30 seconds grace time for missed runs
+            replace_existing=True
         )
         
         scheduler.start()
@@ -195,18 +227,13 @@ def start_scheduler():
         
         # Register shutdown handler
         import atexit
-        atexit.register(lambda: scheduler.shutdown() if scheduler else None)
+        atexit.register(stop_scheduler)
         
         return scheduler
         
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}", exc_info=True)
-        if scheduler is not None:
-            try:
-                scheduler.shutdown()
-            except:
-                pass
-            scheduler = None
+        stop_scheduler()
         raise
 
 

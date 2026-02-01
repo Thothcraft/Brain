@@ -9,38 +9,40 @@ from enum import Enum
 
 
 class FLAlgorithm(str, Enum):
-    """Supported Federated Learning algorithms from Flower."""
-    # Standard algorithms
+    """
+    Supported Federated Learning algorithms.
+    
+    All algorithms are custom implementations based on Flower examples.
+    NO built-in Flower strategies are used.
+    
+    ==========================================================================
+    AVAILABLE ALGORITHMS
+    ==========================================================================
+    
+    FedAvg (Federated Averaging):
+        The foundational FL algorithm. Computes weighted average of client
+        model updates based on number of training examples.
+        Paper: McMahan et al., 2017 - https://arxiv.org/abs/1602.05629
+        Flower Example: https://github.com/adap/flower/tree/main/examples/quickstart-pytorch
+    
+    FedProx:
+        FedAvg with a proximal term that penalizes local models deviating
+        from the global model. Better for non-IID data.
+        Paper: Li et al., 2020 - https://arxiv.org/abs/1812.06127
+        Flower Example: https://github.com/adap/flower/tree/main/examples/advanced-pytorch
+    
+    FedAvgM:
+        FedAvg with server-side momentum for faster convergence.
+        Paper: Hsu et al., 2019 - https://arxiv.org/abs/1909.06335
+    
+    FedXgbBagging:
+        Federated XGBoost with bagging aggregation.
+        Tutorial: https://flower.ai/docs/framework/tutorial-quickstart-xgboost.html
+    """
     FEDAVG = "fedavg"
     FEDPROX = "fedprox"
-    FEDADAM = "fedadam"
-    FEDYOGI = "fedyogi"
-    FEDADAGRAD = "fedadagrad"
     FEDAVGM = "fedavgm"
-    FEDOPT = "fedopt"
-    # Byzantine-robust
-    FEDMEDIAN = "fedmedian"
-    FEDTRIMMEDAVG = "fedtrimmedavg"
-    KRUM = "krum"
-    MULTIKRUM = "multikrum"
-    BULYAN = "bulyan"
-    # Fair FL
-    QFEDAVG = "qfedavg"
-    # Privacy-preserving
-    DPFEDAVG_ADAPTIVE = "dpfedavg_adaptive"
-    DPFEDAVG_FIXED = "dpfedavg_fixed"
-    # XGBoost Federated Learning
     FEDXGB_BAGGING = "fedxgb_bagging"
-    FEDXGB_CYCLIC = "fedxgb_cyclic"
-    FEDXGB_NNAVG = "fedxgb_nnavg"
-    # Mobile/Edge
-    FEDAVG_ANDROID = "fedavg_android"
-    # Fault-tolerant
-    FAULT_TOLERANT_FEDAVG = "fault_tolerant_fedavg"
-    # Knowledge Distillation (heterogeneous models)
-    FEDDF = "feddf"
-    FEDMD = "fedmd"
-    FEDGEN = "fedgen"
 
 
 class FLDataset(str, Enum):
@@ -158,31 +160,35 @@ class ServerConfig:
 
 @dataclass
 class AlgorithmConfig:
-    """Algorithm-specific hyperparameters."""
+    """
+    Algorithm-specific hyperparameters.
+    
+    ==========================================================================
+    FEDPROX PARAMETERS
+    ==========================================================================
+    
+    proximal_mu: The μ parameter for FedProx proximal term.
+        Controls how much local models can deviate from global model.
+        - μ = 0: Equivalent to FedAvg
+        - μ > 0: Stronger regularization toward global model
+        - Typical values: 0.001 to 1.0
+        Reference: https://arxiv.org/abs/1812.06127
+    
+    ==========================================================================
+    FEDAVGM PARAMETERS
+    ==========================================================================
+    
+    server_momentum: Momentum coefficient β for server-side updates.
+        - β = 0: Equivalent to FedAvg
+        - β = 0.9: Standard momentum
+        Reference: https://arxiv.org/abs/1909.06335
+    """
     # FedProx
     proximal_mu: float = 0.01
     
-    # FedAdam/FedYogi/FedAdagrad (server-side optimizer)
-    server_learning_rate: float = 1.0
-    beta_1: float = 0.9
-    beta_2: float = 0.99
-    tau: float = 1e-3
-    
     # FedAvgM
     server_momentum: float = 0.9
-    
-    # QFedAvg (fairness)
-    q_param: float = 0.2
-    
-    # Byzantine-robust
-    byzantine_fraction: float = 0.0
-    trimmed_mean_beta: float = 0.1
-    krum_num_closest: int = 2
-    
-    # Knowledge Distillation
-    temperature: float = 3.0
-    distillation_weight: float = 0.5
-    public_dataset_size: int = 5000
+    server_learning_rate: float = 1.0
 
 
 @dataclass

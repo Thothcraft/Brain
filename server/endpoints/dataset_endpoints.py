@@ -994,7 +994,7 @@ async def start_cloud_training(
         }
         
         # ML models don't have epochs - set total_epochs=1 for progress tracking
-        is_ml_model = request.model_type in ['adaboost', 'knn', 'svc', 'xgboost']
+        is_ml_model = request.model_type in ['adaboost', 'knn', 'svc', 'xgboost', 'random_forest']
         total_epochs = 1 if is_ml_model else request.epochs
         
         job = TrainingJob(
@@ -1175,13 +1175,19 @@ async def get_training_job(
 ):
     """Get details of a specific training job."""
     try:
-        job = db.query(TrainingJob).filter(
-            TrainingJob.job_id == job_id,
-            TrainingJob.user_id == current_user.userId
-        ).first()
-        
+        job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+
         if not job:
             raise HTTPException(status_code=404, detail="Training job not found")
+
+        if job.user_id != current_user.userId:
+            logger.warning(
+                "[JOBS] User %s attempted to access job %s owned by user %s",
+                current_user.userId,
+                job_id,
+                job.user_id,
+            )
+            raise HTTPException(status_code=403, detail="Training job not owned by user")
         
         return {
             "success": True,
@@ -1201,13 +1207,19 @@ async def cancel_training_job(
 ):
     """Cancel a running training job."""
     try:
-        job = db.query(TrainingJob).filter(
-            TrainingJob.job_id == job_id,
-            TrainingJob.user_id == current_user.userId
-        ).first()
-        
+        job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+
         if not job:
             raise HTTPException(status_code=404, detail="Training job not found")
+
+        if job.user_id != current_user.userId:
+            logger.warning(
+                "[JOBS] User %s attempted to cancel job %s owned by user %s",
+                current_user.userId,
+                job_id,
+                job.user_id,
+            )
+            raise HTTPException(status_code=403, detail="Training job not owned by user")
         
         if job.status not in ["pending", "running"]:
             raise HTTPException(status_code=400, detail=f"Cannot cancel job with status '{job.status}'")
@@ -1235,13 +1247,19 @@ async def delete_training_job(
 ):
     """Delete a specific training job."""
     try:
-        job = db.query(TrainingJob).filter(
-            TrainingJob.job_id == job_id,
-            TrainingJob.user_id == current_user.userId
-        ).first()
-        
+        job = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+
         if not job:
             raise HTTPException(status_code=404, detail="Training job not found")
+
+        if job.user_id != current_user.userId:
+            logger.warning(
+                "[JOBS] User %s attempted to delete job %s owned by user %s",
+                current_user.userId,
+                job_id,
+                job.user_id,
+            )
+            raise HTTPException(status_code=403, detail="Training job not owned by user")
         
         db.delete(job)
         db.commit()
