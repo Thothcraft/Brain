@@ -44,6 +44,19 @@ from . import model_kmeans
 from . import model_dbscan
 from . import model_pca_visualizer
 
+# Import MLModelWrapper from the legacy ml_models.py file
+# Since there's both ml_models.py and ml_models/ package, we need importlib
+import importlib.util
+import os
+
+_legacy_module_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ml_models.py")
+_spec = importlib.util.spec_from_file_location("ml_models_legacy", _legacy_module_path)
+_legacy_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_legacy_module)
+
+MLModelWrapper = _legacy_module.MLModelWrapper
+get_default_ml_config = _legacy_module.get_default_ml_config
+
 __all__ = [
     "BaseMLModel",
     "MLModelRegistry",
@@ -52,6 +65,8 @@ __all__ = [
     "TrainingResult",
     "PredictionResult",
     "create_ml_model",
+    "MLModelWrapper",
+    "get_default_ml_config",
 ]
 
 def create_ml_model(model_type: str, params: dict = None):
