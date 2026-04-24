@@ -561,6 +561,15 @@ async def upload_file_multipart(
         
         # Save file to database
         logger.info(f"Saving to database: {filename}")
+        
+        # Sanitize file_hash JSON to remove any NUL characters
+        file_hash_json = json.dumps(file_metadata)
+        file_hash_json = file_hash_json.replace('\x00', '')
+        
+        # Sanitize sample_content one more time
+        if sample_content:
+            sample_content = sample_content.replace('\x00', '')
+        
         db_file = File(
             userId=current_user.userId,
             filename=unique_filename,
@@ -568,7 +577,7 @@ async def upload_file_multipart(
             size=len(content_bytes),
             content_type=content_type,
             uploaded_at=datetime.now(),
-            file_hash=json.dumps(file_metadata),
+            file_hash=file_hash_json,
             sample_content=sample_content,
             data_type=data_type,
             folder_id=folder_id,
