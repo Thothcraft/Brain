@@ -552,6 +552,9 @@ async def upload_file_multipart(
         try:
             from server.ml_training import generate_file_sample
             sample_content, _ = generate_file_sample(content_bytes, filename)
+            # Ensure no NUL characters in sample_content (PostgreSQL text fields can't contain NUL)
+            if sample_content:
+                sample_content = sample_content.replace('\x00', '')
             logger.info(f"Generated sample for {filename}: sample_len={len(sample_content) if sample_content else 0}")
         except Exception as sample_err:
             logger.warning(f"Failed to generate file sample: {sample_err}")
