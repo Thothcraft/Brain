@@ -1136,3 +1136,75 @@ async def update_file_type(
         db.rollback()
         log_error(f"Error updating file type: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update file type: {str(e)}")
+
+
+@router.delete("/{device_uuid}/files/{file_id}", response_model=Dict[str, Any])
+async def delete_device_file(
+    device_uuid: str,
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Delete a specific file from a device's file registry.
+    
+    This removes the file record from the database. It does not delete
+    the actual file from the device.
+    
+    Args:
+        device_uuid: The unique device identifier
+        file_id: The device file ID to delete
+        current_user: Authenticated user
+        db: Database session
+        
+    Returns:
+        Dict with deletion confirmation
+    """
+    try:
+        log_request_start("DELETE", f"/device/{device_uuid}/files/{file_id}", current_user.userId)
+        
+        # Find the device
+        device = db.query(Device).filter(
+            Device.device_uuid == device_uuid,
+            Device.userId == current_user.userId
+        ).first()
+        
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or access denied"
+            )
+        
+        # Find and delete the file
+        device_file = db.query(DeviceFile).filter(
+            DeviceFile.id == file_id,
+            DeviceFile.device_id == device.deviceId
+        ).first()
+        
+        if not device_file:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found"
+            )
+        
+        filename = device_file.filename
+        db.delete(device_file)
+        db.commit()
+        
+        logger.info(f"Deleted device file: {filename} (id={file_id}) from device {device_uuid}")
+        
+        return {
+            "success": True,
+            "message": f"File '{filename}' deleted from device registry",
+            "file_id": file_id,
+            "filename": filename
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log_error(f"Error deleting device file: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete device file: {str(e)}"
+        )
