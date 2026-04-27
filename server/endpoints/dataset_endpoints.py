@@ -1512,6 +1512,120 @@ async def download_model(
 
 
 # ============================================================================
+# MODEL DEPLOYMENT ENDPOINTS
+# ============================================================================
+
+class DeployModelRequest(BaseModel):
+    """Request to deploy a trained model to a device."""
+    model_id: int
+    device_id: str  # device_uuid
+    config: Optional[Dict[str, Any]] = None  # trigger config, thresholds, etc.
+
+
+@router.post("/models/{model_id}/deploy")
+async def deploy_model_to_device(
+    model_id: int,
+    request: DeployModelRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Deploy a trained model to a specific device.
+    
+    This endpoint:
+    1. Validates the model and device belong to the user
+    2. Creates a deployment record
+    3. Pushes the model to the device in the background
+    """
+    from ..db import Device
+    import httpx
+    
+    try:
+        # Validate model
+        model = db.query(TrainedModel).filter(
+            TrainedModel.id == model_id,
+            TrainedModel.user_id == current_user.userId
+        ).first()
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        if not model.model_data:
+            raise HTTPException(status_code=400, detail="Model has no weights to deploy")
+        
+        # Validate device
+        device = db.query(Device).filter(
+            Device.device_uuid == request.device_id,
+            Device.userId == current_user.userId
+        ).first()
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+        if not device.online:
+            raise HTTPException(status_code=400, detail="Device is offline")
+        if not device.ip_address:
+            raise HTTPException(status_code=400, detail="Device has no known IP address")
+        
+        # Build deployment payload
+        deployment_id = str(uuid.uuid4())
+        deploy_config = request.config or {}
+        deploy_config.update({
+            "deployment_id": deployment_id,
+            "model_name": model.name,
+            "model_type": model.model_type,
+            "deployed_at": datetime.utcnow().isoformat(),
+        })
+        
+        # Get the training job config for preprocessing info
+        if model.job_id:
+            job = db.query(TrainingJob).filter(TrainingJob.job_id == model.job_id).first()
+            if job and job.config:
+                try:
+                    job_config = json.loads(job.config) if isinstance(job.config, str) else job.config
+                    deploy_config["preprocessing"] = {
+                        "data_type": job_config.get("data_type"),
+                        "window_size": job_config.get("window_size"),
+                        "output_shape": job_config.get("output_shape"),
+                    }
+                    deploy_config["class_names"] = job_config.get("class_names", [])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        
+        async def push_model_to_device():
+            """Background task to push model weights + config to the device."""
+            import base64
+            try:
+                device_url = f"http://{device.ip_address}:8421/api/deploy-model"
+                payload = {
+                    "deployment_id": deployment_id,
+                    "model_name": model.name,
+                    "model_type": model.model_type,
+                    "model_data": base64.b64encode(model.model_data).decode("utf-8"),
+                    "config": deploy_config,
+                }
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(device_url, json=payload)
+                    resp.raise_for_status()
+                    logger.info(f"Model '{model.name}' deployed to device {device.device_uuid}")
+            except Exception as e:
+                logger.error(f"Failed to push model to device {device.device_uuid}: {e}")
+        
+        background_tasks.add_task(push_model_to_device)
+        
+        return {
+            "success": True,
+            "deployment_id": deployment_id,
+            "model_name": model.name,
+            "device_name": device.device_name,
+            "device_id": device.device_uuid,
+            "message": f"Deploying '{model.name}' to '{device.device_name}'..."
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to deploy model: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to deploy model: {str(e)}")
+
+
+# ============================================================================
 # DATASET DETAIL ENDPOINTS (catch-all routes must come last)
 # ============================================================================
 
