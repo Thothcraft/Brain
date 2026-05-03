@@ -509,7 +509,7 @@ async def register_device(
                     "pending_uploads": pending_uploads  # Files to upload to cloud
                 }
             
-            # Create new device record
+            # Create new device record — not yet approved; user must confirm in portal
             new_device = Device(
                 userId=user_id,
                 device_uuid=device_uuid,
@@ -519,6 +519,7 @@ async def register_device(
                 mac_address=mac_address,
                 last_seen=now,
                 online=True,
+                approved=False,
                 hardware_info=json.dumps(hardware_info) if hardware_info else None
             )
             
@@ -568,6 +569,65 @@ async def register_device(
             detail="An error occurred while registering the device. Please try again."
         )
 
+@router.get("/pending")
+async def list_pending_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """List devices awaiting approval for the authenticated user."""
+    try:
+        devices = db.query(Device).filter(
+            Device.userId == current_user.userId,
+            Device.approved == False
+        ).all()
+        return {
+            "success": True,
+            "pending": [d.to_dict() for d in devices],
+            "count": len(devices)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{device_id}/approve")
+async def approve_device(
+    device_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Approve a pending device so it shows in the main device list."""
+    device = db.query(Device).filter(
+        Device.device_uuid == device_id,
+        Device.userId == current_user.userId
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device.approved = True
+    db.commit()
+    logger.info(f"Device {device_id} approved by user {current_user.userId}")
+    return {"success": True, "message": "Device approved", "device_id": device_id}
+
+
+@router.post("/{device_id}/reject")
+async def reject_device(
+    device_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Reject (delete) a pending device registration."""
+    device = db.query(Device).filter(
+        Device.device_uuid == device_id,
+        Device.userId == current_user.userId
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId).delete()
+    db.delete(device)
+    db.commit()
+    logger.info(f"Device {device_id} rejected and removed by user {current_user.userId}")
+    return {"success": True, "message": "Device rejected and removed", "device_id": device_id}
+
+
 @router.get("/list")
 async def list_user_devices(
     current_user: User = Depends(get_current_user),
@@ -590,8 +650,11 @@ async def list_user_devices(
     log_request_start("GET", "/device/list", current_user.userId)
     
     try:
-        # Build query based on include_offline parameter
-        query = db.query(Device).filter(Device.userId == current_user.userId)
+        # Build query: only show approved devices
+        query = db.query(Device).filter(
+            Device.userId == current_user.userId,
+            Device.approved == True
+        )
         if not include_offline:
             query = query.filter(Device.online == True)
             

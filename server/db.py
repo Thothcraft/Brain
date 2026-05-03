@@ -394,6 +394,7 @@ class Device(Base):
     
     last_seen = Column("last_seen", DateTime, default=datetime.utcnow, index=True)
     online = Column("online", Boolean, default=False, index=True)
+    approved = Column("approved", Boolean, default=False, index=True)
     
     ip_address = Column("ip_address", String, nullable=True)
     mac_address = Column("mac_address", String, nullable=True)
@@ -427,7 +428,8 @@ class Device(Base):
             "mac_address": self.mac_address,
             "device_uuid": self.device_uuid,
             "user_id": self.userId,
-            "hardware_info": hw_info
+            "hardware_info": hw_info,
+            "approved": self.approved if self.approved is not None else False
         }
 
 

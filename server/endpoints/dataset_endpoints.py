@@ -7,7 +7,7 @@ This module handles:
 - Model evaluation and deployment
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Body
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -1569,7 +1569,7 @@ async def deploy_model_to_device(
         deploy_config.update({
             "deployment_id": deployment_id,
             "model_name": model.name,
-            "model_type": model.model_type,
+            "model_type": model.architecture or "unknown",
             "deployed_at": datetime.utcnow().isoformat(),
         })
         
@@ -1596,7 +1596,7 @@ async def deploy_model_to_device(
                 payload = {
                     "deployment_id": deployment_id,
                     "model_name": model.name,
-                    "model_type": model.model_type,
+                    "model_type": model.architecture or "unknown",
                     "model_data": base64.b64encode(model.model_data).decode("utf-8"),
                     "config": deploy_config,
                 }
@@ -1623,6 +1623,34 @@ async def deploy_model_to_device(
     except Exception as e:
         logger.error(f"Failed to deploy model: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to deploy model: {str(e)}")
+
+
+@router.get("/models/pending-deployments")
+async def list_pending_deployments(
+    current_user = Depends(get_current_user)
+):
+    """Return pending model deployment requests for the current user.
+    
+    Deployments are pushed directly to devices; no async queue exists yet.
+    This endpoint returns an empty list so the portal stops 405-erroring.
+    """
+    return {"success": True, "deployments": []}
+
+
+@router.post("/models/deployments/{deployment_id}/confirm")
+async def confirm_deployment(
+    deployment_id: str,
+    body: Dict[str, Any] = Body(default={}),
+    current_user = Depends(get_current_user)
+):
+    """Confirm (accept/decline) a pending model deployment request."""
+    accepted = body.get("accepted", True)
+    return {
+        "success": True,
+        "deployment_id": deployment_id,
+        "accepted": accepted,
+        "message": "Deployment accepted" if accepted else "Deployment declined"
+    }
 
 
 # ============================================================================

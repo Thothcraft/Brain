@@ -65,12 +65,50 @@ def ensure_trained_model_table():
     
     return True
 
+def ensure_approved_column():
+    """Ensure the approved column exists on the device table."""
+    try:
+        direct_engine = create_engine(
+            DATABASE_URL,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=10,
+            pool_pre_ping=True,
+            connect_args={
+                "connect_timeout": 10,
+                "sslmode": "require",
+                "options": "-c statement_timeout=10000"
+            }
+        )
+        with direct_engine.connect() as conn:
+            col_check = conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.columns
+                    WHERE table_name = 'device' AND column_name = 'approved'
+                )
+            """)).scalar()
+            if not col_check:
+                logger.info("[INIT] Adding 'approved' column to device table")
+                conn.execute(text("""
+                    ALTER TABLE device ADD COLUMN approved BOOLEAN NOT NULL DEFAULT FALSE
+                """))
+                conn.commit()
+                logger.info("[INIT] 'approved' column added successfully")
+            else:
+                logger.info("[INIT] 'approved' column already exists")
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring approved column: {e}")
+        return False
+    return True
+
+
 def initialize_database():
     """Initialize all required database tables."""
     logger.info("[INIT] Starting database initialization")
     
     try:
         ensure_trained_model_table()
+        ensure_approved_column()
         logger.info("[INIT] Database initialization completed successfully")
         return True
     except Exception as e:
