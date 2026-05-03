@@ -670,7 +670,7 @@ async def ack_deployment(
     """Device calls this after receiving a deployment.
     
     No user auth required — the device uses its own device_id as identity.
-    Supports both 'delivered' and 'declined' statuses.
+    Supports 'delivered', 'declined', and 'pending_confirmation' statuses.
     """
     record = db.query(DeviceDeployment).filter(
         DeviceDeployment.deployment_id == deployment_id,
@@ -679,18 +679,21 @@ async def ack_deployment(
     if not record:
         raise HTTPException(status_code=404, detail="Deployment not found")
     
-    if status not in ["delivered", "declined"]:
-        raise HTTPException(status_code=400, detail="Invalid status. Must be 'delivered' or 'declined'")
+    if status not in ["delivered", "declined", "pending_confirmation"]:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'delivered', 'declined', or 'pending_confirmation'")
     
     record.status = status
     if status == "delivered":
         record.delivered_at = datetime.utcnow()
         logger.info(f"Deployment {deployment_id} acknowledged by device {device_id}")
         return {"success": True, "message": "Deployment acknowledged"}
-    else:
+    elif status == "declined":
         record.declined_at = datetime.utcnow()
         logger.info(f"Deployment {deployment_id} declined by device {device_id}")
         return {"success": True, "message": "Deployment declined"}
+    else:
+        logger.info(f"Deployment {deployment_id} received and pending confirmation by device {device_id}")
+        return {"success": True, "message": "Deployment received, pending confirmation"}
 
 
 @router.post("/{device_id}/reject")
