@@ -664,12 +664,13 @@ async def device_offline(
 async def ack_deployment(
     device_id: str,
     deployment_id: str,
+    status: str = "delivered",
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Device calls this after successfully receiving and saving a deployment.
+    """Device calls this after receiving a deployment.
     
     No user auth required — the device uses its own device_id as identity.
-    Marks the deployment as delivered so it won't be resent.
+    Supports both 'delivered' and 'declined' statuses.
     """
     record = db.query(DeviceDeployment).filter(
         DeviceDeployment.deployment_id == deployment_id,
@@ -677,11 +678,19 @@ async def ack_deployment(
     ).first()
     if not record:
         raise HTTPException(status_code=404, detail="Deployment not found")
-    record.status = "delivered"
-    record.delivered_at = datetime.utcnow()
-    db.commit()
-    logger.info(f"Deployment {deployment_id} acknowledged by device {device_id}")
-    return {"success": True, "message": "Deployment acknowledged"}
+    
+    if status not in ["delivered", "declined"]:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'delivered' or 'declined'")
+    
+    record.status = status
+    if status == "delivered":
+        record.delivered_at = datetime.utcnow()
+        logger.info(f"Deployment {deployment_id} acknowledged by device {device_id}")
+        return {"success": True, "message": "Deployment acknowledged"}
+    else:
+        record.declined_at = datetime.utcnow()
+        logger.info(f"Deployment {deployment_id} declined by device {device_id}")
+        return {"success": True, "message": "Deployment declined"}
 
 
 @router.post("/{device_id}/reject")

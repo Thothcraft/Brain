@@ -1620,6 +1620,49 @@ async def deploy_model_to_device(
         raise HTTPException(status_code=500, detail=f"Failed to queue deployment: {str(e)}")
 
 
+@router.get("/models/deployments")
+async def list_deployments(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """List all model deployments for the current user."""
+    from ..db import Device, DeviceDeployment
+    
+    try:
+        deployments = db.query(DeviceDeployment, Device, TrainedModel).join(
+            Device, DeviceDeployment.device_uuid == Device.device_uuid
+        ).join(
+            TrainedModel, DeviceDeployment.model_id == TrainedModel.id
+        ).filter(
+            DeviceDeployment.user_id == current_user.userId
+        ).order_by(DeviceDeployment.created_at.desc()).all()
+        
+        result = []
+        for deployment, device, model in deployments:
+            payload = deployment.payload or {}
+            result.append({
+                "deployment_id": deployment.deployment_id,
+                "model_id": deployment.model_id,
+                "model_name": model.name,
+                "model_type": model.architecture or "unknown",
+                "device_id": device.device_uuid,
+                "device_name": device.device_name,
+                "status": deployment.status,
+                "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
+                "delivered_at": deployment.delivered_at.isoformat() if deployment.delivered_at else None,
+                "declined_at": deployment.declined_at.isoformat() if deployment.declined_at else None,
+            })
+        
+        return {
+            "success": True,
+            "deployments": result
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to list deployments: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/models/pending-deployments")
 async def list_pending_deployments(
     current_user = Depends(get_current_user)
@@ -1630,6 +1673,41 @@ async def list_pending_deployments(
     This endpoint returns an empty list so the portal stops 405-erroring.
     """
     return {"success": True, "deployments": []}
+
+
+@router.delete("/models/deployments/{deployment_id}")
+async def cancel_deployment(
+    deployment_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Cancel a pending deployment."""
+    from ..db import DeviceDeployment
+    
+    try:
+        deployment = db.query(DeviceDeployment).filter(
+            DeviceDeployment.deployment_id == deployment_id,
+            DeviceDeployment.user_id == current_user.userId,
+            DeviceDeployment.status == "pending"
+        ).first()
+        
+        if not deployment:
+            raise HTTPException(status_code=404, detail="Pending deployment not found")
+        
+        db.delete(deployment)
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Deployment cancelled successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to cancel deployment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/models/deployments/{deployment_id}/confirm")
