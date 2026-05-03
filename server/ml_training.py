@@ -972,8 +972,30 @@ def generate_file_sample(content: bytes, filename: str = "", max_lines: int = 20
         Tuple of (sample_content, detected_data_type)
     """
     try:
-        # Decode content
+        # Check if this is a binary file (image, video, audio)
+        ext = filename.lower().split('.')[-1] if '.' in filename else ''
+        binary_extensions = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'ico', 'tiff',
+                            'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv',
+                            'mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac',
+                            'pdf', 'zip', 'tar', 'gz', 'rar', '7z',
+                            'exe', 'dll', 'so', 'dylib'}
+        
+        if ext in binary_extensions:
+            # For binary files, return metadata instead of content sample
+            data_type = detect_file_type(content, filename)
+            return f"[Binary file: {ext.upper()}, {len(content)} bytes]", data_type
+        
+        # Check for binary content by looking for NUL bytes in first 1KB
+        if b'\x00' in content[:1024]:
+            data_type = detect_file_type(content, filename)
+            return f"[Binary content, {len(content)} bytes]", data_type
+        
+        # Decode content for text files
         text = content.decode('utf-8', errors='ignore').lstrip('\ufeff').strip()
+        
+        # Remove any remaining NUL characters
+        text = text.replace('\x00', '')
+        
         lines = text.split('\n')
         
         # Take first N lines, respecting max_bytes

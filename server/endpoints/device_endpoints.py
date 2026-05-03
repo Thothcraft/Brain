@@ -981,6 +981,113 @@ async def scan_local_files(
         )
 
 
+@router.post("/heartbeat", response_model=StandardResponse)
+async def device_heartbeat(
+    request: DeviceHeartbeatRequest,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+    request_obj: Request = None
+) -> Dict[str, Any]:
+    """
+    Receive heartbeat from a Thoth device.
+    
+    This endpoint allows devices to send periodic heartbeats to indicate they are online.
+    The device's online status and last_seen timestamp are updated in the database.
+    
+    Args:
+        request: Heartbeat data including device_id and optional status updates
+        authorization: Device authentication token
+        db: Database session
+        request_obj: The incoming request object
+        
+    Returns:
+        StandardResponse: Heartbeat confirmation
+        
+    Raises:
+        HTTPException: 401 if not authenticated, 404 if device not found, 500 on server error
+    """
+    try:
+        # Authenticate device
+        if not authorization:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required"
+            )
+        
+        try:
+            # Strip "Bearer " prefix if present
+            token = authorization
+            if authorization.lower().startswith("bearer "):
+                token = authorization[7:]
+            current_user = await get_user_from_token(token)
+        except Exception as e:
+            logger.warning(f"Device heartbeat auth failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired authentication token"
+            )
+        
+        # Get the device
+        device = db.query(Device).filter(
+            Device.device_uuid == str(request.device_id),
+            Device.userId == current_user.userId
+        ).first()
+        
+        if not device:
+            logger.warning(f"Heartbeat from unknown device: {request.device_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found"
+            )
+        
+        # Update device status
+        now = datetime.utcnow()
+        update_data = {
+            "last_seen": now,
+            "online": True,
+            "updated_at": now
+        }
+        
+        # Update optional fields if provided
+        if hasattr(request, 'battery_level') and request.battery_level is not None:
+            update_data["battery_level"] = request.battery_level
+        if hasattr(request, 'wifi_connected') and request.wifi_connected is not None:
+            update_data["wifi_connected"] = request.wifi_connected
+        if hasattr(request, 'collection_active') and request.collection_active is not None:
+            update_data["collection_active"] = request.collection_active
+        if hasattr(request, 'online') and request.online is not None:
+            update_data["online"] = request.online
+        
+        # Update IP address if available
+        ip = get_client_ip(request_obj)
+        if ip:
+            update_data["ip_address"] = ip
+        
+        # Apply updates
+        db.query(Device).filter(Device.deviceId == device.deviceId).update(update_data)
+        db.commit()
+        
+        logger.debug(f"Heartbeat received from device {request.device_id}")
+        
+        return {
+            "success": True,
+            "message": "Heartbeat received",
+            "data": {
+                "device_id": str(request.device_id),
+                "timestamp": now.isoformat()
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error processing heartbeat: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process heartbeat: {str(e)}"
+        )
+
+
 @router.get("/{device_uuid}/files", response_model=Dict[str, Any])
 async def get_device_files(
     device_uuid: str,
@@ -1136,3 +1243,75 @@ async def update_file_type(
         db.rollback()
         log_error(f"Error updating file type: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update file type: {str(e)}")
+
+
+@router.delete("/{device_uuid}/files/{file_id}", response_model=Dict[str, Any])
+async def delete_device_file(
+    device_uuid: str,
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Delete a specific file from a device's file registry.
+    
+    This removes the file record from the database. It does not delete
+    the actual file from the device.
+    
+    Args:
+        device_uuid: The unique device identifier
+        file_id: The device file ID to delete
+        current_user: Authenticated user
+        db: Database session
+        
+    Returns:
+        Dict with deletion confirmation
+    """
+    try:
+        log_request_start("DELETE", f"/device/{device_uuid}/files/{file_id}", current_user.userId)
+        
+        # Find the device
+        device = db.query(Device).filter(
+            Device.device_uuid == device_uuid,
+            Device.userId == current_user.userId
+        ).first()
+        
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or access denied"
+            )
+        
+        # Find and delete the file
+        device_file = db.query(DeviceFile).filter(
+            DeviceFile.id == file_id,
+            DeviceFile.device_id == device.deviceId
+        ).first()
+        
+        if not device_file:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found"
+            )
+        
+        filename = device_file.filename
+        db.delete(device_file)
+        db.commit()
+        
+        logger.info(f"Deleted device file: {filename} (id={file_id}) from device {device_uuid}")
+        
+        return {
+            "success": True,
+            "message": f"File '{filename}' deleted from device registry",
+            "file_id": file_id,
+            "filename": filename
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        log_error(f"Error deleting device file: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete device file: {str(e)}"
+        )
