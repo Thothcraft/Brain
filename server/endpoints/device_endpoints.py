@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, 
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from server.db import get_db, Device, User, File, DeviceFile
+from server.db import get_db, Device, User, File, DeviceFile, DeviceDeployment
 from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from .models import (
@@ -259,6 +259,26 @@ def _get_pending_uploads(device_id: int, db: Session) -> list:
         return []
 
 
+def _get_pending_deployments(device_uuid: str, db: Session) -> list:
+    """Return pending model deployments for a device (payload without model_data for size)."""
+    try:
+        records = db.query(DeviceDeployment).filter(
+            DeviceDeployment.device_uuid == device_uuid,
+            DeviceDeployment.status == "pending"
+        ).all()
+        result = []
+        for r in records:
+            try:
+                p = json.loads(r.payload)
+                result.append(p)
+            except Exception:
+                pass
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching pending deployments: {e}")
+        return []
+
+
 def _get_file_type_from_extension(filename: str) -> str:
     """Determine file type based on extension.
     
@@ -492,12 +512,15 @@ async def register_device(
                     # Auto-scan files if none provided
                     _auto_sync_device_files(existing_device.deviceId, user_id, device_uuid, db)
                 
-                # Get pending upload requests for this device
+                # Get pending upload requests and deployments for this device
                 pending_uploads = _get_pending_uploads(existing_device.deviceId, db)
+                pending_deployments = _get_pending_deployments(device_uuid, db)
                 
                 logger.info(f"Device updated: {device_uuid} for user {user_id}")
                 if pending_uploads:
                     logger.info(f"Pending uploads for device {device_uuid}: {pending_uploads}")
+                if pending_deployments:
+                    logger.info(f"Pending deployments for device {device_uuid}: {[p.get('deployment_id') for p in pending_deployments]}")
                 log_response(200, "Device updated successfully", "/device/register")
                 
                 return {
@@ -506,7 +529,8 @@ async def register_device(
                     "device_name": device_name,
                     "ip_address": ip_address,
                     "message": "Device updated successfully",
-                    "pending_uploads": pending_uploads  # Files to upload to cloud
+                    "pending_uploads": pending_uploads,
+                    "pending_deployments": pending_deployments
                 }
             
             # Create new device record — not yet approved; user must confirm in portal
@@ -543,7 +567,8 @@ async def register_device(
                 "device_name": device_name,
                 "ip_address": ip_address,
                 "message": "Device registered successfully",
-                "pending_uploads": []  # No pending uploads for new device
+                "pending_uploads": [],
+                "pending_deployments": []
             }
             
         except Exception as e:
@@ -606,6 +631,30 @@ async def approve_device(
     db.commit()
     logger.info(f"Device {device_id} approved by user {current_user.userId}")
     return {"success": True, "message": "Device approved", "device_id": device_id}
+
+
+@router.post("/{device_id}/deployment/{deployment_id}/ack")
+async def ack_deployment(
+    device_id: str,
+    deployment_id: str,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Device calls this after successfully receiving and saving a deployment.
+    
+    No user auth required — the device uses its own device_id as identity.
+    Marks the deployment as delivered so it won't be resent.
+    """
+    record = db.query(DeviceDeployment).filter(
+        DeviceDeployment.deployment_id == deployment_id,
+        DeviceDeployment.device_uuid == device_id
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    record.status = "delivered"
+    record.delivered_at = datetime.utcnow()
+    db.commit()
+    logger.info(f"Deployment {deployment_id} acknowledged by device {device_id}")
+    return {"success": True, "message": "Deployment acknowledged"}
 
 
 @router.post("/{device_id}/reject")

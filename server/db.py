@@ -695,6 +695,21 @@ class TrainedModel(Base):
         }
 
 
+class DeviceDeployment(Base):
+    """Pending model deployments for pull-based delivery to devices."""
+    __tablename__ = "device_deployment"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    deployment_id = Column(String(255), unique=True, nullable=False, index=True)
+    device_uuid = Column(String(255), nullable=False, index=True)
+    model_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False)
+    payload = Column(Text, nullable=False)  # JSON: full deploy payload (model_data included)
+    status = Column(String(50), default="pending", index=True)  # pending | delivered | failed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    delivered_at = Column(DateTime, nullable=True)
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)

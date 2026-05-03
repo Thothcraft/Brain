@@ -1526,20 +1526,18 @@ class DeployModelRequest(BaseModel):
 async def deploy_model_to_device(
     model_id: int,
     request: DeployModelRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Deploy a trained model to a specific device.
-    
-    This endpoint:
-    1. Validates the model and device belong to the user
-    2. Creates a deployment record
-    3. Pushes the model to the device in the background
+    """Queue a trained model for deployment to a specific device.
+
+    Uses a pull-based model: the deployment payload is stored in the DB and
+    the device picks it up on its next register/heartbeat cycle.  This works
+    correctly even when the device is behind NAT or a private network.
     """
-    from ..db import Device
-    import httpx
-    
+    from ..db import Device, DeviceDeployment
+    import base64
+
     try:
         # Validate model
         model = db.query(TrainedModel).filter(
@@ -1550,7 +1548,7 @@ async def deploy_model_to_device(
             raise HTTPException(status_code=404, detail="Model not found")
         if not model.model_data:
             raise HTTPException(status_code=400, detail="Model has no weights to deploy")
-        
+
         # Validate device
         device = db.query(Device).filter(
             Device.device_uuid == request.device_id,
@@ -1558,12 +1556,8 @@ async def deploy_model_to_device(
         ).first()
         if not device:
             raise HTTPException(status_code=404, detail="Device not found")
-        if not device.online:
-            raise HTTPException(status_code=400, detail="Device is offline")
-        if not device.ip_address:
-            raise HTTPException(status_code=400, detail="Device has no known IP address")
-        
-        # Build deployment payload
+
+        # Build deployment config
         deployment_id = str(uuid.uuid4())
         deploy_config = request.config or {}
         deploy_config.update({
@@ -1572,8 +1566,8 @@ async def deploy_model_to_device(
             "model_type": model.architecture or "unknown",
             "deployed_at": datetime.utcnow().isoformat(),
         })
-        
-        # Get the training job config for preprocessing info
+
+        # Enrich with training job preprocessing info
         if model.job_id:
             job = db.query(TrainingJob).filter(TrainingJob.job_id == model.job_id).first()
             if job and job.config:
@@ -1587,42 +1581,43 @@ async def deploy_model_to_device(
                     deploy_config["class_names"] = job_config.get("class_names", [])
                 except (json.JSONDecodeError, TypeError):
                     pass
-        
-        async def push_model_to_device():
-            """Background task to push model weights + config to the device."""
-            import base64
-            try:
-                device_url = f"http://{device.ip_address}:8421/api/deploy-model"
-                payload = {
-                    "deployment_id": deployment_id,
-                    "model_name": model.name,
-                    "model_type": model.architecture or "unknown",
-                    "model_data": base64.b64encode(model.model_data).decode("utf-8"),
-                    "config": deploy_config,
-                }
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(device_url, json=payload)
-                    resp.raise_for_status()
-                    logger.info(f"Model '{model.name}' deployed to device {device.device_uuid}")
-            except Exception as e:
-                logger.error(f"Failed to push model to device {device.device_uuid}: {e}")
-        
-        background_tasks.add_task(push_model_to_device)
-        
+
+        # Build full payload (model weights encoded as base64)
+        full_payload = {
+            "deployment_id": deployment_id,
+            "model_name": model.name,
+            "model_type": model.architecture or "unknown",
+            "model_data": base64.b64encode(model.model_data).decode("utf-8"),
+            "config": deploy_config,
+        }
+
+        # Store in DB — device will pick it up on next register/heartbeat
+        record = DeviceDeployment(
+            deployment_id=deployment_id,
+            device_uuid=request.device_id,
+            model_id=model_id,
+            user_id=current_user.userId,
+            payload=json.dumps(full_payload),
+            status="pending",
+        )
+        db.add(record)
+        db.commit()
+
+        logger.info(f"Deployment {deployment_id} queued for device {request.device_id}")
         return {
             "success": True,
             "deployment_id": deployment_id,
             "model_name": model.name,
             "device_name": device.device_name,
             "device_id": device.device_uuid,
-            "message": f"Deploying '{model.name}' to '{device.device_name}'..."
+            "message": f"'{model.name}' queued for deployment — device will receive it on next sync"
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to deploy model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to deploy model: {str(e)}")
+        logger.error(f"Failed to queue deployment: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to queue deployment: {str(e)}")
 
 
 @router.get("/models/pending-deployments")
