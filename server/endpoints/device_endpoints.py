@@ -633,6 +633,33 @@ async def approve_device(
     return {"success": True, "message": "Device approved", "device_id": device_id}
 
 
+@router.post("/{device_id}/offline")
+async def device_offline(
+    device_id: str,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Device calls this on graceful shutdown or uninstall to immediately mark itself offline.
+
+    No strong auth required — the device already has its own device_id as identity.
+    An invalid token just means we skip user-id validation.
+    """
+    try:
+        device = db.query(Device).filter(Device.device_uuid == device_id).first()
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+        device.online = False
+        db.commit()
+        logger.info(f"Device {device_id} marked offline via explicit signal")
+        return {"success": True, "message": "Device marked offline"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error marking device offline: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/{device_id}/deployment/{deployment_id}/ack")
 async def ack_deployment(
     device_id: str,

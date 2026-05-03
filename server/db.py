@@ -417,11 +417,20 @@ class Device(Base):
             except (json.JSONDecodeError, TypeError):
                 hw_info = None
         
+        # A device is only online if it sent a heartbeat/register within 30 s
+        # (3× the default 10 s heartbeat interval).  This handles ungraceful
+        # shutdowns and uninstalls without needing a background cleanup task.
+        if self.last_seen:
+            age = (datetime.utcnow() - self.last_seen).total_seconds()
+            is_online = self.online and age <= 30
+        else:
+            is_online = False
+
         return {
             "device_id": self.device_uuid,
             "device_name": self.device_name,
             "device_type": self.device_type,
-            "online": self.online,
+            "online": is_online,
             "battery_level": self.battery_level,
             "last_seen": self.last_seen.isoformat() if self.last_seen else None,
             "ip_address": self.ip_address,
