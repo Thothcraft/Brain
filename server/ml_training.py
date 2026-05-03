@@ -362,6 +362,28 @@ def parse_csi_file(
         return [], {"error": str(e)}
 
 
+def parse_image_file(content: bytes, target_size: Tuple[int, int] = (64, 64), grayscale: bool = False) -> List[np.ndarray]:
+    """Parse an image file (JPEG/PNG/etc.) and return it as a single-sample list.
+    
+    Each image becomes one sample: a 1-D float32 array of normalised pixel values.
+    Returns a list with a single numpy array, or an empty list on failure.
+    """
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(io.BytesIO(content))
+        resample = getattr(PILImage, 'Resampling', PILImage).BILINEAR
+        img = img.resize(target_size, resample)
+        if grayscale:
+            img = img.convert('L')
+        else:
+            img = img.convert('RGB')
+        arr = np.array(img, dtype=np.float32) / 255.0
+        return [arr.reshape(-1)]
+    except Exception as e:
+        logger.warning(f"Failed to parse image file: {e}")
+        return []
+
+
 def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
     """Parse IMU JSON file and extract windows of data.
     
@@ -693,6 +715,19 @@ def _block_imu_loader(content: bytes, config: dict, max_preview: int = 32) -> Tu
     return arr, {"block": "imu_loader", "name": "IMU Loader", "shape": list(arr.shape), "sample": sample}
 
 
+def _block_image_loader(content: bytes, config: dict, max_preview: int = 32) -> Tuple[np.ndarray, dict]:
+    """Load an image file and return it as a flat normalised float32 array."""
+    target_w = int(config.get("width", 64))
+    target_h = int(config.get("height", 64))
+    grayscale = bool(config.get("grayscale", False))
+    samples = parse_image_file(content, target_size=(target_w, target_h), grayscale=grayscale)
+    if not samples:
+        return np.array([]), {"block": "image_loader", "name": "Image Loader", "shape": [], "sample": [], "error": "No image data parsed"}
+    arr = np.stack(samples, axis=0)
+    sample = arr[0, :max_preview].tolist() if arr.size else []
+    return arr, {"block": "image_loader", "name": "Image Loader", "shape": list(arr.shape), "sample": sample}
+
+
 # Block registry
 PREPROCESSING_BLOCKS = {
     "csi_loader": _block_csi_loader,
@@ -705,6 +740,7 @@ PREPROCESSING_BLOCKS = {
     "moving_average": _block_moving_average,
     "zscore_normalize": _block_zscore_normalize,
     "imu_loader": _block_imu_loader,
+    "image_loader": _block_image_loader,
 }
 
 
@@ -745,6 +781,8 @@ def execute_preprocessing_pipeline_preview(
                 pipeline_blocks.append({"type": "subcarrier_filter"})
             pipeline_blocks.append({"type": "feature_concat"})
             pipeline_blocks.append({"type": "data_portion_selector"})
+        elif data_type == "image":
+            pipeline_blocks = [{"type": "image_loader"}]
         else:
             pipeline_blocks = [{"type": "imu_loader"}]
 
@@ -798,6 +836,8 @@ def execute_preprocessing_pipeline_preview(
                     info = {"block": "zscore_normalize", "name": "Z-Score Normalize", "shape": [], "sample": [], "error": "No data"}
             elif block_type == "imu_loader":
                 current_data, info = _block_imu_loader(content, block_params, max_preview_values)
+            elif block_type == "image_loader":
+                current_data, info = _block_image_loader(content, block_params, max_preview_values)
             else:
                 info = {"block": block_type, "name": block_type, "shape": [], "sample": [], "error": f"Unknown block type: {block_type}"}
             stages.append(info)
@@ -843,6 +883,8 @@ def execute_preprocessing_pipeline(
                 pipeline_blocks.append({"type": "subcarrier_filter"})
             pipeline_blocks.append({"type": "feature_concat"})
             pipeline_blocks.append({"type": "data_portion_selector"})
+        elif data_type == "image":
+            pipeline_blocks = [{"type": "image_loader"}]
         else:
             pipeline_blocks = [{"type": "imu_loader"}]
     
@@ -896,6 +938,8 @@ def execute_preprocessing_pipeline(
                     current_data, info = _block_zscore_normalize(current_data, block_params, 0)
             elif block_type == "imu_loader":
                 current_data, info = _block_imu_loader(content, block_params, 0)
+            elif block_type == "image_loader":
+                current_data, info = _block_image_loader(content, block_params, 0)
             else:
                 logger.warning(f"Unknown preprocessing block type: {block_type}")
                 continue
@@ -1052,20 +1096,41 @@ def detect_file_type(content: bytes, filename: str = "") -> str:
     Returns:
         "csi" or "imu"
     """
-    # Check filename hints
+    # Check filename extension first (most reliable)
     filename_lower = filename.lower()
+    image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.heic', '.heif')
+    if any(filename_lower.endswith(ext) for ext in image_exts):
+        return "image"
+    audio_exts = ('.wav', '.mp3', '.m4a', '.flac', '.ogg', '.aac')
+    if any(filename_lower.endswith(ext) for ext in audio_exts):
+        return "audio"
+    video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v')
+    if any(filename_lower.endswith(ext) for ext in video_exts):
+        return "video"
+    fmcw_exts = ('.bin', '.dat', '.npy')
+    if any(filename_lower.endswith(ext) for ext in fmcw_exts):
+        return "fmcw"
     if 'csi' in filename_lower:
         return "csi"
     if 'imu' in filename_lower:
         return "imu"
-    
-    # Check content
+
+    # Check binary magic bytes for images
+    if len(content) >= 4:
+        magic = content[:4]
+        if magic[:3] == b'\xff\xd8\xff' or magic == b'\x89PNG':
+            return "image"
+        if magic[:3] == b'GIF':
+            return "image"
+        if magic[:2] in (b'BM',):
+            return "image"
+
+    # Check content for text-based formats
     try:
         text = content.decode('utf-8', errors='ignore')[:2000]  # Check first 2KB
         
         # CSI files have bracket arrays like [1, 2, 3, ...]
         if '[' in text and ']' in text:
-            # Check if it looks like CSI data (many comma-separated numbers in brackets)
             import re
             bracket_match = re.search(r'\[[\d\s,.-]+\]', text)
             if bracket_match:
@@ -1290,8 +1355,11 @@ def load_dataset_from_db(
                 if "error" in metadata and not windows:
                     logger.warning(f"CSI parsing failed for {filename}: {metadata.get('error')}")
                     continue
-                    
-            else:  # IMU
+
+            elif file_type == "image":
+                windows = parse_image_file(file_content)
+
+            else:  # IMU / unknown
                 windows = parse_imu_file(file_content, window_size)
         
         if windows:
