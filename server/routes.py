@@ -48,6 +48,7 @@ from server.endpoints.folders import router as folders_router
 from server.endpoints.admin_endpoints import router as admin_router
 from server.endpoints.org_endpoints import router as org_router
 from server.endpoints.labs_endpoints import router as labs_router
+from server.endpoints.stripe_endpoints import router as stripe_router
 
 # Create main router
 router = APIRouter()
@@ -77,6 +78,7 @@ router.include_router(folders_router)            # /folders/* (Folder management
 router.include_router(admin_router)              # /admin/* (Admin dashboard)
 router.include_router(org_router)                # /org/* (Organization management)
 router.include_router(labs_router)               # /labs/* (Labs & submissions)
+router.include_router(stripe_router)              # /stripe/* (Stripe payments)
 
 # ============================================================================
 # MODULAR ENDPOINTS LOADED

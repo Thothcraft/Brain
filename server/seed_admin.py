@@ -12,8 +12,16 @@ from pathlib import Path
 server_root = Path(__file__).parent
 sys.path.insert(0, str(server_root))
 
-from server.db import get_db, User
-from server.auth import get_password_hash
+from db import get_db, User
+import bcrypt
+
+def get_password_hash(password: str) -> str:
+    """Hash a password using bcrypt."""
+    if len(password) > 72:
+        password = password[:72]
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
 
 
 def main():
