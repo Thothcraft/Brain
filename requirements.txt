@@ -33,3 +33,4 @@ flwr[simulation]>=1.5.0
 flwr-datasets>=0.1.0
 torchvision>=0.15.0
 datasets>=2.14.0
+stripe>=15.0.0

@@ -3,9 +3,16 @@
 import json
 import logging
 import os
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, Request, HTTPException, status, Depends
 from fastapi.responses import Response
-import stripe
+from sqlalchemy.orm import Session
+
+try:
+    import stripe
+    STRIPE_AVAILABLE = True
+except ImportError:
+    STRIPE_AVAILABLE = False
+    stripe = None
 
 from server.db import get_db, User, Payment
 from server.auth import get_current_user
@@ -14,7 +21,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
 # Configure Stripe
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+if STRIPE_AVAILABLE and os.getenv("STRIPE_SECRET_KEY"):
+    stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 # Price IDs (update these after running setup_stripe.py)
@@ -32,6 +40,10 @@ PLAN_PRICES = {
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhooks."""
+    if not STRIPE_AVAILABLE:
+        logger.error("Stripe package not installed")
+        raise HTTPException(status_code=503, detail="Payment service not available")
+    
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
@@ -181,6 +193,10 @@ async def create_checkout_session(
     db: Session = Depends(get_db)
 ):
     """Create a Stripe checkout session for plan upgrade."""
+    if not STRIPE_AVAILABLE:
+        logger.error("Stripe package not installed")
+        raise HTTPException(status_code=503, detail="Payment service not available")
+    
     if plan not in PRICE_IDS or not PRICE_IDS[plan]:
         raise HTTPException(status_code=400, detail="Invalid plan")
     
