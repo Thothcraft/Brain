@@ -131,7 +131,7 @@ async def login_for_access_token(
         # Create access token
         access_token_expires = timedelta(days=30)  # Token expires in 30 days
         access_token = create_access_token(
-            data={"sub": str(user.userId)}, expires_delta=access_token_expires
+            data={"sub": str(user.userId), "role": user.role}, expires_delta=access_token_expires
         )
         
         response_data = {
@@ -139,7 +139,8 @@ async def login_for_access_token(
             "token_type": "bearer",
             "expires_in": 2592000,  # 30 days in seconds (30 * 24 * 60 * 60)
             "user_id": user.userId,
-            "username": user.username
+            "username": user.username,
+            "role": user.role,
         }
         
         log_response(200, response_data, "/token")
@@ -294,6 +295,9 @@ async def get_user_profile(
         profile_data = {
             "userId": current_user.userId,
             "username": current_user.username,
+            "role": current_user.role,
+            "plan": current_user.plan or "free",
+            "org_name": current_user.org_name,
             "email": f"{current_user.username}@example.com",  # Default email since it's not in the model
             "phone_number": current_user.phone_number or 0,  # Default to 0 if None
             "created_at": datetime.utcnow().isoformat()  # Add current timestamp

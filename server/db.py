@@ -207,10 +207,20 @@ class User(Base):
     """Bcrypt hash of the user's password"""
     max_file_size = Column("max_file_size", Integer, default=524288000)  # 500MB default max file size
     """Maximum allowed file size in bytes (default: 500MB)"""
-    role = Column("role", SmallInteger, default=0)  # Added user's role, int2 with default 0
-    """User's role (int2 with default 0)"""
-    phone_number = Column("phone_number", BigInteger, nullable=True, unique=True, index=True) # Added phone number
+    role = Column("role", SmallInteger, default=0)  # 0=user, 1=admin, 2=organization
+    """User's role: 0=regular user, 1=admin, 2=organization"""
+    phone_number = Column("phone_number", BigInteger, nullable=True, unique=True, index=True)
     """User's phone number"""
+    plan = Column("plan", String(50), default="free")  # free, researcher, organization
+    """User's subscription plan"""
+    stripe_customer_id = Column("stripe_customer_id", String(255), nullable=True)
+    """Stripe customer ID"""
+    stripe_subscription_id = Column("stripe_subscription_id", String(255), nullable=True)
+    """Stripe subscription ID"""
+    plan_expires_at = Column("plan_expires_at", DateTime, nullable=True)
+    """When the current plan expires"""
+    org_name = Column("org_name", String(255), nullable=True)
+    """Organization display name (for role=2 accounts)"""
     
     # Relationships
     files = relationship("File", back_populates="user")
@@ -221,6 +231,10 @@ class User(Base):
     """Relationship to Session objects for this user"""
     devices = relationship("Device", back_populates="user")
     """Relationship to Device objects for this user"""
+    org_memberships_as_member = relationship("OrgMembership", foreign_keys="OrgMembership.member_id", back_populates="member")
+    """Org memberships where this user is a member"""
+    org_memberships_as_org = relationship("OrgMembership", foreign_keys="OrgMembership.org_id", back_populates="org")
+    """Org memberships this org owns"""
 
 
 class File(Base):
@@ -717,6 +731,98 @@ class DeviceDeployment(Base):
     status = Column(String(50), default="pending", index=True)  # pending | delivered | failed
     created_at = Column(DateTime, default=datetime.utcnow)
     delivered_at = Column(DateTime, nullable=True)
+
+
+class OrgMembership(Base):
+    """Tracks which users belong to which organization accounts."""
+    __tablename__ = "org_membership"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    member_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    status = Column(String(20), default="pending", index=True)  # pending | approved | declined
+    invited_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+    invite_code = Column(String(50), nullable=True)
+
+    org = relationship("User", foreign_keys=[org_id], back_populates="org_memberships_as_org")
+    member = relationship("User", foreign_keys=[member_id], back_populates="org_memberships_as_member")
+
+    __table_args__ = (UniqueConstraint("org_id", "member_id", name="uq_org_member"),)
+
+
+class InviteCode(Base):
+    """Organization invite codes that users can use to request membership."""
+    __tablename__ = "invite_code"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    org_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    max_uses = Column(Integer, default=100)
+    uses_count = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+
+    org = relationship("User", foreign_keys=[org_id])
+
+
+class Lab(Base):
+    """Practice labs created by admins, visible to approved org members."""
+    __tablename__ = "lab"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    sensor_type = Column(String(50), nullable=False)  # camera | wifi_sensing | cwmf
+    difficulty = Column(String(20), default="beginner")  # beginner | intermediate | advanced
+    questions = Column(Text, nullable=False)  # JSON: [{id, type, prompt, options?, correct_answer}]
+    max_score = Column(Integer, default=100)
+    created_by = Column(Integer, ForeignKey("user_account.user_id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_published = Column(Boolean, default=True)
+
+    creator = relationship("User", foreign_keys=[created_by])
+    submissions = relationship("LabSubmission", back_populates="lab")
+
+
+class LabSubmission(Base):
+    """A member's submission for a lab."""
+    __tablename__ = "lab_submission"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    lab_id = Column(Integer, ForeignKey("lab.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    org_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    answers = Column(Text, nullable=False)  # JSON: {question_id: answer}
+    score = Column(Float, nullable=True)
+    max_score = Column(Integer, nullable=True)
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    graded_at = Column(DateTime, nullable=True)
+    feedback = Column(Text, nullable=True)
+
+    lab = relationship("Lab", back_populates="submissions")
+    user = relationship("User", foreign_keys=[user_id])
+
+    __table_args__ = (UniqueConstraint("lab_id", "user_id", name="uq_lab_user"),)
+
+
+class Payment(Base):
+    """Payment records linked to Stripe events."""
+    __tablename__ = "payment"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    stripe_payment_intent = Column(String(255), nullable=True)
+    stripe_invoice_id = Column(String(255), nullable=True)
+    amount = Column(Integer, nullable=False)  # Amount in cents
+    currency = Column(String(10), default="usd")
+    plan = Column(String(50), nullable=True)  # which plan was purchased
+    status = Column(String(50), default="pending")  # pending | succeeded | failed | refunded
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
 
 
 # DO NOT run migrations or create tables at import time in serverless environments!

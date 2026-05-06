@@ -154,7 +154,7 @@ async def get_recent_activity(
                 "type": "model",
                 "action": "created",
                 "title": "Model saved",
-                "description": f"{model.name} ({model.accuracy*100:.1f}% accuracy)" if model.accuracy else model.name,
+                "description": f"{model.name} ({model.accuracy:.1f}% accuracy)" if model.accuracy else model.name,
                 "timestamp": model.created_at.isoformat(),
                 "icon": "brain",
                 "color": "purple",
