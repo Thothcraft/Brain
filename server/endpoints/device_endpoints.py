@@ -38,6 +38,7 @@ router = APIRouter(prefix="/device", tags=["devices"])
 
 # Cache for device authentication tokens
 device_auth_cache = {}
+FREE_PLAN_MAX_ONLINE_DEVICES = 1
 
 # Rate limiting for device registration (new devices only)
 # Existing device updates are not rate limited as strictly
@@ -49,6 +50,33 @@ REGISTRATION_RATE_LIMIT = {
 class DeviceRegistrationError(Exception):
     """Custom exception for device registration errors."""
     pass
+
+
+def _is_free_plan_user(user: Union[User, Any]) -> bool:
+    """
+    Treat role=0 as Free plan.
+    Paid/organization users can use role values above 0.
+    """
+    try:
+        return int(getattr(user, "role", 0) or 0) == 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _can_mark_device_online(
+    db: Session,
+    user_id: int,
+    current_device_id: Optional[int] = None
+) -> bool:
+    """Return True when user can bring another device online."""
+    online_count_query = db.query(Device).filter(
+        Device.userId == user_id,
+        Device.online == True
+    )
+    if current_device_id is not None:
+        online_count_query = online_count_query.filter(Device.deviceId != current_device_id)
+    online_count = online_count_query.count()
+    return online_count < FREE_PLAN_MAX_ONLINE_DEVICES
 
 def validate_ip_address(ip_str: str) -> bool:
     """Validate an IP address string."""
@@ -490,6 +518,16 @@ async def register_device(
             now = datetime.utcnow()
             
             if existing_device:
+                if _is_free_plan_user(current_user) and not _can_mark_device_online(
+                    db,
+                    user_id,
+                    current_device_id=existing_device.deviceId
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+                    )
+
                 # Update existing device
                 existing_device.device_name = device_name
                 existing_device.device_type = request.device_type or existing_device.device_type
@@ -533,6 +571,11 @@ async def register_device(
                     "pending_deployments": pending_deployments
                 }
             
+            if _is_free_plan_user(current_user) and not _can_mark_device_online(db, user_id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+                )
             # Create new device record — not yet approved; user must confirm in portal
             new_device = Device(
                 userId=user_id,
@@ -830,9 +873,20 @@ async def update_device_status(
         
         # Update device status
         now = datetime.utcnow()
+        requested_online = request.status.lower() == "online" if hasattr(request, 'status') else device.online
+        if requested_online and _is_free_plan_user(current_user) and not _can_mark_device_online(
+            db,
+            current_user.userId,
+            current_device_id=device.deviceId
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+            )
+
         update_data = {
             "last_seen": now,
-            "online": request.status.lower() == "online" if hasattr(request, 'status') else device.online,
+            "online": requested_online,
             "updated_at": now
         }
         
@@ -1193,9 +1247,20 @@ async def device_heartbeat(
         
         # Update device status
         now = datetime.utcnow()
+        requested_online = request.online if hasattr(request, 'online') and request.online is not None else True
+        if requested_online and _is_free_plan_user(current_user) and not _can_mark_device_online(
+            db,
+            current_user.userId,
+            current_device_id=device.deviceId
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+            )
+
         update_data = {
             "last_seen": now,
-            "online": True,
+            "online": requested_online,
             "updated_at": now
         }
         
