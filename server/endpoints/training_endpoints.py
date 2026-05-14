@@ -20,13 +20,8 @@ from collections import defaultdict
 # Import shared models
 from .models import StandardResponse
 
-# Import real training functions
-from server.ml_training import (
-    train_model,
-    IMUClassifier,
-    load_dataset_from_db,
-    save_model_to_bytes,
-)
+# ml_training (torch/sklearn) is imported lazily inside run_training()
+# to avoid loading PyTorch at server startup time.
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +184,12 @@ async def run_training(job: TrainingJob, db_session=None):
     from torch.utils.data import DataLoader, TensorDataset
     from sklearn.model_selection import train_test_split
     import time
+    from server.ml_training import (
+        train_model,
+        IMUClassifier,
+        load_dataset_from_db,
+        save_model_to_bytes,
+    )
     
     try:
         job.status = TrainingStatus.RUNNING

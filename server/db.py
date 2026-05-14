@@ -35,8 +35,8 @@ try:
     from server.pro_config import pro_config
     DATABASE_URL = pro_config.get_database_url()
     print(f"[DB] Using Supabase Pro Plan configuration")
-except ImportError:
-    print(f"[DB] Pro Plan config not available, using standard configuration")
+except (ImportError, ValueError) as e:
+    print(f"[DB] Pro Plan config not available, using standard configuration: {e}")
 
 print(f"[DB] Using DATABASE_URL: {DATABASE_URL}")
 
