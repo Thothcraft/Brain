@@ -51,20 +51,21 @@ try:
 except ImportError:
     # Fallback to manual configuration
     engine_kwargs = {
-        "pool_size": 50,  # Increased for Pro Plan - more compute resources available
-        "max_overflow": 100,  # Increased overflow for burst capacity
-        "pool_timeout": 30,  # Reduced timeout since Pro Plan has better performance
+        "pool_size": 20,  # Reduced from 50 to prevent connection exhaustion
+        "max_overflow": 30,  # Reduced from 100 for better stability
+        "pool_timeout": 30,
         "pool_pre_ping": True,
-        "pool_recycle": 1800,  # Reduced to 30 minutes - Pro Plan can handle more frequent recycling
+        "pool_recycle": 600,  # Reduced from 1800 to 10 minutes - more frequent recycling prevents SSL timeouts
+        "pool_use_lifo": True,  # Use LIFO to recycle newer connections first
         "connect_args": {
-            "connect_timeout": 30,  # Reduced timeout for better responsiveness
-            "application_name": "thoth_pro",  # Identify connection in Supabase dashboard
+            "connect_timeout": 10,  # Reduced from 30 for faster failure detection
+            "application_name": "thoth_pro",
             "sslmode": "require",
             "keepalives": 1,
-            "keepalives_idle": 30,
-            "keepalives_interval": 10,
-            "keepalives_count": 5,
-            "options": "-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000"  # Optimized timeouts
+            "keepalives_idle": 15,  # Reduced from 30 to send keepalives more frequently
+            "keepalives_interval": 5,  # Reduced from 10 for more frequent checks
+            "keepalives_count": 3,  # Reduced from 5 to fail faster
+            "options": "-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000 -c tcp_keepalives_idle=15 -c tcp_keepalives_interval=5 -c tcp_keepalives_count=3"
         }
     }
     print(f"[DB] Using fallback engine settings")
@@ -78,27 +79,36 @@ db_logger = logging.getLogger('database')
 
 def get_db():
     """Dependency to get database session with retry logic."""
-    max_retries = 3  # Increased to 3 for better SSL error recovery
-    retry_delay = 0.5  # Increased delay for SSL connection recovery
+    max_retries = 3
+    retry_delay = 1.0  # Increased from 0.5 for better recovery
     
     for attempt in range(max_retries):
         db = SessionLocal()
         try:
-            # Test the connection
+            # Test the connection with a simple query
             db.execute(text("SELECT 1"))
             yield db
             return
         except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
-            db_logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
-            db.close()
+            db_logger.warning(f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            try:
+                db.close()
+            except:
+                pass
             
             # On SSL errors, dispose the engine to force new connections
-            if "SSL" in str(e) or "closed unexpectedly" in str(e):
-                db_logger.info("SSL connection error detected, disposing engine")
-                engine.dispose()
+            if "SSL" in str(e) or "closed unexpectedly" in str(e) or "server closed the connection unexpectedly" in str(e):
+                db_logger.warning("SSL/connection error detected, disposing engine to force new connections")
+                try:
+                    engine.dispose()
+                except:
+                    pass
             
             if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                # Exponential backoff with jitter
+                import random
+                jitter = random.uniform(0.8, 1.2)
+                time.sleep(retry_delay * (attempt + 1) * jitter)
             else:
                 db_logger.error(f"All {max_retries} database connection attempts failed")
                 raise
@@ -111,8 +121,8 @@ def get_db():
 @contextmanager
 def get_db_session():
     """Context manager for database sessions with automatic cleanup."""
-    max_retries = 3  # Increased to 3 for better SSL error recovery
-    retry_delay = 0.5  # Increased delay for SSL connection recovery
+    max_retries = 3
+    retry_delay = 1.0  # Increased from 0.5
     
     for attempt in range(max_retries):
         db = SessionLocal()
@@ -123,20 +133,29 @@ def get_db_session():
             db.commit()
             return
         except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
-            db_logger.warning(f"Database session attempt {attempt + 1} failed: {e}")
+            db_logger.warning(f"Database session attempt {attempt + 1}/{max_retries} failed: {e}")
             try:
                 db.rollback()
             except:
                 pass
-            db.close()
+            try:
+                db.close()
+            except:
+                pass
             
             # On SSL errors, dispose the engine to force new connections
-            if "SSL" in str(e) or "closed unexpectedly" in str(e):
-                db_logger.info("SSL connection error detected, disposing engine")
-                engine.dispose()
+            if "SSL" in str(e) or "closed unexpectedly" in str(e) or "server closed the connection unexpectedly" in str(e):
+                db_logger.warning("SSL/connection error detected, disposing engine")
+                try:
+                    engine.dispose()
+                except:
+                    pass
             
             if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                # Exponential backoff with jitter
+                import random
+                jitter = random.uniform(0.8, 1.2)
+                time.sleep(retry_delay * (attempt + 1) * jitter)
             else:
                 db_logger.error(f"All {max_retries} database session attempts failed")
                 raise
@@ -145,7 +164,10 @@ def get_db_session():
                 db.rollback()
             except:
                 pass
-            db.close()
+            try:
+                db.close()
+            except:
+                pass
             raise
         finally:
             try:

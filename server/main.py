@@ -284,20 +284,13 @@ app.add_middleware(
         "X-Request-Id",
         "X-Response-Time",
     ],
-    max_age=600,  # 10 minutes
+    max_age=3600,  # 1 hour
 )
 
 # --------------------------------------------------
 # Global logging middleware
 # --------------------------------------------------
 from time import perf_counter
-from server.utils.logging_utils import (
-    log_request_start,
-    log_request_payload,
-    log_response,
-    log_error,
-    logger as app_logger,
-)
 
 @app.middleware("http")
 async def global_logging_middleware(request: Request, call_next):
@@ -306,10 +299,10 @@ async def global_logging_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())
     start = perf_counter()
     endpoint = request.url.path
-    
+
     # Add request ID to logger context
     logger = logging.LoggerAdapter(app_logger, {'request_id': request_id})
-    
+
     # Skip logging for health checks to reduce noise
     if endpoint == "/health":
         return await call_next(request)
@@ -321,11 +314,12 @@ async def global_logging_middleware(request: Request, call_next):
         if body_bytes and len(body_bytes) <= 10_240:  # 10 KB safety limit
             try:
                 body_str = body_bytes.decode("utf-8", errors="ignore")
-                # Try to pretty print JSON if possible
+                # Try to pretty print JSON if possible, but don't fail if malformed
                 try:
                     json_body = json.loads(body_str)
                     body_str = json.dumps(json_body, indent=2)
                 except (json.JSONDecodeError, TypeError):
+                    # Keep original string if JSON is malformed
                     pass
             except Exception as e:
                 body_str = f"<binary data: {str(e)[:200]}>"
@@ -337,11 +331,11 @@ async def global_logging_middleware(request: Request, call_next):
     # Log the request with additional context
     client_ip = request.client.host if request.client else "unknown"
     user_agent = request.headers.get('user-agent', 'unknown')
-    
+
     logger.info(
-        "[REQ] %s %s from %s | UA: %s | Body: %s", 
-        request.method, 
-        endpoint, 
+        "[REQ] %s %s from %s | UA: %s | Body: %s",
+        request.method,
+        endpoint,
         client_ip,
         user_agent,
         body_str if body_str else "<no body>"
@@ -350,28 +344,37 @@ async def global_logging_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
         duration_ms = (perf_counter() - start) * 1000
-        
+
         # Log response summary
         status_code = getattr(response, "status_code", "<no response>")
         logger.info(
-            "[RESP] %s %s -> %d | %.2f ms", 
-            request.method, 
-            endpoint, 
+            "[RESP] %s %s -> %d | %.2f ms",
+            request.method,
+            endpoint,
             status_code,
             duration_ms
         )
-        
+
+        # Warn if response time is too slow (> 5 seconds)
+        if duration_ms > 5000:
+            logger.warning(
+                "[SLOW] %s %s took %.2f ms - consider optimization",
+                request.method,
+                endpoint,
+                duration_ms
+            )
+
         # Add request ID to response headers
         response.headers["X-Request-ID"] = request_id
         return response
-        
+
     except Exception as exc:
         duration_ms = (perf_counter() - start) * 1000
         logger.error(
-            "[ERROR] %s %s failed after %.2f ms: %s\n%s", 
-            request.method, 
-            endpoint, 
-            duration_ms, 
+            "[ERROR] %s %s failed after %.2f ms: %s\n%s",
+            request.method,
+            endpoint,
+            duration_ms,
             str(exc),
             traceback.format_exc()
         )
