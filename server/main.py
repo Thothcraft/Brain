@@ -393,6 +393,15 @@ async def root():
         }
     }
 
+# Health check endpoint (outside /api prefix for deployment health checks)
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "timestamp": str(perf_counter()),
+        "version": APP_VERSION
+    }
+
 # Global OPTIONS handler for CORS preflight requests
 @app.options("/{path:path}")
 async def options_handler(path: str, request: Request):
