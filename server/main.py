@@ -411,8 +411,8 @@ async def options_handler(path: str, request: Request):
         )
     return Response(status_code=400)
 
-# Include API router without prefix
-app.include_router(router, prefix="")
+# Include API router with /api prefix
+app.include_router(router, prefix=API_PREFIX)
 
 # Start the scheduler when the application starts
 start_scheduler()
