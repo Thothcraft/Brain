@@ -39,15 +39,15 @@ class HealthCheckResponse(BaseModel):
 async def health_check() -> Dict[str, Any]:
     """
     Health check endpoint to verify API status.
-    
+
     Purpose: Provide system health status for monitoring and load balancers
-    
+
     Returns:
         HealthCheckResponse: System health information
     """
     try:
         log_request_start("GET", "/health", None)
-        
+
         # Quick database connectivity check with timeout
         db_status = {"status": "unknown"}
         try:
@@ -64,11 +64,11 @@ async def health_check() -> Dict[str, Any]:
             }
         except Exception as e:
             db_status = {
-                "status": "error", 
+                "status": "error",
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat()
             }
-        
+
         # Get detailed health monitor status if available
         health_monitor_status = None
         if get_database_health_status:
@@ -76,14 +76,14 @@ async def health_check() -> Dict[str, Any]:
                 health_monitor_status = get_database_health_status()
             except Exception as e:
                 logger.warning(f"Health monitor status unavailable: {e}")
-        
+
         # Determine overall health
         overall_status = "healthy"
         if db_status.get("status") not in ["connected"]:
             overall_status = "unhealthy"
         elif health_monitor_status and health_monitor_status.get("failure_count", 0) > 0:
             overall_status = "degraded"
-        
+
         response_data = {
             "status": overall_status,
             "timestamp": datetime.utcnow().isoformat(),
@@ -92,10 +92,10 @@ async def health_check() -> Dict[str, Any]:
             "database": db_status,
             "health_monitor": health_monitor_status
         }
-        
+
         log_response(200, "Health check successful", "/health")
         return response_data
-        
+
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         log_error(f"Health check failed: {str(e)}")
@@ -117,15 +117,15 @@ async def health_check() -> Dict[str, Any]:
 async def root() -> Dict[str, Any]:
     """
     Root endpoint providing API information.
-    
+
     Purpose: Provide basic API information and welcome message
-    
+
     Returns:
         Dict: API information and available endpoints
     """
     try:
         log_request_start("GET", "/", None)
-        
+
         response_data = {
             "message": "Welcome to the AI-Powered Backend API",
             "version": "1.0.0",
@@ -135,16 +135,16 @@ async def root() -> Dict[str, Any]:
             },
             "endpoints": {
                 "health": "/health",
-                "auth": "/token",
-                "devices": "/device/*",
-                "data": "/data/*", 
-                "files": "/file/*"
+                "auth": "/api/token",
+                "devices": "/api/device/*",
+                "data": "/api/data/*",
+                "files": "/api/file/*"
             }
         }
-        
+
         log_response(200, "Root endpoint accessed", "/")
         return response_data
-        
+
     except Exception as e:
         log_error(f"Root endpoint error: {str(e)}")
         raise HTTPException(
@@ -161,39 +161,39 @@ async def root() -> Dict[str, Any]:
 async def database_health_check(force_refresh: bool = False) -> Dict[str, Any]:
     """
     Detailed database health check endpoint.
-    
+
     Purpose: Provide comprehensive database health information for monitoring
-    
+
     Args:
         force_refresh: Force a new health check instead of returning cached status
-        
+
     Returns:
         Dict: Detailed database health information
     """
     try:
         log_request_start("GET", "/database/health", None)
-        
+
         # Force new check if requested
         if force_refresh and force_database_health_check:
             await force_database_health_check()
-        
+
         # Get current database status
         db_status = test_database_connection()
-        
+
         # Get health monitor status if available
         monitor_status = None
         if get_database_health_status:
             monitor_status = get_database_health_status()
-        
+
         response_data = {
             "database": db_status,
             "monitor": monitor_status,
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
         log_response(200, "Database health check successful", "/database/health")
         return response_data
-        
+
     except Exception as e:
         logger.error(f"Database health check failed: {str(e)}")
         log_error(f"Database health check failed: {str(e)}")
