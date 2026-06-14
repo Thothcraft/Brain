@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel, Field
 import asyncio
 import json
-import random
 from collections import deque
 
 # Import shared models
@@ -66,33 +65,6 @@ sensor_history: deque = deque(maxlen=10000)
 # Active WebSocket connections
 active_connections: List[WebSocket] = []
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def generate_mock_sensor_data(device_id: str = "thoth-001") -> SensorData:
-    """Generate mock sensor data for testing.
-    
-    In production, this would interface with actual Sense HAT hardware.
-    """
-    return SensorData(
-        temperature=20.0 + random.uniform(-5, 5),
-        humidity=40.0 + random.uniform(-10, 10),
-        pressure=1013.25 + random.uniform(-20, 20),
-        orientation={
-            "pitch": random.uniform(-180, 180),
-            "roll": random.uniform(-180, 180),
-            "yaw": random.uniform(0, 360)
-        },
-        acceleration={
-            "x": random.uniform(-2, 2),
-            "y": random.uniform(-2, 2),
-            "z": random.uniform(-2, 2)
-        },
-        compass=random.uniform(0, 360),
-        device_id=device_id
-    )
-
 async def broadcast_sensor_data(data: SensorData):
     """Broadcast sensor data to all connected WebSocket clients."""
     message = data.model_dump_json()
@@ -122,20 +94,10 @@ async def get_current_sensor_data(device_id: str = Query("thoth-001", descriptio
     - Motion (orientation, acceleration)
     - Compass heading
     """
-    try:
-        # In production, this would query actual hardware
-        # For now, generate mock data
-        sensor_data = generate_mock_sensor_data(device_id)
-        
-        # Store in history
-        sensor_history.append(sensor_data.model_dump())
-        
-        # Broadcast to WebSocket clients
-        await broadcast_sensor_data(sensor_data)
-        
-        return sensor_data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read sensors: {str(e)}")
+    raise HTTPException(
+        status_code=501,
+        detail="Mock sensor data has been removed; real hardware is required",
+    )
 
 @router.post("/sensors/control", response_model=StandardResponse)
 async def control_sensors(
@@ -180,30 +142,11 @@ async def sensor_stream(websocket: WebSocket, device_id: str = "thoth-001"):
     active_connections.append(websocket)
     
     try:
-        # Send initial configuration
-        config = sensor_configs.get(device_id, SensorControl())
         await websocket.send_json({
-            "type": "config",
-            "data": config.model_dump()
+            "type": "error",
+            "message": "Mock sensor streaming has been removed; real hardware is required",
         })
-        
-        # Stream sensor data
-        while True:
-            # Generate and send sensor data
-            sensor_data = generate_mock_sensor_data(device_id)
-            
-            # Store in history
-            sensor_history.append(sensor_data.model_dump())
-            
-            # Send to this client
-            await websocket.send_json({
-                "type": "sensor_data",
-                "data": sensor_data.model_dump()
-            })
-            
-            # Wait before next reading (configurable interval)
-            await asyncio.sleep(1)  # 1 second interval
-            
+        await websocket.close(code=1011)
     except WebSocketDisconnect:
         active_connections.remove(websocket)
     except Exception as e:
