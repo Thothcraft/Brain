@@ -474,6 +474,7 @@ class Device(Base):
             "device_uuid": self.device_uuid,
             "user_id": self.userId,
             "hardware_info": hw_info,
+            "portal_upload_allowed": bool(hw_info.get("portal_upload_allowed", True)) if isinstance(hw_info, dict) else True,
             "approved": self.approved if self.approved is not None else False
         }
 

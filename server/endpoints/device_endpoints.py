@@ -63,6 +63,19 @@ def _is_free_plan_user(user: Union[User, Any]) -> bool:
         return True
 
 
+def _portal_upload_allowed_for_device(device: Device) -> bool:
+    """Return whether the device allows portal-initiated uploads."""
+    try:
+        if not device or not device.hardware_info:
+            return True
+        hw_info = json.loads(device.hardware_info) if isinstance(device.hardware_info, str) else device.hardware_info
+        if isinstance(hw_info, dict) and "portal_upload_allowed" in hw_info:
+            return bool(hw_info.get("portal_upload_allowed", True))
+    except Exception:
+        logger.debug("Unable to read portal upload flag from hardware_info", exc_info=True)
+    return True
+
+
 def _can_mark_device_online(
     db: Session,
     user_id: int,
@@ -500,6 +513,8 @@ async def register_device(
                 hardware_info['ip_address'] = ip_address
             if mac_address:
                 hardware_info['mac_address'] = mac_address
+            if 'portal_upload_allowed' not in hardware_info:
+                hardware_info['portal_upload_allowed'] = True
             
             # Check if device already exists (by UUID for this user)
             user_id = current_user.userId
@@ -1272,6 +1287,8 @@ async def device_heartbeat(
             update_data["collection_active"] = request.collection_active
         if hasattr(request, 'online') and request.online is not None:
             update_data["online"] = request.online
+        if hasattr(request, 'hardware_info') and request.hardware_info:
+            update_data["hardware_info"] = json.dumps(request.hardware_info)
         
         # Update IP address if available
         ip = get_client_ip(request_obj)
@@ -1386,7 +1403,17 @@ async def request_file_upload(
                 "message": "File already on cloud",
                 "cloud_file_id": device_file.cloud_file_id
             }
-        
+
+        device = db.query(Device).filter(
+            Device.deviceId == device_file.device_id,
+            Device.userId == current_user.userId
+        ).first()
+        if device and not _portal_upload_allowed_for_device(device):
+            raise HTTPException(
+                status_code=403,
+                detail="Portal-initiated uploads are disabled on this device"
+            )
+
         # Mark for upload
         device_file.upload_requested = True
         db.commit()

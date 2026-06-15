@@ -24,6 +24,7 @@ class DeviceHeartbeatRequest(BaseModel):
     device_id: str
     device_name: Optional[str] = None
     device_type: Optional[str] = None
+    hardware_info: Optional[Dict[str, Any]] = None
     current_app: Optional[str] = None
     current_page: Optional[str] = None
     current_url: Optional[str] = None
