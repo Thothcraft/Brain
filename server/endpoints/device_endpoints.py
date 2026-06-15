@@ -535,6 +535,7 @@ async def register_device(
                 existing_device.mac_address = mac_address or existing_device.mac_address
                 existing_device.last_seen = now
                 existing_device.online = True
+                existing_device.approved = True
                 
                 # Store hardware_info as JSON if provided
                 if hardware_info:
@@ -586,7 +587,7 @@ async def register_device(
                 mac_address=mac_address,
                 last_seen=now,
                 online=True,
-                approved=False,
+                approved=True,
                 hardware_info=json.dumps(hardware_info) if hardware_info else None
             )
             
