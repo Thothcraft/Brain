@@ -65,13 +65,13 @@ class ModelSelector:
     # Model definitions by output shape
     MODELS_1D = {
         "nano": [
-            ModelRecommendation("mlp_nano", "MLP Nano", "nano", "1d", "Minimal MLP for edge deployment", 5000, ["csi", "imu", "general_csv"], 1.0),
+            ModelRecommendation("mlp_nano", "MLP Nano", "nano", "1d", "Minimal MLP for edge deployment", 5000, ["csi", "imu", "general_csv", "radar", "fmcw"], 1.0),
         ],
         "mini": [
-            ModelRecommendation("mlp_mini", "MLP Mini", "mini", "1d", "Balanced MLP with batch norm", 50000, ["csi", "imu", "general_csv"], 2.0),
+            ModelRecommendation("mlp_mini", "MLP Mini", "mini", "1d", "Balanced MLP with batch norm", 50000, ["csi", "imu", "general_csv", "radar", "fmcw"], 2.0),
         ],
         "max": [
-            ModelRecommendation("mlp_max", "MLP Max", "max", "1d", "Maximum capacity MLP", 500000, ["csi", "imu", "general_csv"], 5.0),
+            ModelRecommendation("mlp_max", "MLP Max", "max", "1d", "Maximum capacity MLP", 500000, ["csi", "imu", "general_csv", "radar", "fmcw"], 5.0),
         ],
     }
     
@@ -266,19 +266,21 @@ class ModelSelector:
         Returns:
             List of preprocessing block configurations
         """
+        if data_type == "image":
+            from server.preprocessing.default_image import get_default_pipeline
+            return get_default_pipeline()
+        if data_type == "csi":
+            from server.preprocessing.default_csi import get_default_pipeline
+            return get_default_pipeline()
+        if data_type in {"fmcw", "radar"}:
+            from server.preprocessing.default_radar import get_default_pipeline
+            return get_default_pipeline()
+
         pipelines = {
-            "csi": [
-                {"type": "subcarrier_filter", "enabled": True, "params": {"start_idx": 5, "end_idx": 59}},
-                {"type": "zscore_normalize", "enabled": True, "params": {}},
-                {"type": "sliding_window", "enabled": True, "params": {"window_size": 128, "stride": 64}},
-            ],
             "imu": [
                 {"type": "zscore_normalize", "enabled": True, "params": {}},
                 {"type": "lowpass_filter", "enabled": True, "params": {"cutoff_ratio": 0.1}},
                 {"type": "sliding_window", "enabled": True, "params": {"window_size": 100, "stride": 50}},
-            ],
-            "image": [
-                {"type": "minmax_normalize", "enabled": True, "params": {"min_val": 0, "max_val": 1}},
             ],
             "video": [
                 {"type": "minmax_normalize", "enabled": True, "params": {"min_val": 0, "max_val": 1}},
@@ -292,7 +294,7 @@ class ModelSelector:
                 {"type": "zscore_normalize", "enabled": True, "params": {}},
             ],
         }
-        
+
         return pipelines.get(data_type, [{"type": "zscore_normalize", "enabled": True, "params": {}}])
     
     @classmethod
@@ -335,6 +337,8 @@ class ModelSelector:
             "image": "3d",  # Image
             "video": "4d",  # Video
             "audio": "2d",  # Sequential
+            "fmcw": "1d",
+            "radar": "1d",
             "general_csv": "1d",
         }
         

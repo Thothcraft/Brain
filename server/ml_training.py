@@ -362,12 +362,13 @@ def parse_csi_file(
         return [], {"error": str(e)}
 
 
-def parse_image_file(content: bytes, target_size: Tuple[int, int] = (64, 64), grayscale: bool = False) -> List[np.ndarray]:
-    """Parse an image file (JPEG/PNG/etc.) and return it as a single-sample list.
-    
-    Each image becomes one sample: a 1-D float32 array of normalised pixel values.
-    Returns a list with a single numpy array, or an empty list on failure.
-    """
+def parse_image_file(
+    content: bytes,
+    target_size: Tuple[int, int] = (64, 64),
+    grayscale: bool = False,
+    flatten: bool = True,
+) -> List[np.ndarray]:
+    """Parse an image file (JPEG/PNG/etc.) and return it as a single-sample list."""
     try:
         from PIL import Image as PILImage
         img = PILImage.open(io.BytesIO(content))
@@ -378,10 +379,29 @@ def parse_image_file(content: bytes, target_size: Tuple[int, int] = (64, 64), gr
         else:
             img = img.convert('RGB')
         arr = np.array(img, dtype=np.float32) / 255.0
-        return [arr.reshape(-1)]
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        return [arr.reshape(-1) if flatten else arr]
     except Exception as e:
         logger.warning(f"Failed to parse image file: {e}")
         return []
+
+
+def _ensure_image_array(data: np.ndarray) -> np.ndarray:
+    if data.size == 0:
+        return data
+    arr = np.asarray(data, dtype=np.float32)
+    if arr.ndim == 1:
+        side = int(np.sqrt(arr.size / 3)) if arr.size % 3 == 0 else int(np.sqrt(arr.size))
+        side = max(1, side)
+        if arr.size == side * side * 3:
+            return arr.reshape(side, side, 3)
+        if arr.size == side * side:
+            return arr.reshape(side, side, 1)
+        return arr.reshape(1, -1, 1)
+    if arr.ndim == 2:
+        return arr[..., np.newaxis]
+    return arr
 
 
 def parse_imu_file(content: bytes, window_size: int = 128) -> List[np.ndarray]:
@@ -716,16 +736,82 @@ def _block_imu_loader(content: bytes, config: dict, max_preview: int = 32) -> Tu
 
 
 def _block_image_loader(content: bytes, config: dict, max_preview: int = 32) -> Tuple[np.ndarray, dict]:
-    """Load an image file and return it as a flat normalised float32 array."""
+    """Load an image file and return it as a normalized image tensor."""
     target_w = int(config.get("width", 64))
     target_h = int(config.get("height", 64))
     grayscale = bool(config.get("grayscale", False))
-    samples = parse_image_file(content, target_size=(target_w, target_h), grayscale=grayscale)
+    samples = parse_image_file(content, target_size=(target_w, target_h), grayscale=grayscale, flatten=False)
     if not samples:
         return np.array([]), {"block": "image_loader", "name": "Image Loader", "shape": [], "sample": [], "error": "No image data parsed"}
     arr = np.stack(samples, axis=0)
-    sample = arr[0, :max_preview].tolist() if arr.size else []
+    sample = arr[0].reshape(-1)[:max_preview].tolist() if arr.size else []
     return arr, {"block": "image_loader", "name": "Image Loader", "shape": list(arr.shape), "sample": sample}
+
+
+def _block_image_resize(data: np.ndarray, config: dict, max_preview: int = 32) -> Tuple[np.ndarray, dict]:
+    """Resize an image tensor to a fixed HxW."""
+    if data.size == 0:
+        return data, {"block": "image_resize", "name": "Image Resize", "shape": [], "sample": [], "error": "No input data"}
+    target_w = int(config.get("width", 224))
+    target_h = int(config.get("height", 224))
+    arr = _ensure_image_array(np.asarray(data[0] if data.ndim == 4 else data, dtype=np.float32))
+    try:
+        from PIL import Image as PILImage
+        resample = getattr(PILImage, 'Resampling', PILImage).BILINEAR
+        mode = 'L' if arr.shape[-1] == 1 else 'RGB'
+        img = PILImage.fromarray(np.clip(arr.squeeze() * 255.0, 0, 255).astype(np.uint8), mode=mode)
+        img = img.resize((target_w, target_h), resample)
+        out = np.array(img, dtype=np.float32) / 255.0
+        if out.ndim == 2:
+            out = out[..., np.newaxis]
+        sample = out.reshape(-1)[:max_preview].tolist()
+        return out[np.newaxis, ...], {"block": "image_resize", "name": "Image Resize", "shape": list(out[np.newaxis, ...].shape), "sample": sample}
+    except Exception as e:
+        return data, {"block": "image_resize", "name": "Image Resize", "shape": list(data.shape), "sample": data.reshape(-1)[:max_preview].tolist() if data.size else [], "error": str(e)}
+
+
+def _block_canny_edge(data: np.ndarray, config: dict, max_preview: int = 32) -> Tuple[np.ndarray, dict]:
+    """Apply Canny edge detection to an image tensor."""
+    if data.size == 0:
+        return data, {"block": "canny_edge", "name": "Canny Edge", "shape": [], "sample": [], "error": "No input data"}
+    low = int(config.get("low_threshold", 50))
+    high = int(config.get("high_threshold", 150))
+    arr = _ensure_image_array(np.asarray(data[0] if data.ndim == 4 else data, dtype=np.float32))
+    try:
+        import cv2
+        if arr.shape[-1] == 3:
+            gray = cv2.cvtColor(np.clip(arr * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        else:
+            gray = np.clip(arr.squeeze() * 255.0, 0, 255).astype(np.uint8)
+        edges = cv2.Canny(gray, low, high).astype(np.float32) / 255.0
+        edges = edges[..., np.newaxis]
+        sample = edges.reshape(-1)[:max_preview].tolist()
+        return edges[np.newaxis, ...], {"block": "canny_edge", "name": "Canny Edge", "shape": list(edges[np.newaxis, ...].shape), "sample": sample}
+    except Exception as e:
+        return data, {"block": "canny_edge", "name": "Canny Edge", "shape": list(data.shape), "sample": data.reshape(-1)[:max_preview].tolist() if data.size else [], "error": str(e)}
+
+
+def _block_fmcw_loader(content: bytes, config: dict, max_preview: int = 32) -> Tuple[np.ndarray, dict]:
+    """Load FMCW radar bytes into a dense float32 array."""
+    if not content:
+        return np.array([]), {"block": "fmcw_loader", "name": "FMCW Loader", "shape": [], "sample": [], "error": "No radar data"}
+    arr = np.frombuffer(content, dtype=np.uint8).astype(np.float32)
+    if arr.size == 0:
+        return np.array([]), {"block": "fmcw_loader", "name": "FMCW Loader", "shape": [], "sample": [], "error": "No radar data"}
+    sample = arr[:max_preview].tolist()
+    return arr, {"block": "fmcw_loader", "name": "FMCW Loader", "shape": [int(arr.shape[0])], "sample": sample}
+
+
+def _block_radar_basic_preprocess(data: np.ndarray, config: dict, max_preview: int = 32) -> Tuple[np.ndarray, dict]:
+    """Basic radar preprocessing: normalize and flatten."""
+    if data.size == 0:
+        return data, {"block": "radar_basic_preprocess", "name": "Radar Basic Preprocess", "shape": [], "sample": [], "error": "No input data"}
+    arr = np.asarray(data, dtype=np.float32).reshape(-1)
+    arr = arr - np.mean(arr)
+    scale = np.std(arr) + 1e-8
+    arr = arr / scale
+    sample = arr[:max_preview].tolist()
+    return arr.astype(np.float32), {"block": "radar_basic_preprocess", "name": "Radar Basic Preprocess", "shape": [int(arr.shape[0])], "sample": sample}
 
 
 # Block registry
@@ -741,6 +827,10 @@ PREPROCESSING_BLOCKS = {
     "zscore_normalize": _block_zscore_normalize,
     "imu_loader": _block_imu_loader,
     "image_loader": _block_image_loader,
+    "image_resize": _block_image_resize,
+    "canny_edge": _block_canny_edge,
+    "fmcw_loader": _block_fmcw_loader,
+    "radar_basic_preprocess": _block_radar_basic_preprocess,
 }
 
 
@@ -940,6 +1030,17 @@ def execute_preprocessing_pipeline(
                 current_data, info = _block_imu_loader(content, block_params, 0)
             elif block_type == "image_loader":
                 current_data, info = _block_image_loader(content, block_params, 0)
+            elif block_type == "image_resize":
+                if current_data is not None:
+                    current_data, info = _block_image_resize(current_data, block_params, 0)
+            elif block_type == "canny_edge":
+                if current_data is not None:
+                    current_data, info = _block_canny_edge(current_data, block_params, 0)
+            elif block_type == "fmcw_loader":
+                current_data, info = _block_fmcw_loader(content, block_params, 0)
+            elif block_type == "radar_basic_preprocess":
+                if current_data is not None:
+                    current_data, info = _block_radar_basic_preprocess(current_data, block_params, 0)
             else:
                 logger.warning(f"Unknown preprocessing block type: {block_type}")
                 continue
@@ -1379,7 +1480,7 @@ def load_dataset_from_db(
                     continue
 
             elif file_type == "image":
-                windows = parse_image_file(file_content)
+                windows = parse_image_file(file_content, flatten=True)
 
             else:  # IMU / unknown
                 windows = parse_imu_file(file_content, window_size)

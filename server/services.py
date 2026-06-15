@@ -124,9 +124,7 @@ def auto_disconnect_stale_devices():
                 device.online = False
                 if hasattr(device, 'disconnected_at'):
                     device.disconnected_at = datetime.utcnow()
-                if hasattr(device, 'updated_at'):
-                    device.updated_at = datetime.utcnow()
-                
+
                 logger.info(f"[SERVICE] Marked device {getattr(device, 'id', 'unknown')} as offline")
             
             try:
