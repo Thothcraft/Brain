@@ -29,6 +29,18 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 logger = logging.getLogger(__name__)
 
 
+def _deployment_requests_allowed_for_device(device) -> bool:
+    try:
+        hw_info = device.hardware_info
+        if isinstance(hw_info, str):
+            hw_info = json.loads(hw_info)
+        if isinstance(hw_info, dict) and "deployment_requests_allowed" in hw_info:
+            return bool(hw_info.get("deployment_requests_allowed", True))
+    except Exception:
+        logger.debug("Unable to read deployment flag from hardware_info", exc_info=True)
+    return True
+
+
 # ============================================================================
 # REQUEST/RESPONSE MODELS
 # ============================================================================
@@ -1563,6 +1575,8 @@ async def deploy_model_to_device(
         ).first()
         if not device:
             raise HTTPException(status_code=404, detail="Device not found")
+        if not _deployment_requests_allowed_for_device(device):
+            raise HTTPException(status_code=403, detail="Model deployment requests are disabled on this device")
 
         # Build deployment config
         deployment_id = str(uuid.uuid4())
@@ -1647,6 +1661,8 @@ async def deploy_pretrained_model_to_device(
         ).first()
         if not device:
             raise HTTPException(status_code=404, detail="Device not found")
+        if not _deployment_requests_allowed_for_device(device):
+            raise HTTPException(status_code=403, detail="Model deployment requests are disabled on this device")
 
         model = db.query(TrainedModel).filter(
             TrainedModel.user_id == current_user.userId,

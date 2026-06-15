@@ -540,6 +540,10 @@ async def register_device(
                 hardware_info['mac_address'] = mac_address
             if 'portal_upload_allowed' not in hardware_info:
                 hardware_info['portal_upload_allowed'] = True
+            if 'deployment_requests_allowed' not in hardware_info:
+                hardware_info['deployment_requests_allowed'] = True
+            if 'cloud_sync_allowed' not in hardware_info:
+                hardware_info['cloud_sync_allowed'] = True
             
             # Check if device already exists (by UUID for this user)
             user_id = current_user.userId

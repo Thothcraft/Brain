@@ -475,6 +475,8 @@ class Device(Base):
             "user_id": self.userId,
             "hardware_info": hw_info,
             "portal_upload_allowed": bool(hw_info.get("portal_upload_allowed", True)) if isinstance(hw_info, dict) else True,
+            "deployment_requests_allowed": bool(hw_info.get("deployment_requests_allowed", True)) if isinstance(hw_info, dict) else True,
+            "cloud_sync_allowed": bool(hw_info.get("cloud_sync_allowed", True)) if isinstance(hw_info, dict) else True,
             "approved": self.approved if self.approved is not None else False
         }
 
