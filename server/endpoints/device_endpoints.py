@@ -1261,7 +1261,6 @@ async def device_heartbeat(
         update_data = {
             "last_seen": now,
             "online": requested_online,
-            "updated_at": now
         }
         
         # Update optional fields if provided
