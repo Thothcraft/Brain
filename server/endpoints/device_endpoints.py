@@ -9,6 +9,7 @@ import json
 import time
 import logging
 import os
+import re
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
@@ -39,6 +40,8 @@ router = APIRouter(prefix="/device", tags=["devices"])
 # Cache for device authentication tokens
 device_auth_cache = {}
 FREE_PLAN_MAX_ONLINE_DEVICES = 1
+MINUTE_DIR_RE = re.compile(r"^\d{8}_\d{4}$")
+MINUTE_FILE_RE = re.compile(r"^\d{8}_\d{4}_.+")
 
 # Rate limiting for device registration (new devices only)
 # Existing device updates are not rate limited as strictly
@@ -74,6 +77,14 @@ def _portal_upload_allowed_for_device(device: Device) -> bool:
     except Exception:
         logger.debug("Unable to read portal upload flag from hardware_info", exc_info=True)
     return True
+
+
+def _is_minute_dir(path: Path) -> bool:
+    return path.is_dir() and MINUTE_DIR_RE.match(path.name) is not None
+
+
+def _is_minute_file_name(filename: str) -> bool:
+    return MINUTE_FILE_RE.match(filename or "") is not None
 
 
 def _can_mark_device_online(
@@ -138,52 +149,50 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
     )
     
     if not data_path:
-        # Default to thoth/data relative to current working directory
         data_path = os.path.join("thoth", "data")
-    
-    files = []
-    
+
+    files: List[Dict[str, Any]] = []
+
     try:
         if not os.path.exists(data_path):
             logger.warning(f"Data directory not found: {data_path}")
             return files
-        
+
         data_dir = Path(data_path)
-        
-        # Scan for files in the data directory
-        for file_path in data_dir.iterdir():
-            if file_path.is_file():
-                filename = file_path.name
-                
-                # Skip metadata files, config files, and system files
-                if filename.endswith('.meta.json') or filename.endswith('.brain.json'):
+        if _is_minute_dir(data_dir):
+            minute_dirs = [data_dir]
+        else:
+            minute_dirs = sorted([item for item in data_dir.iterdir() if _is_minute_dir(item)], key=lambda item: item.name)
+
+        for minute_dir in minute_dirs:
+            for file_path in sorted(minute_dir.iterdir()):
+                if not file_path.is_file():
                     continue
-                if filename in ['device_id.txt']:
+
+                raw_name = file_path.name
+                if raw_name.endswith('.meta.json') or raw_name.endswith('.brain.json'):
                     continue
-                if filename.startswith('.'):
+                if raw_name in ['device_id.txt'] or raw_name.startswith('.'):
                     continue
-                
+
+                filename = f"{minute_dir.name}_{raw_name}"
+
                 try:
                     stat = file_path.stat()
-                    
-                    # Check for corresponding thoth metadata file
-                    meta_filename = get_thoth_metadata_filename(filename)
-                    meta_path = data_dir / meta_filename
+
+                    meta_filename = get_thoth_metadata_filename(raw_name)
+                    meta_path = minute_dir / meta_filename
                     has_metadata = meta_path.exists()
-                    
-                    # If metadata is required but missing, skip this file
+
                     if require_metadata and not has_metadata:
                         logger.debug(f"Skipping {filename}: no metadata file")
                         continue
-                    
-                    # Read file content for type detection (first 8KB)
+
                     with open(file_path, 'rb') as f:
                         content_sample = f.read(8192)
-                    
-                    # Detect file type using content-based analysis
-                    detection = detect_file_type(content_sample, filename)
-                    
-                    # Map detected type to file_type string
+
+                    detection = detect_file_type(content_sample, raw_name)
+
                     type_mapping = {
                         DetectedFileType.CSI: 'csi',
                         DetectedFileType.GENERAL_CSV: 'csv',
@@ -195,8 +204,7 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
                         DetectedFileType.UNKNOWN: 'other',
                     }
                     file_type = type_mapping.get(detection.detected_type, 'other')
-                    
-                    # Load thoth metadata if available
+
                     thoth_metadata = None
                     metadata_valid = False
                     if has_metadata:
@@ -204,56 +212,53 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
                         metadata_valid = is_valid
                         if not is_valid:
                             logger.warning(f"Invalid metadata for {filename}: {meta_errors}")
-                    
+
                     file_info = {
                         'name': filename,
+                        'minute': minute_dir.name,
+                        'relative_name': raw_name,
                         'size': stat.st_size,
                         'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
                         'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         'type': file_type,
                         'path': str(file_path),
-                        # New fields from content-based detection
                         'detected_type': detection.detected_type.value,
                         'detection_confidence': detection.confidence,
                         'detection_method': detection.detection_method,
                         'has_metadata': has_metadata,
                         'metadata_valid': metadata_valid,
                     }
-                    
-                    # Add CSI-specific info if detected
+
                     if detection.is_csi:
                         file_info['is_csi'] = True
                         file_info['csi_array_length'] = detection.csi_array_length
                         file_info['header_columns'] = detection.header_columns
-                    
-                    # Add CSV column info for general CSV
+
                     if detection.detected_type == DetectedFileType.GENERAL_CSV:
                         file_info['header_columns'] = detection.header_columns
                         file_info['column_types'] = detection.statistics.get('column_types', {})
-                    
-                    # Add validation statistics
+
                     if detection.statistics:
                         file_info['statistics'] = detection.statistics
-                    
-                    # Include thoth metadata labels if available
+
                     if thoth_metadata:
                         labels = thoth_metadata.get('labels', {})
                         if labels:
                             file_info['activity'] = labels.get('activity')
                             file_info['subject_id'] = labels.get('subject_id')
                             file_info['class_name'] = labels.get('class_name')
-                    
+
                     files.append(file_info)
-                    
+
                 except Exception as e:
                     logger.error(f"Error scanning file {file_path}: {e}")
                     continue
-        
-        logger.info(f"Scanned {len(files)} files in {data_path} (content-based detection)")
-        
+
+        logger.info(f"Scanned {len(files)} minute files in {data_path} (minute-only detection)")
+
     except Exception as e:
         logger.error(f"Error scanning device files: {e}")
-    
+
     return files
 
 def _auto_sync_device_files(device_id: int, user_id: int, device_uuid: str, db: Session, data_path: str = None):
@@ -276,6 +281,26 @@ def _auto_sync_device_files(device_id: int, user_id: int, device_uuid: str, db: 
         
         # Store files using existing function
         _store_device_files(device_id, user_id, device_uuid, scanned_files, db)
+
+        scanned_names = {str(file_info.get('name', '')) for file_info in scanned_files if isinstance(file_info, dict)}
+        stale_files = db.query(DeviceFile).filter(DeviceFile.device_id == device_id).all()
+        removed = 0
+        updated = 0
+        for record in stale_files:
+            if not _is_minute_file_name(record.filename):
+                db.delete(record)
+                removed += 1
+                continue
+            if record.filename not in scanned_names and record.on_device:
+                record.on_device = False
+                record.last_synced = datetime.utcnow()
+                updated += 1
+
+        if removed or updated:
+            db.commit()
+            logger.info(
+                f"Reconciled device files for {device_uuid}: removed={removed}, marked_offline={updated}"
+            )
         
         logger.info(f"Auto-synced {len(scanned_files)} files for device {device_uuid}")
         
@@ -1352,8 +1377,8 @@ async def get_device_files(
         files = db.query(DeviceFile).filter(
             DeviceFile.device_id == device.deviceId
         ).order_by(DeviceFile.modified_at.desc()).all()
-        
-        file_list = [f.to_dict() for f in files]
+
+        file_list = [f.to_dict() for f in files if _is_minute_file_name(f.filename)]
         
         return {
             "success": True,
