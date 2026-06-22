@@ -20,6 +20,14 @@ class DeviceBase(BaseModel):
             raise ValueError("Device ID is required")
         return v.strip()
 
+class DeviceFileInfo(BaseModel):
+    """File info sent from device during registration and heartbeat."""
+    name: str
+    size: Optional[int] = 0
+    created: Optional[str] = None
+    modified: Optional[str] = None
+    type: Optional[str] = None  # file extension or 'directory'
+
 class DeviceHeartbeatRequest(BaseModel):
     device_id: str
     device_name: Optional[str] = None
@@ -51,14 +59,6 @@ class DeviceHeartbeatRequest(BaseModel):
 
 class DeviceLogoutRequest(DeviceBase):
     pass
-
-class DeviceFileInfo(BaseModel):
-    """File info sent from device during registration."""
-    name: str
-    size: Optional[int] = 0
-    created: Optional[str] = None
-    modified: Optional[str] = None
-    type: Optional[str] = None  # file extension or 'directory'
 
 class DeviceRegisterRequest(BaseModel):
     device_id: str
