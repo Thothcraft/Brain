@@ -42,6 +42,17 @@ device_auth_cache = {}
 FREE_PLAN_MAX_ONLINE_DEVICES = 1
 MINUTE_DIR_RE = re.compile(r"^\d{8}_\d{4}$")
 MINUTE_FILE_RE = re.compile(r"^\d{8}_\d{4}_.+")
+MINUTE_PATH_RE = re.compile(r"(^|/)\d{8}_\d{4}(/|_|$)")
+CAPTURE_SENSOR_KEYS = ("usb_camera", "dreamhat_radar", "esp32_csi", "sense_hat")
+DEFAULT_CAPTURE_SETTINGS = {
+    "labels": [],
+    "sensors": {
+        "usb_camera": True,
+        "dreamhat_radar": True,
+        "esp32_csi": True,
+        "sense_hat": True,
+    },
+}
 
 # Rate limiting for device registration (new devices only)
 # Existing device updates are not rate limited as strictly
@@ -84,7 +95,57 @@ def _is_minute_dir(path: Path) -> bool:
 
 
 def _is_minute_file_name(filename: str) -> bool:
-    return MINUTE_FILE_RE.match(filename or "") is not None
+    value = filename or ""
+    return MINUTE_FILE_RE.match(value) is not None or MINUTE_PATH_RE.search(value) is not None
+
+
+def _device_hardware_info(device: Device) -> Dict[str, Any]:
+    try:
+        if device and device.hardware_info:
+            loaded = json.loads(device.hardware_info) if isinstance(device.hardware_info, str) else device.hardware_info
+            if isinstance(loaded, dict):
+                return loaded
+    except Exception:
+        logger.debug("Unable to parse hardware_info for device %s", getattr(device, "device_uuid", None), exc_info=True)
+    return {}
+
+
+def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    labels_value = source.get("labels")
+    if isinstance(labels_value, str):
+        labels = [item.strip() for item in labels_value.split(",") if item.strip()]
+    elif isinstance(labels_value, list):
+        labels = [str(item).strip() for item in labels_value if str(item).strip()]
+    else:
+        label = str(source.get("label") or "").strip()
+        labels = [label] if label else []
+
+    raw_sensors = source.get("sensors") if isinstance(source.get("sensors"), dict) else {}
+    sensors = dict(DEFAULT_CAPTURE_SETTINGS["sensors"])
+    for key in CAPTURE_SENSOR_KEYS:
+        if key in raw_sensors:
+            sensors[key] = bool(raw_sensors.get(key))
+
+    return {"labels": labels, "sensors": sensors}
+
+
+def _capture_settings_for_device(device: Device) -> Dict[str, Any]:
+    hardware_info = _device_hardware_info(device)
+    return _normalize_capture_settings(hardware_info.get("capture_settings"))
+
+
+def _set_capture_settings_for_device(device: Device, updates: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    hardware_info = _device_hardware_info(device)
+    merged = _normalize_capture_settings({
+        **_capture_settings_for_device(device),
+        **(updates or {}),
+    })
+    hardware_info["capture_settings"] = merged
+    device.hardware_info = json.dumps(hardware_info)
+    db.commit()
+    db.refresh(device)
+    return merged
 
 
 def _can_mark_device_online(
@@ -562,6 +623,12 @@ async def register_device(
             now = datetime.utcnow()
             
             if existing_device:
+                existing_capture_settings = _capture_settings_for_device(existing_device)
+                if 'capture_settings' not in hardware_info:
+                    hardware_info['capture_settings'] = existing_capture_settings
+                else:
+                    hardware_info['capture_settings'] = _normalize_capture_settings(hardware_info.get('capture_settings'))
+
                 if _is_free_plan_user(current_user) and not _can_mark_device_online(
                     db,
                     user_id,
@@ -598,6 +665,7 @@ async def register_device(
                 # Get pending upload requests and deployments for this device
                 pending_uploads = _get_pending_uploads(existing_device.deviceId, db)
                 pending_deployments = _get_pending_deployments(device_uuid, db)
+                capture_settings = _capture_settings_for_device(existing_device)
                 
                 logger.info(f"Device updated: {device_uuid} for user {user_id}")
                 if pending_uploads:
@@ -613,7 +681,9 @@ async def register_device(
                     "ip_address": ip_address,
                     "message": "Device updated successfully",
                     "pending_uploads": pending_uploads,
-                    "pending_deployments": pending_deployments
+                    "pending_deployments": pending_deployments,
+                    "capture_settings": capture_settings,
+                    "data": {"capture_settings": capture_settings}
                 }
             
             if _is_free_plan_user(current_user) and not _can_mark_device_online(db, user_id):
@@ -638,6 +708,7 @@ async def register_device(
             db.add(new_device)
             db.commit()
             db.refresh(new_device)
+            capture_settings = _set_capture_settings_for_device(new_device, hardware_info.get("capture_settings") or DEFAULT_CAPTURE_SETTINGS, db)
             
             # Store files pushed from device (if provided)
             if request.files:
@@ -656,7 +727,9 @@ async def register_device(
                 "ip_address": ip_address,
                 "message": "Device registered successfully",
                 "pending_uploads": [],
-                "pending_deployments": []
+                "pending_deployments": [],
+                "capture_settings": capture_settings,
+                "data": {"capture_settings": capture_settings}
             }
             
         except Exception as e:
@@ -1317,7 +1390,13 @@ async def device_heartbeat(
         if hasattr(request, 'online') and request.online is not None:
             update_data["online"] = request.online
         if hasattr(request, 'hardware_info') and request.hardware_info:
-            update_data["hardware_info"] = json.dumps(request.hardware_info)
+            hardware_info = dict(request.hardware_info)
+            existing_capture_settings = _capture_settings_for_device(device)
+            if "capture_settings" not in hardware_info:
+                hardware_info["capture_settings"] = existing_capture_settings
+            else:
+                hardware_info["capture_settings"] = _normalize_capture_settings(hardware_info.get("capture_settings"))
+            update_data["hardware_info"] = json.dumps(hardware_info)
         
         # Update IP address if available
         ip = get_client_ip(request_obj)
@@ -1327,15 +1406,20 @@ async def device_heartbeat(
         # Apply updates
         db.query(Device).filter(Device.deviceId == device.deviceId).update(update_data)
         db.commit()
+        if request.files:
+            _store_device_files(device.deviceId, current_user.userId, str(request.device_id), request.files, db)
         
         logger.debug(f"Heartbeat received from device {request.device_id}")
+        db.refresh(device)
+        capture_settings = _capture_settings_for_device(device)
         
         return {
             "success": True,
             "message": "Heartbeat received",
             "data": {
                 "device_id": str(request.device_id),
-                "timestamp": now.isoformat()
+                "timestamp": now.isoformat(),
+                "capture_settings": capture_settings,
             }
         }
     except HTTPException:
@@ -1347,6 +1431,49 @@ async def device_heartbeat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process heartbeat: {str(e)}"
         )
+
+
+@router.get("/{device_uuid}/capture-settings", response_model=Dict[str, Any])
+async def get_device_capture_settings(
+    device_uuid: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId
+    ).first()
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    return {
+        "success": True,
+        "device_id": device_uuid,
+        "capture_settings": _capture_settings_for_device(device),
+    }
+
+
+@router.put("/{device_uuid}/capture-settings", response_model=Dict[str, Any])
+async def update_device_capture_settings(
+    device_uuid: str,
+    payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId
+    ).first()
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    settings = _set_capture_settings_for_device(device, payload, db)
+    return {
+        "success": True,
+        "message": "Capture settings updated",
+        "device_id": device_uuid,
+        "capture_settings": settings,
+    }
 
 
 @router.get("/{device_uuid}/files", response_model=Dict[str, Any])

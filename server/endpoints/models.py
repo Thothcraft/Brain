@@ -25,6 +25,11 @@ class DeviceHeartbeatRequest(BaseModel):
     device_name: Optional[str] = None
     device_type: Optional[str] = None
     hardware_info: Optional[Dict[str, Any]] = None
+    files: Optional[List[DeviceFileInfo]] = None
+    battery_level: Optional[int] = None
+    wifi_connected: Optional[bool] = None
+    collection_active: Optional[bool] = None
+    online: Optional[bool] = None
     current_app: Optional[str] = None
     current_page: Optional[str] = None
     current_url: Optional[str] = None
@@ -285,6 +290,8 @@ class DeviceResponse(StandardResponse):
     device_name: Optional[str] = None
     ip_address: Optional[str] = None
     pending_uploads: Optional[List[str]] = None
+    pending_deployments: Optional[List[Dict[str, Any]]] = None
+    capture_settings: Optional[Dict[str, Any]] = None
 
 class DataUploadResponse(StandardResponse):
     upload_id: str
