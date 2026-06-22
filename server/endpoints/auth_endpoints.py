@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from typing import Dict, Any
 import logging
+import os
 from fastapi import Request
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -128,16 +129,17 @@ async def login_for_access_token(
             
         logging.info(f"Successfully authenticated user: {user.username} (ID: {user.userId})")
         
-        # Create access token
-        access_token_expires = timedelta(days=30)  # Token expires in 30 days
+        access_token_days = int(os.getenv("ACCESS_TOKEN_EXPIRE_DAYS", "3650"))
+        access_token_expires = timedelta(days=access_token_days)
         access_token = create_access_token(
             data={"sub": str(user.userId), "role": user.role}, expires_delta=access_token_expires
         )
+        expires_in = int(access_token_expires.total_seconds())
         
         response_data = {
             "access_token": access_token,
             "token_type": "bearer",
-            "expires_in": 2592000,  # 30 days in seconds (30 * 24 * 60 * 60)
+            "expires_in": expires_in,
             "user_id": user.userId,
             "username": user.username,
             "role": user.role,

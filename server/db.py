@@ -534,18 +534,21 @@ class DeviceFile(Base):
     cloud_file = relationship("File")
     
     def to_dict(self):
+        def _utc(value):
+            return value.isoformat() + "Z" if value else None
+
         return {
             "id": self.id,
             "filename": self.filename,
             "size": self.size,
             "file_type": self.file_type,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "modified_at": self.modified_at.isoformat() if self.modified_at else None,
+            "created_at": _utc(self.created_at),
+            "modified_at": _utc(self.modified_at),
             "on_device": self.on_device,
             "on_cloud": self.on_cloud,
             "cloud_file_id": self.cloud_file_id,
             "upload_requested": self.upload_requested,
-            "last_synced": self.last_synced.isoformat() if self.last_synced else None,
+            "last_synced": _utc(self.last_synced),
         }
 
 
