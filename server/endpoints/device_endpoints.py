@@ -465,7 +465,11 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
             else:
                 # Determine file type from extension (not prefix)
                 # First check if data_type was provided by the device
-                data_type = file_info.get('data_type') if isinstance(file_info, dict) else None
+                data_type = (
+                    getattr(file_info, 'data_type', None)
+                    if not isinstance(file_info, dict)
+                    else file_info.get('data_type')
+                )
                 if data_type:
                     file_type = data_type
                 else:
