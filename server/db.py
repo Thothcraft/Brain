@@ -458,7 +458,7 @@ class Device(Base):
         # aggressive and made active Thoth devices appear offline.
         if self.last_seen:
             age = (datetime.utcnow() - self.last_seen).total_seconds()
-            is_online = self.online and age <= 300
+            is_online = self.online and age <= 180
         else:
             is_online = False
 
