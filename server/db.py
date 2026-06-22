@@ -454,13 +454,15 @@ class Device(Base):
                 hw_info = None
         
         # A device is online if it sent a heartbeat/register recently. The
-        # dashboard polls through multiple services, so 30 seconds was too
-        # aggressive and made active Thoth devices appear offline.
+        # dashboard polls through multiple services, so short windows make
+        # active Thoth devices appear offline between sync cycles.
         if self.last_seen:
             age = (datetime.utcnow() - self.last_seen).total_seconds()
-            is_online = self.online and age <= 180
+            is_online = age <= 900
+            last_seen = self.last_seen.isoformat() + "Z"
         else:
             is_online = False
+            last_seen = None
 
         return {
             "device_id": self.device_uuid,
@@ -468,7 +470,7 @@ class Device(Base):
             "device_type": self.device_type,
             "online": is_online,
             "battery_level": self.battery_level,
-            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
+            "last_seen": last_seen,
             "ip_address": self.ip_address,
             "mac_address": self.mac_address,
             "device_uuid": self.device_uuid,
