@@ -24,6 +24,7 @@ from server.utils.error_handler import (
 from .models import FileUploadSimpleRequest, FileUploadResponse, PaginatedResponse
 
 router = APIRouter(prefix="/file", tags=["files"])
+SIMPLE_UPLOAD_MAX_BYTES = int(os.getenv("SIMPLE_UPLOAD_MAX_BYTES", str(250 * 1024 * 1024)))
 
 
 def _original_filename(stored_filename: str) -> str:
@@ -44,6 +45,20 @@ def _file_content(file_record: File) -> Optional[bytes]:
         except Exception as storage_error:
             log_error(f"Failed to download from storage, trying DB: {storage_error}")
     return file_record.content
+
+
+def _device_file_for_upload(db: Session, device: Optional[Device], upload_filename: str) -> Optional[DeviceFile]:
+    """Find the DeviceFile row matching a sanitized uploaded minute filename."""
+    if not device or not upload_filename:
+        return None
+
+    upload_key = upload_filename.replace("/", "_")
+    records = db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId).all()
+    for record in records:
+        stored = str(record.filename or "")
+        if stored == upload_filename or stored.replace("/", "_") == upload_key:
+            return record
+    return None
 
 @router.get("/files", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def list_files(
@@ -211,9 +226,9 @@ async def upload_file_simple(
         else:
             content_bytes = request.content.encode('utf-8')
         
-        # Check file size (limit to 50MB for simple uploads)
-        if len(content_bytes) > 52_428_800:  # 50MB
-            raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+        if len(content_bytes) > SIMPLE_UPLOAD_MAX_BYTES:
+            max_mb = SIMPLE_UPLOAD_MAX_BYTES // (1024 * 1024)
+            raise HTTPException(status_code=413, detail=f"File too large (max {max_mb}MB)")
         
         # Generate unique filename
         timestamp = int(time.time())
@@ -240,10 +255,7 @@ async def upload_file_simple(
                     ).first()
                     
                     if device:
-                        device_file = db.query(DeviceFile).filter(
-                            DeviceFile.device_id == device.deviceId,
-                            DeviceFile.filename == request.filename
-                        ).first()
+                        device_file = _device_file_for_upload(db, device, request.filename)
                         
                         if device_file:
                             device_file.on_cloud = True
@@ -279,7 +291,7 @@ async def upload_file_simple(
         }
         data_type = type_to_data_type.get(detection.detected_type, "unknown")
         
-        # Create file metadata with detection results
+        request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
         file_metadata = {
             "original_filename": request.filename,
             "content_type": content_type,
@@ -299,6 +311,7 @@ async def upload_file_simple(
             "subject_id": "",
             "environment": "",
             "activity": "",
+            **request_metadata,
         }
         
         # Add CSI-specific metadata
@@ -379,11 +392,7 @@ async def upload_file_simple(
                 ).first()
                 
                 if device:
-                    # Find the DeviceFile record for this file
-                    device_file = db.query(DeviceFile).filter(
-                        DeviceFile.device_id == device.deviceId,
-                        DeviceFile.filename == request.filename
-                    ).first()
+                    device_file = _device_file_for_upload(db, device, request.filename)
                     
                     if device_file:
                         device_file.on_cloud = True

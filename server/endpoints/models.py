@@ -152,6 +152,7 @@ class FileUploadSimpleRequest(BaseModel):
     content_type: Optional[str] = None
     device_id: Optional[str] = None
     is_base64: bool = False
+    metadata: Optional[Dict[str, Any]] = None
     
     @validator('filename')
     def validate_filename(cls, v):
