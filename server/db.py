@@ -453,12 +453,12 @@ class Device(Base):
             except (json.JSONDecodeError, TypeError):
                 hw_info = None
         
-        # A device is only online if it sent a heartbeat/register within 30 s
-        # (3× the default 10 s heartbeat interval).  This handles ungraceful
-        # shutdowns and uninstalls without needing a background cleanup task.
+        # A device is online if it sent a heartbeat/register recently. The
+        # dashboard polls through multiple services, so 30 seconds was too
+        # aggressive and made active Thoth devices appear offline.
         if self.last_seen:
             age = (datetime.utcnow() - self.last_seen).total_seconds()
-            is_online = self.online and age <= 30
+            is_online = self.online and age <= 300
         else:
             is_online = False
 

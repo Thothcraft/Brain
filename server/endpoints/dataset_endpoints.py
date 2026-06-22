@@ -7,16 +7,18 @@ This module handles:
 - Model evaluation and deployment
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Body
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Body, Response
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 from sqlalchemy.orm import Session
+import io
 import uuid
 import json
 import asyncio
 import random
 import logging
+import zipfile
 
 from sqlalchemy.orm import selectinload, load_only
 
@@ -27,6 +29,26 @@ from .models import StandardResponse
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 logger = logging.getLogger(__name__)
+
+
+def _original_filename(stored_filename: str) -> str:
+    parts = stored_filename.split('_', 3)
+    return parts[-1] if len(parts) >= 4 else stored_filename
+
+
+def _file_content(file_record: File) -> Optional[bytes]:
+    if file_record.storage_path:
+        try:
+            from server.utils.supabase_storage import download_file_sync
+            path_parts = file_record.storage_path.split('/', 1)
+            if len(path_parts) == 2:
+                bucket, path = path_parts
+                success, content = download_file_sync(bucket, path)
+                if success and content:
+                    return content
+        except Exception as exc:
+            logger.warning("Failed to read file %s from storage: %s", file_record.fileId, exc)
+    return file_record.content
 
 
 def _deployment_requests_allowed_for_device(device) -> bool:
@@ -1849,6 +1871,73 @@ async def confirm_deployment(
 # ============================================================================
 # DATASET DETAIL ENDPOINTS (catch-all routes must come last)
 # ============================================================================
+
+@router.get("/{dataset_id}/download")
+async def download_dataset(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Download a full dataset as one zip archive grouped by label."""
+    try:
+        dataset = db.query(TrainingDataset).options(
+            selectinload(TrainingDataset.files).selectinload(DatasetFile.file)
+        ).filter(
+            TrainingDataset.id == dataset_id,
+            TrainingDataset.user_id == current_user.userId,
+        ).first()
+
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+
+        archive = io.BytesIO()
+        used_names = set()
+        manifest = {
+            "dataset_id": dataset.id,
+            "name": dataset.name,
+            "description": dataset.description,
+            "created_at": dataset.created_at.isoformat() if dataset.created_at else None,
+            "files": [],
+        }
+
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for df in dataset.files or []:
+                if not df.file:
+                    continue
+                content = _file_content(df.file)
+                if content is None:
+                    continue
+                label = str(df.label or "unlabeled").replace("/", "_").replace("\\", "_")
+                original = _original_filename(df.file.filename)
+                arcname = f"{label}/{original}"
+                if arcname in used_names:
+                    arcname = f"{label}/{df.file.fileId}_{original}"
+                used_names.add(arcname)
+                zf.writestr(arcname, content)
+                manifest["files"].append({
+                    "file_id": df.file.fileId,
+                    "filename": original,
+                    "label": df.label,
+                    "path": arcname,
+                    "size": df.file.size,
+                    "content_type": df.file.content_type,
+                })
+
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+
+        archive.seek(0)
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in dataset.name) or f"dataset_{dataset.id}"
+        return Response(
+            content=archive.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.zip"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to download dataset %s: %s", dataset_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to download dataset: {str(e)}")
+
 
 @router.get("/{dataset_id}", response_model=Dict[str, Any])
 async def get_dataset(
