@@ -22,6 +22,7 @@ import os
 import json
 import hashlib
 import logging
+import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
@@ -38,6 +39,7 @@ CSI_HEADER_COLUMNS = [
 ]
 CSI_HEADER_START = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data"
 CSI_DATA_ARRAY_LENGTH = 128  # Expected number of values in CSI data array
+MINUTE_DIR_RE = re.compile(r"^\d{8}_\d{4}$")
 
 
 class DetectedFileType(str, Enum):
@@ -848,42 +850,53 @@ def scan_thoth_data_directory(
         logger.warning(f"Data directory not found: {data_path}")
         return files
     
-    # Find all data files (exclude metadata files and config)
-    for file_path in data_dir.iterdir():
-        if file_path.is_file():
-            filename = file_path.name
-            
-            # Skip metadata files and config
-            if filename.endswith('.meta.json') or filename.endswith('.brain.json'):
+    minute_dirs = []
+    if MINUTE_DIR_RE.match(data_dir.name):
+        minute_dirs = [data_dir]
+    else:
+        minute_dirs = sorted(
+            [item for item in data_dir.iterdir() if item.is_dir() and MINUTE_DIR_RE.match(item.name)],
+            key=lambda item: item.name,
+        )
+
+    for minute_dir in minute_dirs:
+        for file_path in minute_dir.iterdir():
+            if not file_path.is_file():
                 continue
-            if filename in ['device_id.txt']:
+
+            raw_name = file_path.name
+            filename = f"{minute_dir.name}_{raw_name}"
+
+            if raw_name.endswith('.meta.json') or raw_name.endswith('.brain.json'):
                 continue
-            
-            # Check for corresponding metadata
-            meta_path = data_dir / get_thoth_metadata_filename(filename)
+            if raw_name in ['device_id.txt']:
+                continue
+            if raw_name.startswith('.'):
+                continue
+
+            meta_path = minute_dir / get_thoth_metadata_filename(raw_name)
             has_metadata = meta_path.exists()
-            
+
             if require_metadata and not has_metadata:
                 logger.debug(f"Skipping {filename}: no metadata file")
                 continue
-            
-            # Read file content for type detection
+
             try:
                 with open(file_path, 'rb') as f:
-                    content = f.read(8192)  # Read first 8KB for detection
-                
-                # Detect file type
-                detection = detect_file_type(content, filename)
-                
-                # Load thoth metadata if available
+                    content = f.read(8192)
+
+                detection = detect_file_type(content, raw_name)
+
                 thoth_meta = None
                 if has_metadata:
                     is_valid, thoth_meta, meta_errors = validate_thoth_metadata(meta_path)
                     if not is_valid:
                         logger.warning(f"Invalid metadata for {filename}: {meta_errors}")
-                
+
                 file_info = {
                     'name': filename,
+                    'relative_name': raw_name,
+                    'minute': minute_dir.name,
                     'path': str(file_path),
                     'size': file_path.stat().st_size,
                     'created': datetime.fromtimestamp(file_path.stat().st_ctime).isoformat(),
@@ -895,14 +908,13 @@ def scan_thoth_data_directory(
                     'thoth_metadata': thoth_meta,
                     'statistics': detection.statistics,
                 }
-                
-                # Add CSI-specific info
+
                 if detection.is_csi:
                     file_info['is_csi'] = True
                     file_info['csi_array_length'] = detection.csi_array_length
-                
+
                 files.append(file_info)
-                
+
             except Exception as e:
                 logger.error(f"Error scanning file {filename}: {e}")
                 continue

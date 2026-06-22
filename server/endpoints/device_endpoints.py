@@ -9,6 +9,7 @@ import json
 import time
 import logging
 import os
+import re
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
@@ -39,6 +40,19 @@ router = APIRouter(prefix="/device", tags=["devices"])
 # Cache for device authentication tokens
 device_auth_cache = {}
 FREE_PLAN_MAX_ONLINE_DEVICES = 1
+MINUTE_DIR_RE = re.compile(r"^\d{8}_\d{4}$")
+MINUTE_FILE_RE = re.compile(r"^\d{8}_\d{4}_.+")
+MINUTE_PATH_RE = re.compile(r"(^|/)\d{8}_\d{4}(/|_|$)")
+CAPTURE_SENSOR_KEYS = ("usb_camera", "dreamhat_radar", "esp32_csi", "sense_hat")
+DEFAULT_CAPTURE_SETTINGS = {
+    "labels": [],
+    "sensors": {
+        "usb_camera": True,
+        "dreamhat_radar": True,
+        "esp32_csi": True,
+        "sense_hat": True,
+    },
+}
 
 # Rate limiting for device registration (new devices only)
 # Existing device updates are not rate limited as strictly
@@ -61,6 +75,77 @@ def _is_free_plan_user(user: Union[User, Any]) -> bool:
         return int(getattr(user, "role", 0) or 0) == 0
     except (TypeError, ValueError):
         return True
+
+
+def _portal_upload_allowed_for_device(device: Device) -> bool:
+    """Return whether the device allows portal-initiated uploads."""
+    try:
+        if not device or not device.hardware_info:
+            return True
+        hw_info = json.loads(device.hardware_info) if isinstance(device.hardware_info, str) else device.hardware_info
+        if isinstance(hw_info, dict) and "portal_upload_allowed" in hw_info:
+            return bool(hw_info.get("portal_upload_allowed", True))
+    except Exception:
+        logger.debug("Unable to read portal upload flag from hardware_info", exc_info=True)
+    return True
+
+
+def _is_minute_dir(path: Path) -> bool:
+    return path.is_dir() and MINUTE_DIR_RE.match(path.name) is not None
+
+
+def _is_minute_file_name(filename: str) -> bool:
+    value = filename or ""
+    return MINUTE_FILE_RE.match(value) is not None or MINUTE_PATH_RE.search(value) is not None
+
+
+def _device_hardware_info(device: Device) -> Dict[str, Any]:
+    try:
+        if device and device.hardware_info:
+            loaded = json.loads(device.hardware_info) if isinstance(device.hardware_info, str) else device.hardware_info
+            if isinstance(loaded, dict):
+                return loaded
+    except Exception:
+        logger.debug("Unable to parse hardware_info for device %s", getattr(device, "device_uuid", None), exc_info=True)
+    return {}
+
+
+def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    labels_value = source.get("labels")
+    if isinstance(labels_value, str):
+        labels = [item.strip() for item in labels_value.split(",") if item.strip()]
+    elif isinstance(labels_value, list):
+        labels = [str(item).strip() for item in labels_value if str(item).strip()]
+    else:
+        label = str(source.get("label") or "").strip()
+        labels = [label] if label else []
+
+    raw_sensors = source.get("sensors") if isinstance(source.get("sensors"), dict) else {}
+    sensors = dict(DEFAULT_CAPTURE_SETTINGS["sensors"])
+    for key in CAPTURE_SENSOR_KEYS:
+        if key in raw_sensors:
+            sensors[key] = bool(raw_sensors.get(key))
+
+    return {"labels": labels, "sensors": sensors}
+
+
+def _capture_settings_for_device(device: Device) -> Dict[str, Any]:
+    hardware_info = _device_hardware_info(device)
+    return _normalize_capture_settings(hardware_info.get("capture_settings"))
+
+
+def _set_capture_settings_for_device(device: Device, updates: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    hardware_info = _device_hardware_info(device)
+    merged = _normalize_capture_settings({
+        **_capture_settings_for_device(device),
+        **(updates or {}),
+    })
+    hardware_info["capture_settings"] = merged
+    device.hardware_info = json.dumps(hardware_info)
+    db.commit()
+    db.refresh(device)
+    return merged
 
 
 def _can_mark_device_online(
@@ -125,52 +210,50 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
     )
     
     if not data_path:
-        # Default to thoth/data relative to current working directory
         data_path = os.path.join("thoth", "data")
-    
-    files = []
-    
+
+    files: List[Dict[str, Any]] = []
+
     try:
         if not os.path.exists(data_path):
             logger.warning(f"Data directory not found: {data_path}")
             return files
-        
+
         data_dir = Path(data_path)
-        
-        # Scan for files in the data directory
-        for file_path in data_dir.iterdir():
-            if file_path.is_file():
-                filename = file_path.name
-                
-                # Skip metadata files, config files, and system files
-                if filename.endswith('.meta.json') or filename.endswith('.brain.json'):
+        if _is_minute_dir(data_dir):
+            minute_dirs = [data_dir]
+        else:
+            minute_dirs = sorted([item for item in data_dir.iterdir() if _is_minute_dir(item)], key=lambda item: item.name)
+
+        for minute_dir in minute_dirs:
+            for file_path in sorted(minute_dir.iterdir()):
+                if not file_path.is_file():
                     continue
-                if filename in ['device_id.txt']:
+
+                raw_name = file_path.name
+                if raw_name.endswith('.meta.json') or raw_name.endswith('.brain.json'):
                     continue
-                if filename.startswith('.'):
+                if raw_name in ['device_id.txt'] or raw_name.startswith('.'):
                     continue
-                
+
+                filename = f"{minute_dir.name}_{raw_name}"
+
                 try:
                     stat = file_path.stat()
-                    
-                    # Check for corresponding thoth metadata file
-                    meta_filename = get_thoth_metadata_filename(filename)
-                    meta_path = data_dir / meta_filename
+
+                    meta_filename = get_thoth_metadata_filename(raw_name)
+                    meta_path = minute_dir / meta_filename
                     has_metadata = meta_path.exists()
-                    
-                    # If metadata is required but missing, skip this file
+
                     if require_metadata and not has_metadata:
                         logger.debug(f"Skipping {filename}: no metadata file")
                         continue
-                    
-                    # Read file content for type detection (first 8KB)
+
                     with open(file_path, 'rb') as f:
                         content_sample = f.read(8192)
-                    
-                    # Detect file type using content-based analysis
-                    detection = detect_file_type(content_sample, filename)
-                    
-                    # Map detected type to file_type string
+
+                    detection = detect_file_type(content_sample, raw_name)
+
                     type_mapping = {
                         DetectedFileType.CSI: 'csi',
                         DetectedFileType.GENERAL_CSV: 'csv',
@@ -182,8 +265,7 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
                         DetectedFileType.UNKNOWN: 'other',
                     }
                     file_type = type_mapping.get(detection.detected_type, 'other')
-                    
-                    # Load thoth metadata if available
+
                     thoth_metadata = None
                     metadata_valid = False
                     if has_metadata:
@@ -191,56 +273,53 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
                         metadata_valid = is_valid
                         if not is_valid:
                             logger.warning(f"Invalid metadata for {filename}: {meta_errors}")
-                    
+
                     file_info = {
                         'name': filename,
+                        'minute': minute_dir.name,
+                        'relative_name': raw_name,
                         'size': stat.st_size,
                         'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
                         'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         'type': file_type,
                         'path': str(file_path),
-                        # New fields from content-based detection
                         'detected_type': detection.detected_type.value,
                         'detection_confidence': detection.confidence,
                         'detection_method': detection.detection_method,
                         'has_metadata': has_metadata,
                         'metadata_valid': metadata_valid,
                     }
-                    
-                    # Add CSI-specific info if detected
+
                     if detection.is_csi:
                         file_info['is_csi'] = True
                         file_info['csi_array_length'] = detection.csi_array_length
                         file_info['header_columns'] = detection.header_columns
-                    
-                    # Add CSV column info for general CSV
+
                     if detection.detected_type == DetectedFileType.GENERAL_CSV:
                         file_info['header_columns'] = detection.header_columns
                         file_info['column_types'] = detection.statistics.get('column_types', {})
-                    
-                    # Add validation statistics
+
                     if detection.statistics:
                         file_info['statistics'] = detection.statistics
-                    
-                    # Include thoth metadata labels if available
+
                     if thoth_metadata:
                         labels = thoth_metadata.get('labels', {})
                         if labels:
                             file_info['activity'] = labels.get('activity')
                             file_info['subject_id'] = labels.get('subject_id')
                             file_info['class_name'] = labels.get('class_name')
-                    
+
                     files.append(file_info)
-                    
+
                 except Exception as e:
                     logger.error(f"Error scanning file {file_path}: {e}")
                     continue
-        
-        logger.info(f"Scanned {len(files)} files in {data_path} (content-based detection)")
-        
+
+        logger.info(f"Scanned {len(files)} minute files in {data_path} (minute-only detection)")
+
     except Exception as e:
         logger.error(f"Error scanning device files: {e}")
-    
+
     return files
 
 def _auto_sync_device_files(device_id: int, user_id: int, device_uuid: str, db: Session, data_path: str = None):
@@ -263,6 +342,26 @@ def _auto_sync_device_files(device_id: int, user_id: int, device_uuid: str, db: 
         
         # Store files using existing function
         _store_device_files(device_id, user_id, device_uuid, scanned_files, db)
+
+        scanned_names = {str(file_info.get('name', '')) for file_info in scanned_files if isinstance(file_info, dict)}
+        stale_files = db.query(DeviceFile).filter(DeviceFile.device_id == device_id).all()
+        removed = 0
+        updated = 0
+        for record in stale_files:
+            if not _is_minute_file_name(record.filename):
+                db.delete(record)
+                removed += 1
+                continue
+            if record.filename not in scanned_names and record.on_device:
+                record.on_device = False
+                record.last_synced = datetime.utcnow()
+                updated += 1
+
+        if removed or updated:
+            db.commit()
+            logger.info(
+                f"Reconciled device files for {device_uuid}: removed={removed}, marked_offline={updated}"
+            )
         
         logger.info(f"Auto-synced {len(scanned_files)} files for device {device_uuid}")
         
@@ -500,6 +599,12 @@ async def register_device(
                 hardware_info['ip_address'] = ip_address
             if mac_address:
                 hardware_info['mac_address'] = mac_address
+            if 'portal_upload_allowed' not in hardware_info:
+                hardware_info['portal_upload_allowed'] = True
+            if 'deployment_requests_allowed' not in hardware_info:
+                hardware_info['deployment_requests_allowed'] = True
+            if 'cloud_sync_allowed' not in hardware_info:
+                hardware_info['cloud_sync_allowed'] = True
             
             # Check if device already exists (by UUID for this user)
             user_id = current_user.userId
@@ -518,6 +623,12 @@ async def register_device(
             now = datetime.utcnow()
             
             if existing_device:
+                existing_capture_settings = _capture_settings_for_device(existing_device)
+                if 'capture_settings' not in hardware_info:
+                    hardware_info['capture_settings'] = existing_capture_settings
+                else:
+                    hardware_info['capture_settings'] = _normalize_capture_settings(hardware_info.get('capture_settings'))
+
                 if _is_free_plan_user(current_user) and not _can_mark_device_online(
                     db,
                     user_id,
@@ -535,6 +646,7 @@ async def register_device(
                 existing_device.mac_address = mac_address or existing_device.mac_address
                 existing_device.last_seen = now
                 existing_device.online = True
+                existing_device.approved = True
                 
                 # Store hardware_info as JSON if provided
                 if hardware_info:
@@ -553,6 +665,7 @@ async def register_device(
                 # Get pending upload requests and deployments for this device
                 pending_uploads = _get_pending_uploads(existing_device.deviceId, db)
                 pending_deployments = _get_pending_deployments(device_uuid, db)
+                capture_settings = _capture_settings_for_device(existing_device)
                 
                 logger.info(f"Device updated: {device_uuid} for user {user_id}")
                 if pending_uploads:
@@ -568,7 +681,9 @@ async def register_device(
                     "ip_address": ip_address,
                     "message": "Device updated successfully",
                     "pending_uploads": pending_uploads,
-                    "pending_deployments": pending_deployments
+                    "pending_deployments": pending_deployments,
+                    "capture_settings": capture_settings,
+                    "data": {"capture_settings": capture_settings}
                 }
             
             if _is_free_plan_user(current_user) and not _can_mark_device_online(db, user_id):
@@ -586,13 +701,14 @@ async def register_device(
                 mac_address=mac_address,
                 last_seen=now,
                 online=True,
-                approved=False,
+                approved=True,
                 hardware_info=json.dumps(hardware_info) if hardware_info else None
             )
             
             db.add(new_device)
             db.commit()
             db.refresh(new_device)
+            capture_settings = _set_capture_settings_for_device(new_device, hardware_info.get("capture_settings") or DEFAULT_CAPTURE_SETTINGS, db)
             
             # Store files pushed from device (if provided)
             if request.files:
@@ -611,7 +727,9 @@ async def register_device(
                 "ip_address": ip_address,
                 "message": "Device registered successfully",
                 "pending_uploads": [],
-                "pending_deployments": []
+                "pending_deployments": [],
+                "capture_settings": capture_settings,
+                "data": {"capture_settings": capture_settings}
             }
             
         except Exception as e:
@@ -887,7 +1005,6 @@ async def update_device_status(
         update_data = {
             "last_seen": now,
             "online": requested_online,
-            "updated_at": now
         }
         
         # Update optional fields if provided
@@ -1261,7 +1378,6 @@ async def device_heartbeat(
         update_data = {
             "last_seen": now,
             "online": requested_online,
-            "updated_at": now
         }
         
         # Update optional fields if provided
@@ -1273,6 +1389,14 @@ async def device_heartbeat(
             update_data["collection_active"] = request.collection_active
         if hasattr(request, 'online') and request.online is not None:
             update_data["online"] = request.online
+        if hasattr(request, 'hardware_info') and request.hardware_info:
+            hardware_info = dict(request.hardware_info)
+            existing_capture_settings = _capture_settings_for_device(device)
+            if "capture_settings" not in hardware_info:
+                hardware_info["capture_settings"] = existing_capture_settings
+            else:
+                hardware_info["capture_settings"] = _normalize_capture_settings(hardware_info.get("capture_settings"))
+            update_data["hardware_info"] = json.dumps(hardware_info)
         
         # Update IP address if available
         ip = get_client_ip(request_obj)
@@ -1282,15 +1406,20 @@ async def device_heartbeat(
         # Apply updates
         db.query(Device).filter(Device.deviceId == device.deviceId).update(update_data)
         db.commit()
+        if request.files:
+            _store_device_files(device.deviceId, current_user.userId, str(request.device_id), request.files, db)
         
         logger.debug(f"Heartbeat received from device {request.device_id}")
+        db.refresh(device)
+        capture_settings = _capture_settings_for_device(device)
         
         return {
             "success": True,
             "message": "Heartbeat received",
             "data": {
                 "device_id": str(request.device_id),
-                "timestamp": now.isoformat()
+                "timestamp": now.isoformat(),
+                "capture_settings": capture_settings,
             }
         }
     except HTTPException:
@@ -1302,6 +1431,49 @@ async def device_heartbeat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process heartbeat: {str(e)}"
         )
+
+
+@router.get("/{device_uuid}/capture-settings", response_model=Dict[str, Any])
+async def get_device_capture_settings(
+    device_uuid: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId
+    ).first()
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    return {
+        "success": True,
+        "device_id": device_uuid,
+        "capture_settings": _capture_settings_for_device(device),
+    }
+
+
+@router.put("/{device_uuid}/capture-settings", response_model=Dict[str, Any])
+async def update_device_capture_settings(
+    device_uuid: str,
+    payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId
+    ).first()
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    settings = _set_capture_settings_for_device(device, payload, db)
+    return {
+        "success": True,
+        "message": "Capture settings updated",
+        "device_id": device_uuid,
+        "capture_settings": settings,
+    }
 
 
 @router.get("/{device_uuid}/files", response_model=Dict[str, Any])
@@ -1336,8 +1508,8 @@ async def get_device_files(
         files = db.query(DeviceFile).filter(
             DeviceFile.device_id == device.deviceId
         ).order_by(DeviceFile.modified_at.desc()).all()
-        
-        file_list = [f.to_dict() for f in files]
+
+        file_list = [f.to_dict() for f in files if _is_minute_file_name(f.filename)]
         
         return {
             "success": True,
@@ -1387,7 +1559,17 @@ async def request_file_upload(
                 "message": "File already on cloud",
                 "cloud_file_id": device_file.cloud_file_id
             }
-        
+
+        device = db.query(Device).filter(
+            Device.deviceId == device_file.device_id,
+            Device.userId == current_user.userId
+        ).first()
+        if device and not _portal_upload_allowed_for_device(device):
+            raise HTTPException(
+                status_code=403,
+                detail="Portal-initiated uploads are disabled on this device"
+            )
+
         # Mark for upload
         device_file.upload_requested = True
         db.commit()

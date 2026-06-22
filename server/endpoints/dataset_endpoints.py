@@ -7,16 +7,18 @@ This module handles:
 - Model evaluation and deployment
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Body
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Body, Response
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 from sqlalchemy.orm import Session
+import io
 import uuid
 import json
 import asyncio
 import random
 import logging
+import zipfile
 
 from sqlalchemy.orm import selectinload, load_only
 
@@ -27,6 +29,38 @@ from .models import StandardResponse
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 logger = logging.getLogger(__name__)
+
+
+def _original_filename(stored_filename: str) -> str:
+    parts = stored_filename.split('_', 3)
+    return parts[-1] if len(parts) >= 4 else stored_filename
+
+
+def _file_content(file_record: File) -> Optional[bytes]:
+    if file_record.storage_path:
+        try:
+            from server.utils.supabase_storage import download_file_sync
+            path_parts = file_record.storage_path.split('/', 1)
+            if len(path_parts) == 2:
+                bucket, path = path_parts
+                success, content = download_file_sync(bucket, path)
+                if success and content:
+                    return content
+        except Exception as exc:
+            logger.warning("Failed to read file %s from storage: %s", file_record.fileId, exc)
+    return file_record.content
+
+
+def _deployment_requests_allowed_for_device(device) -> bool:
+    try:
+        hw_info = device.hardware_info
+        if isinstance(hw_info, str):
+            hw_info = json.loads(hw_info)
+        if isinstance(hw_info, dict) and "deployment_requests_allowed" in hw_info:
+            return bool(hw_info.get("deployment_requests_allowed", True))
+    except Exception:
+        logger.debug("Unable to read deployment flag from hardware_info", exc_info=True)
+    return True
 
 
 # ============================================================================
@@ -1522,6 +1556,13 @@ class DeployModelRequest(BaseModel):
     config: Optional[Dict[str, Any]] = None  # trigger config, thresholds, etc.
 
 
+class PretrainedDeployRequest(BaseModel):
+    """Request to deploy a built-in pretrained model to a device."""
+    device_id: str
+    model_key: str
+    config: Optional[Dict[str, Any]] = None
+
+
 @router.post("/models/{model_id}/deploy")
 async def deploy_model_to_device(
     model_id: int,
@@ -1556,6 +1597,8 @@ async def deploy_model_to_device(
         ).first()
         if not device:
             raise HTTPException(status_code=404, detail="Device not found")
+        if not _deployment_requests_allowed_for_device(device):
+            raise HTTPException(status_code=403, detail="Model deployment requests are disabled on this device")
 
         # Build deployment config
         deployment_id = str(uuid.uuid4())
@@ -1620,6 +1663,104 @@ async def deploy_model_to_device(
         raise HTTPException(status_code=500, detail=f"Failed to queue deployment: {str(e)}")
 
 
+@router.post("/models/pretrained/deploy")
+async def deploy_pretrained_model_to_device(
+    request: PretrainedDeployRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Queue a built-in pretrained model for deployment."""
+    from ..db import Device, DeviceDeployment
+    import base64
+
+    try:
+        if request.model_key != "opencv_person_detector":
+            raise HTTPException(status_code=400, detail="Unsupported pretrained model")
+
+        device = db.query(Device).filter(
+            Device.device_uuid == request.device_id,
+            Device.userId == current_user.userId
+        ).first()
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+        if not _deployment_requests_allowed_for_device(device):
+            raise HTTPException(status_code=403, detail="Model deployment requests are disabled on this device")
+
+        model = db.query(TrainedModel).filter(
+            TrainedModel.user_id == current_user.userId,
+            TrainedModel.architecture == "opencv_person_detector",
+            TrainedModel.name == "OpenCV Person Detector"
+        ).first()
+        if not model:
+            model = TrainedModel(
+                user_id=current_user.userId,
+                job_id=None,
+                name="OpenCV Person Detector",
+                architecture="opencv_person_detector",
+                accuracy=None,
+                size_bytes=64,
+                model_data=json.dumps({
+                    "pretrained": True,
+                    "model_key": request.model_key,
+                    "runtime": "opencv-hog-person-detector"
+                }).encode("utf-8"),
+                config=json.dumps({
+                    "pretrained": True,
+                    "model_key": request.model_key,
+                    "data_type": "image",
+                }),
+            )
+            db.add(model)
+            db.commit()
+            db.refresh(model)
+
+        deployment_id = str(uuid.uuid4())
+        deploy_config = request.config or {}
+        deploy_config.update({
+            "deployment_id": deployment_id,
+            "model_name": model.name,
+            "model_type": model.architecture or "unknown",
+            "pretrained": True,
+            "model_key": request.model_key,
+            "deployed_at": datetime.utcnow().isoformat(),
+        })
+
+        payload = {
+            "deployment_id": deployment_id,
+            "model_name": model.name,
+            "model_type": model.architecture or "unknown",
+            "model_data": base64.b64encode(model.model_data or b"{}").decode("utf-8"),
+            "config": deploy_config,
+        }
+
+        record = DeviceDeployment(
+            deployment_id=deployment_id,
+            device_uuid=request.device_id,
+            model_id=model.id,
+            user_id=current_user.userId,
+            payload=json.dumps(payload),
+            status="pending",
+        )
+        db.add(record)
+        db.commit()
+
+        logger.info(f"Pretrained deployment {deployment_id} queued for device {request.device_id}")
+        return {
+            "success": True,
+            "deployment_id": deployment_id,
+            "model_name": model.name,
+            "device_name": device.device_name,
+            "device_id": device.device_uuid,
+            "message": f"'{model.name}' queued for deployment — device will receive it on next sync"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to queue pretrained deployment: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to queue pretrained deployment: {str(e)}")
+
+
 @router.get("/models/deployments")
 async def list_deployments(
     db: Session = Depends(get_db),
@@ -1629,24 +1770,25 @@ async def list_deployments(
     from ..db import Device, DeviceDeployment
     
     try:
-        deployments = db.query(DeviceDeployment, Device, TrainedModel).join(
-            Device, DeviceDeployment.device_uuid == Device.device_uuid
-        ).join(
-            TrainedModel, DeviceDeployment.model_id == TrainedModel.id
-        ).filter(
+        deployment_rows = db.query(DeviceDeployment).filter(
             DeviceDeployment.user_id == current_user.userId
         ).order_by(DeviceDeployment.created_at.desc()).all()
         
         result = []
-        for deployment, device, model in deployments:
-            payload = deployment.payload or {}
+        for deployment in deployment_rows:
+            try:
+                payload = json.loads(deployment.payload) if deployment.payload else {}
+            except Exception:
+                payload = {}
+            device = db.query(Device).filter(Device.device_uuid == deployment.device_uuid).first()
+            model = db.query(TrainedModel).filter(TrainedModel.id == deployment.model_id).first()
             result.append({
                 "deployment_id": deployment.deployment_id,
                 "model_id": deployment.model_id,
-                "model_name": model.name,
-                "model_type": model.architecture or "unknown",
-                "device_id": device.device_uuid,
-                "device_name": device.device_name,
+                "model_name": model.name if model else payload.get("model_name") or "Unknown model",
+                "model_type": (model.architecture if model and model.architecture else payload.get("model_type") or "unknown"),
+                "device_id": device.device_uuid if device else deployment.device_uuid,
+                "device_name": device.device_name if device else payload.get("device_name") or deployment.device_uuid,
                 "status": deployment.status,
                 "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
                 "delivered_at": deployment.delivered_at.isoformat() if deployment.delivered_at else None,
@@ -1729,6 +1871,73 @@ async def confirm_deployment(
 # ============================================================================
 # DATASET DETAIL ENDPOINTS (catch-all routes must come last)
 # ============================================================================
+
+@router.get("/{dataset_id}/download")
+async def download_dataset(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Download a full dataset as one zip archive grouped by label."""
+    try:
+        dataset = db.query(TrainingDataset).options(
+            selectinload(TrainingDataset.files).selectinload(DatasetFile.file)
+        ).filter(
+            TrainingDataset.id == dataset_id,
+            TrainingDataset.user_id == current_user.userId,
+        ).first()
+
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+
+        archive = io.BytesIO()
+        used_names = set()
+        manifest = {
+            "dataset_id": dataset.id,
+            "name": dataset.name,
+            "description": dataset.description,
+            "created_at": dataset.created_at.isoformat() if dataset.created_at else None,
+            "files": [],
+        }
+
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for df in dataset.files or []:
+                if not df.file:
+                    continue
+                content = _file_content(df.file)
+                if content is None:
+                    continue
+                label = str(df.label or "unlabeled").replace("/", "_").replace("\\", "_")
+                original = _original_filename(df.file.filename)
+                arcname = f"{label}/{original}"
+                if arcname in used_names:
+                    arcname = f"{label}/{df.file.fileId}_{original}"
+                used_names.add(arcname)
+                zf.writestr(arcname, content)
+                manifest["files"].append({
+                    "file_id": df.file.fileId,
+                    "filename": original,
+                    "label": df.label,
+                    "path": arcname,
+                    "size": df.file.size,
+                    "content_type": df.file.content_type,
+                })
+
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+
+        archive.seek(0)
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in dataset.name) or f"dataset_{dataset.id}"
+        return Response(
+            content=archive.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.zip"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to download dataset %s: %s", dataset_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to download dataset: {str(e)}")
+
 
 @router.get("/{dataset_id}", response_model=Dict[str, Any])
 async def get_dataset(

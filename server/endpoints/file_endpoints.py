@@ -1,10 +1,12 @@
 """File management endpoints."""
 
 import base64
+import io
 import json
 import mimetypes
 import os
 import time
+import zipfile
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -22,6 +24,26 @@ from server.utils.error_handler import (
 from .models import FileUploadSimpleRequest, FileUploadResponse, PaginatedResponse
 
 router = APIRouter(prefix="/file", tags=["files"])
+
+
+def _original_filename(stored_filename: str) -> str:
+    parts = stored_filename.split('_', 3)
+    return parts[-1] if len(parts) >= 4 else stored_filename
+
+
+def _file_content(file_record: File) -> Optional[bytes]:
+    if file_record.storage_path:
+        try:
+            from server.utils.supabase_storage import download_file_sync
+            path_parts = file_record.storage_path.split('/', 1)
+            if len(path_parts) == 2:
+                bucket, path = path_parts
+                success, content = download_file_sync(bucket, path)
+                if success and content:
+                    return content
+        except Exception as storage_error:
+            log_error(f"Failed to download from storage, trying DB: {storage_error}")
+    return file_record.content
 
 @router.get("/files", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def list_files(
@@ -614,6 +636,57 @@ async def upload_file_multipart(
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
 
+@router.get("/minute/{minute}/download")
+async def download_minute_bundle(
+    minute: str,
+    device_id: Optional[str] = Query(None, description="Optional source device UUID"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Download all cloud files for a minute as one zip archive."""
+    try:
+        query = db.query(File).filter(
+            File.userId == current_user.userId,
+            File.filename.like("file_%"),
+            File.filename.like(f"%{minute}%"),
+        )
+        if device_id:
+            query = query.filter(File.filename.like(f"file_{device_id}_%"))
+
+        files = query.order_by(File.filename.asc()).all()
+        if not files:
+            raise HTTPException(status_code=404, detail="No cloud files found for this minute")
+
+        archive = io.BytesIO()
+        used_names = set()
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for file_record in files:
+                content = _file_content(file_record)
+                if content is None:
+                    continue
+                name = _original_filename(file_record.filename)
+                if name in used_names:
+                    name = f"{file_record.fileId}_{name}"
+                used_names.add(name)
+                zf.writestr(name, content)
+
+        if not used_names:
+            raise HTTPException(status_code=404, detail="Minute files have no downloadable content")
+
+        archive.seek(0)
+        filename = f"{minute}.zip"
+        return Response(
+            content=archive.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error downloading minute bundle: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to download minute bundle")
+
+
 @router.get("/{file_id}")
 async def download_file_simple(
     file_id: int,
@@ -644,29 +717,9 @@ async def download_file_simple(
         if not file_record:
             raise HTTPException(status_code=404, detail="File not found")
         
-        # Extract original filename
-        parts = file_record.filename.split('_', 3)
-        original_filename = parts[-1] if len(parts) >= 4 else file_record.filename
+        original_filename = _original_filename(file_record.filename)
         
-        # Get file content - try Supabase Storage first, then DB
-        file_content = None
-        if file_record.storage_path:
-            try:
-                from server.utils.supabase_storage import download_file_sync, BUCKET_FILES
-                # Extract path from storage_path (format: "bucket/path")
-                path_parts = file_record.storage_path.split('/', 1)
-                if len(path_parts) == 2:
-                    bucket, path = path_parts
-                    success, content = download_file_sync(bucket, path)
-                    if success and content:
-                        file_content = content
-                        log_response(200, f"File retrieved from Supabase Storage: {file_record.storage_path}", f"/file/{file_id}")
-            except Exception as storage_error:
-                log_error(f"Failed to download from storage, trying DB: {storage_error}")
-        
-        # Fall back to DB content
-        if file_content is None:
-            file_content = file_record.content
+        file_content = _file_content(file_record)
         
         if file_content is None:
             raise HTTPException(status_code=404, detail="File content not available")
@@ -1373,4 +1426,3 @@ async def detect_file_type_endpoint(
     except Exception as e:
         log_error(f"Error detecting file type: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to detect file type: {str(e)}")
-
