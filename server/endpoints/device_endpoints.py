@@ -226,6 +226,9 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
             minute_dirs = sorted([item for item in data_dir.iterdir() if _is_minute_dir(item)], key=lambda item: item.name)
 
         for minute_dir in minute_dirs:
+            minute_label = None
+            if minute_dir.parent != data_dir and minute_dir.parent.name and not _is_minute_dir(minute_dir.parent):
+                minute_label = minute_dir.parent.name
             for file_path in sorted(minute_dir.iterdir()):
                 if not file_path.is_file():
                     continue
@@ -240,6 +243,7 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
 
                 try:
                     stat = file_path.stat()
+                    relative_path = file_path.relative_to(data_dir).as_posix()
 
                     meta_filename = get_thoth_metadata_filename(raw_name)
                     meta_path = minute_dir / meta_filename
@@ -278,6 +282,8 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
                         'name': filename,
                         'minute': minute_dir.name,
                         'relative_name': raw_name,
+                        'relative_path': relative_path,
+                        'label': minute_label,
                         'size': stat.st_size,
                         'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
                         'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
