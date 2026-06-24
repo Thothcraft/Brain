@@ -190,10 +190,21 @@ async def list_datasets(
         # Convert to dict efficiently
         dataset_list = []
         for d in datasets:
+            dataset_files = db.query(DatasetFile.label).filter(
+                DatasetFile.dataset_id == d.id
+            ).all()
+            label_counts = {}
+            for row in dataset_files:
+                label = row[0]
+                if label:
+                    label_counts[label] = label_counts.get(label, 0) + 1
             dataset_list.append({
                 "id": d.id,
                 "name": d.name,
                 "description": d.description,
+                "file_count": sum(label_counts.values()),
+                "labels": sorted(label_counts.keys()),
+                "label_counts": label_counts,
                 "created_at": d.created_at.isoformat() if d.created_at else None,
                 "updated_at": d.updated_at.isoformat() if d.updated_at else None
             })
