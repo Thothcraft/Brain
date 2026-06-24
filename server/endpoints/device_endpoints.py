@@ -216,7 +216,8 @@ def _scan_device_files(device_uuid: str, data_path: str = None, require_metadata
 
     try:
         if not os.path.exists(data_path):
-            logger.warning(f"Data directory not found: {data_path}")
+            # Only log as debug since missing local data directory is expected for remote devices
+            logger.debug(f"Data directory not found: {data_path} (expected for remote devices)")
             return files
 
         data_dir = Path(data_path)
@@ -1383,24 +1384,35 @@ async def device_heartbeat(
             "last_seen": now,
             "online": requested_online,
         }
-        
+
+        # Prepare hardware_info updates
+        hardware_info_updates = {}
+        if hasattr(request, 'wifi_connected') and request.wifi_connected is not None:
+            hardware_info_updates["wifi_connected"] = request.wifi_connected
+        if hasattr(request, 'collection_active') and request.collection_active is not None:
+            hardware_info_updates["collection_active"] = request.collection_active
+
         # Update optional fields if provided
         if hasattr(request, 'battery_level') and request.battery_level is not None:
             update_data["battery_level"] = request.battery_level
-        if hasattr(request, 'wifi_connected') and request.wifi_connected is not None:
-            update_data["wifi_connected"] = request.wifi_connected
-        if hasattr(request, 'collection_active') and request.collection_active is not None:
-            update_data["collection_active"] = request.collection_active
         if hasattr(request, 'online') and request.online is not None:
             update_data["online"] = request.online
-        if hasattr(request, 'hardware_info') and request.hardware_info:
-            hardware_info = dict(request.hardware_info)
+
+        # Merge hardware_info updates
+        if hardware_info_updates or (hasattr(request, 'hardware_info') and request.hardware_info):
+            existing_hardware_info = _device_hardware_info(device)
+            if hasattr(request, 'hardware_info') and request.hardware_info:
+                existing_hardware_info.update(dict(request.hardware_info))
+            existing_hardware_info.update(hardware_info_updates)
+
+            # Preserve capture_settings
             existing_capture_settings = _capture_settings_for_device(device)
-            if "capture_settings" not in hardware_info:
-                hardware_info["capture_settings"] = existing_capture_settings
+            if "capture_settings" not in existing_hardware_info:
+                existing_hardware_info["capture_settings"] = existing_capture_settings
             else:
-                hardware_info["capture_settings"] = _normalize_capture_settings(hardware_info.get("capture_settings"))
-            update_data["hardware_info"] = json.dumps(hardware_info)
+                existing_hardware_info["capture_settings"] = _normalize_capture_settings(existing_hardware_info.get("capture_settings"))
+
+            update_data["hardware_info"] = json.dumps(existing_hardware_info)
         
         # Update IP address if available
         ip = get_client_ip(request_obj)
