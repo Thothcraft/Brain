@@ -393,7 +393,7 @@ def _get_pending_uploads(device_id: int, db: Session) -> list:
 
 
 def _get_pending_deployments(device_uuid: str, db: Session) -> list:
-    """Return pending model deployments for a device (payload without model_data for size)."""
+    """Return pending model deployments for local installation on a device."""
     try:
         records = db.query(DeviceDeployment).filter(
             DeviceDeployment.device_uuid == device_uuid,

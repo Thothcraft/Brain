@@ -63,6 +63,28 @@ def _deployment_requests_allowed_for_device(device) -> bool:
     return True
 
 
+def _edge_data_type(value: Optional[str]) -> str:
+    raw = str(value or "csi").strip().lower()
+    aliases = {
+        "wifi_csi": "csi",
+        "fmcw": "radar",
+        "mmwave": "radar",
+        "camera": "image",
+        "images": "image",
+        "videos": "video",
+    }
+    raw = aliases.get(raw, raw)
+    return raw if raw in {"csi", "radar", "image", "video"} else "csi"
+
+
+def _classes_from_config(config: Dict[str, Any]) -> List[str]:
+    for key in ("classes", "class_names"):
+        value = config.get(key)
+        if isinstance(value, list):
+            return [str(item) for item in value]
+    return []
+
+
 # ============================================================================
 # REQUEST/RESPONSE MODELS
 # ============================================================================
@@ -1636,13 +1658,27 @@ async def deploy_model_to_device(
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+        preprocessing = deploy_config.get("preprocessing") if isinstance(deploy_config.get("preprocessing"), dict) else {}
+        edge_data_type = _edge_data_type(deploy_config.get("data_type") or preprocessing.get("data_type"))
+        class_names = _classes_from_config(deploy_config)
+        deploy_config.update({
+            "data_type": edge_data_type,
+            "classes": class_names,
+            "class_names": class_names,
+            "edge_runtime": "local-thoth-device",
+            "prediction_storage": "minute_folder_predictions_json",
+        })
+
         # Build full payload (model weights encoded as base64)
         full_payload = {
             "deployment_id": deployment_id,
             "model_name": model.name,
             "model_type": model.architecture or "unknown",
+            "data_type": edge_data_type,
+            "classes": class_names,
             "model_data": base64.b64encode(model.model_data).decode("utf-8"),
             "config": deploy_config,
+            "runs_on": "thoth-device",
         }
 
         # Store in DB — device will pick it up on next register/heartbeat
@@ -1733,6 +1769,11 @@ async def deploy_pretrained_model_to_device(
             "model_type": model.architecture or "unknown",
             "pretrained": True,
             "model_key": request.model_key,
+            "data_type": "image",
+            "classes": ["person"],
+            "class_names": ["person"],
+            "edge_runtime": "local-thoth-device",
+            "prediction_storage": "minute_folder_predictions_json",
             "deployed_at": datetime.utcnow().isoformat(),
         })
 
@@ -1740,8 +1781,11 @@ async def deploy_pretrained_model_to_device(
             "deployment_id": deployment_id,
             "model_name": model.name,
             "model_type": model.architecture or "unknown",
+            "data_type": "image",
+            "classes": ["person"],
             "model_data": base64.b64encode(model.model_data or b"{}").decode("utf-8"),
             "config": deploy_config,
+            "runs_on": "thoth-device",
         }
 
         record = DeviceDeployment(
@@ -1798,6 +1842,11 @@ async def list_deployments(
                 "model_id": deployment.model_id,
                 "model_name": model.name if model else payload.get("model_name") or "Unknown model",
                 "model_type": (model.architecture if model and model.architecture else payload.get("model_type") or "unknown"),
+                "data_type": payload.get("data_type") or (payload.get("config") or {}).get("data_type"),
+                "classes": payload.get("classes") or (payload.get("config") or {}).get("classes") or (payload.get("config") or {}).get("class_names") or [],
+                "config": payload.get("config") or {},
+                "model_data": payload.get("model_data") if deployment.status == "pending" else None,
+                "runs_on": payload.get("runs_on") or "thoth-device",
                 "device_id": device.device_uuid if device else deployment.device_uuid,
                 "device_name": device.device_name if device else payload.get("device_name") or deployment.device_uuid,
                 "status": deployment.status,
