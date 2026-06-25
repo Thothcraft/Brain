@@ -78,7 +78,7 @@ def _edge_data_type(value: Optional[str]) -> str:
 
 
 def _classes_from_config(config: Dict[str, Any]) -> List[str]:
-    for key in ("classes", "class_names"):
+    for key in ("labels", "classes", "class_names"):
         value = config.get(key)
         if isinstance(value, list):
             return [str(item) for item in value]
@@ -1643,7 +1643,7 @@ async def deploy_model_to_device(
             "deployed_at": datetime.utcnow().isoformat(),
         })
 
-        # Enrich with training job preprocessing info
+        # Enrich with training job preprocessing and label info.
         if model.job_id:
             job = db.query(TrainingJob).filter(TrainingJob.job_id == model.job_id).first()
             if job and job.config:
@@ -1654,15 +1654,40 @@ async def deploy_model_to_device(
                         "window_size": job_config.get("window_size"),
                         "output_shape": job_config.get("output_shape"),
                     }
-                    deploy_config["class_names"] = job_config.get("class_names", [])
+                    labels = _classes_from_config(job_config)
+                    if labels:
+                        deploy_config["labels"] = labels
                 except (json.JSONDecodeError, TypeError):
                     pass
+            if job and job.best_metrics:
+                try:
+                    best_metrics = json.loads(job.best_metrics) if isinstance(job.best_metrics, str) else job.best_metrics
+                    labels = _classes_from_config(best_metrics or {})
+                    if labels and not _classes_from_config(deploy_config):
+                        deploy_config["labels"] = labels
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        if model.config and not _classes_from_config(deploy_config):
+            try:
+                model_config = json.loads(model.config) if isinstance(model.config, str) else model.config
+                labels = _classes_from_config(model_config or {})
+                training_results = model_config.get("training_results") if isinstance(model_config, dict) else {}
+                if not labels and isinstance(training_results, dict):
+                    labels = _classes_from_config(training_results)
+                if labels:
+                    deploy_config["labels"] = labels
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
 
         preprocessing = deploy_config.get("preprocessing") if isinstance(deploy_config.get("preprocessing"), dict) else {}
         edge_data_type = _edge_data_type(deploy_config.get("data_type") or preprocessing.get("data_type"))
         class_names = _classes_from_config(deploy_config)
+        if not class_names:
+            raise HTTPException(status_code=400, detail="Only classification models with a non-empty labels field can be deployed to Thoth")
         deploy_config.update({
             "data_type": edge_data_type,
+            "labels": class_names,
             "classes": class_names,
             "class_names": class_names,
             "edge_runtime": "local-thoth-device",
@@ -1675,6 +1700,7 @@ async def deploy_model_to_device(
             "model_name": model.name,
             "model_type": model.architecture or "unknown",
             "data_type": edge_data_type,
+            "labels": class_names,
             "classes": class_names,
             "model_data": base64.b64encode(model.model_data).decode("utf-8"),
             "config": deploy_config,
@@ -1843,7 +1869,8 @@ async def list_deployments(
                 "model_name": model.name if model else payload.get("model_name") or "Unknown model",
                 "model_type": (model.architecture if model and model.architecture else payload.get("model_type") or "unknown"),
                 "data_type": payload.get("data_type") or (payload.get("config") or {}).get("data_type"),
-                "classes": payload.get("classes") or (payload.get("config") or {}).get("classes") or (payload.get("config") or {}).get("class_names") or [],
+                "labels": payload.get("labels") or (payload.get("config") or {}).get("labels") or payload.get("classes") or (payload.get("config") or {}).get("classes") or (payload.get("config") or {}).get("class_names") or [],
+                "classes": payload.get("labels") or (payload.get("config") or {}).get("labels") or payload.get("classes") or (payload.get("config") or {}).get("classes") or (payload.get("config") or {}).get("class_names") or [],
                 "config": payload.get("config") or {},
                 "model_data": payload.get("model_data") if deployment.status == "pending" else None,
                 "runs_on": payload.get("runs_on") or "thoth-device",
