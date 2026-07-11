@@ -40,6 +40,21 @@ router = APIRouter(prefix="/device", tags=["devices"])
 # Cache for device authentication tokens
 device_auth_cache = {}
 FREE_PLAN_MAX_ONLINE_DEVICES = 1
+DEVICE_ONLINE_TIMEOUT_SECONDS = max(30, int(os.getenv("DEVICE_ONLINE_TIMEOUT_SECONDS", "90")))
+
+
+def _expire_stale_devices(db: Session, user_id: Optional[int] = None) -> int:
+    """Make persisted device state agree with the heartbeat freshness contract."""
+    cutoff = datetime.utcnow() - timedelta(seconds=DEVICE_ONLINE_TIMEOUT_SECONDS)
+    query = db.query(Device).filter(Device.online == True).filter(
+        (Device.last_seen.is_(None)) | (Device.last_seen < cutoff)
+    )
+    if user_id is not None:
+        query = query.filter(Device.userId == user_id)
+    changed = query.update({Device.online: False}, synchronize_session=False)
+    if changed:
+        db.commit()
+    return changed
 MINUTE_DIR_RE = re.compile(r"^\d{8}_\d{4}$")
 MINUTE_FILE_RE = re.compile(r"^\d{8}_\d{4}_.+")
 MINUTE_PATH_RE = re.compile(r"(^|/)\d{8}_\d{4}(/|_|$)")
@@ -910,6 +925,7 @@ async def list_user_devices(
     log_request_start("GET", "/device/list", current_user.userId)
     
     try:
+        _expire_stale_devices(db, current_user.userId)
         # Build query: only show approved devices
         query = db.query(Device).filter(
             Device.userId == current_user.userId,
@@ -1434,6 +1450,7 @@ async def device_heartbeat(
         logger.debug(f"Heartbeat received from device {request.device_id}")
         db.refresh(device)
         capture_settings = _capture_settings_for_device(device)
+        pending_uploads = _get_pending_uploads(device.deviceId, db)
         
         return {
             "success": True,
@@ -1442,6 +1459,7 @@ async def device_heartbeat(
                 "device_id": str(request.device_id),
                 "timestamp": now.isoformat(),
                 "capture_settings": capture_settings,
+                "pending_uploads": pending_uploads,
             }
         }
     except HTTPException:
@@ -1550,6 +1568,33 @@ async def get_device_files(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get device files: {str(e)}"
         )
+
+
+@router.post("/{device_uuid}/captures/{minute}/request-upload", response_model=Dict[str, Any])
+async def request_capture_upload(
+    device_uuid: str,
+    minute: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Request the complete minute from its owning Thoth device."""
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    record = db.query(DeviceFile).filter(
+        DeviceFile.device_id == device.deviceId,
+        DeviceFile.filename == minute,
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Capture minute not found")
+    if not _portal_upload_allowed_for_device(device):
+        raise HTTPException(status_code=403, detail="Portal-initiated uploads are disabled on this device")
+    record.upload_requested = True
+    db.commit()
+    return {"success": True, "minute": minute, "upload_requested": True}
 
 
 @router.post("/file/{device_file_id}/request-upload")

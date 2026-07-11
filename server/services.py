@@ -108,8 +108,9 @@ def auto_disconnect_stale_devices():
             logger.warning(f"[SERVICE] Database connection test failed, skipping this run: {conn_err}")
             return 0
         
-        # Check for devices that haven't been seen in the last 5 minutes
-        stale_time = datetime.utcnow() - timedelta(minutes=5)
+        # Keep this aligned with the device-list freshness contract.
+        timeout_seconds = max(30, int(os.getenv("DEVICE_ONLINE_TIMEOUT_SECONDS", "90")))
+        stale_time = datetime.utcnow() - timedelta(seconds=timeout_seconds)
         
         # Get devices that haven't been seen recently and are currently online
         stale_devices = db.query(Device).filter(
@@ -210,10 +211,10 @@ def start_scheduler():
             job_defaults=job_defaults
         )
         
-        # Add device status check job (every 2 minutes to reduce database load)
+        # The list endpoint also expires state, but this keeps persisted state tidy.
         scheduler.add_job(
             auto_disconnect_stale_devices,
-            trigger=IntervalTrigger(seconds=120),
+            trigger=IntervalTrigger(seconds=30),
             id='auto_disconnect_job',
             name='Auto disconnect stale devices',
             replace_existing=True

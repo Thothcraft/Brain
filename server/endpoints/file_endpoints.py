@@ -696,6 +696,36 @@ async def download_minute_bundle(
         raise HTTPException(status_code=500, detail="Failed to download minute bundle")
 
 
+@router.get("/minute/{minute}/assets")
+async def list_minute_assets(
+    minute: str,
+    device_id: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return cloud file IDs used by the capture viewer."""
+    query = db.query(File).filter(File.userId == current_user.userId, File.filename.like(f"%{minute}%"))
+    if device_id:
+        query = query.filter(File.filename.like(f"file_{device_id}_%"))
+    assets = []
+    for record in query.order_by(File.uploaded_at.asc()).all():
+        original = _original_filename(record.filename)
+        kind = None
+        try:
+            metadata = json.loads(record.file_hash or "{}")
+            kind = metadata.get("file_kind")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        assets.append({
+            "file_id": record.fileId,
+            "filename": original,
+            "content_type": record.content_type,
+            "kind": kind,
+            "size": record.size,
+        })
+    return {"success": True, "minute": minute, "assets": assets}
+
+
 @router.get("/{file_id}")
 async def download_file_simple(
     file_id: int,
