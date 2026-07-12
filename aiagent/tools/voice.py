@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 
 import requests
 import whisper
-import torch
 from loguru import logger
 
 
@@ -30,7 +29,7 @@ class Whisper:
                       'tiny', 'base', 'small', 'medium', 'large'
         """
         self.model_size = model_size
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = 'cpu'
         logger.info(f"Loading Whisper {self.model_size} model on {self.device}...")
         self.model = whisper.load_model(self.model_size, device=self.device)
         logger.info(f"Whisper {self.model_size} model loaded successfully")

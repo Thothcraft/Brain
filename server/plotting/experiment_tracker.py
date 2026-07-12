@@ -421,7 +421,7 @@ class ExperimentTracker:
             self.model.trainable_parameters = trainable_params
             self.model.non_trainable_parameters = (total_params or 0) - trainable_params
         
-        # Try to extract from PyTorch model
+        # Try to extract from a compatible state object
         if model is not None:
             try:
                 total = sum(p.numel() for p in model.parameters())

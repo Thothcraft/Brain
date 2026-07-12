@@ -633,7 +633,7 @@ async def get_file_line_count(
 # ============================================================================
 
 def run_cloud_training(job_id: str, db_url: str):
-    """Run real PyTorch training for IMU model in background."""
+    """Run legacy IMU training in the background."""
     import asyncio
     import traceback
     import sys
@@ -792,7 +792,7 @@ async def _run_cloud_training_async(job_id: str, db_url: str):
                 print(f"[TRAINING-WARNING] Failed to update job status: {e}")
                 sys.stdout.flush()
         
-        # Run real PyTorch training
+        # Run legacy training
         print(f"[TRAINING-DEBUG] ========================================")
         print(f"[TRAINING-DEBUG] CALLING run_full_training...")
         print(f"[TRAINING-DEBUG] job_id={job_id}")

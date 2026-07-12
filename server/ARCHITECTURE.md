@@ -23,7 +23,6 @@ Brain/server/
 │   ├── model_knn.py
 │   └── ...
 │
-├── dl_models/               # Deep Learning models (PyTorch)
 │   ├── base.py              # BaseDLModel, DLModelRegistry
 │   ├── model_lstm_3d.py
 │   ├── model_cnn1d_3d.py

@@ -14,7 +14,6 @@ All endpoint logic has been moved to dedicated modules:
 - Shared models: server/endpoints/models.py
 """
 
-import os
 from fastapi import APIRouter
 
 # Import all endpoint routers
@@ -27,21 +26,10 @@ from server.endpoints.file_endpoints import router as file_router
 from server.endpoints.webhook_endpoints import router as webhook_router
 from server.endpoints.sensor_endpoints import router as sensor_router
 from server.endpoints.network_endpoints import router as network_router
-from server.endpoints.training_endpoints import router as training_router
 from server.endpoints.curriculum_endpoints import router as curriculum_router
-from server.endpoints.dataset_endpoints import router as dataset_router
 from server.endpoints.processing_endpoints import router as processing_router
 from server.endpoints.activity_endpoints import router as activity_router
 from server.endpoints.figure_endpoints import router as figure_router
-ENABLE_FL = os.getenv("ENABLE_FL", "").strip().lower() in {"1", "true", "yes", "on"}
-if ENABLE_FL:
-    try:
-        from server.endpoints.fl_endpoints import router as fl_router
-    except Exception:
-        fl_router = None
-else:
-    fl_router = None
-from server.endpoints.report_endpoints import router as report_router
 from server.endpoints.validation_endpoints import router as validation_router
 from server.endpoints.plotting_api import router as plotting_router
 from server.endpoints.folders import router as folders_router
@@ -63,15 +51,10 @@ router.include_router(file_router)        # /file/*
 router.include_router(webhook_router)     # /phone/* (Twilio webhooks)
 router.include_router(sensor_router)      # /sensors/* (Sense HAT sensors)
 router.include_router(network_router)     # /network/* (WiFi configuration)
-router.include_router(training_router)    # /training/*, /federated/* (ML training)
 router.include_router(curriculum_router)  # /curriculum/* (Education content)
-router.include_router(dataset_router)     # /datasets/* (Training datasets and cloud training)
 router.include_router(processing_router)  # /processing/* (Data processing pipelines)
 router.include_router(activity_router)    # /activity/* (Activity feed and stats)
 router.include_router(figure_router)             # /figures/* (Publication-ready figure export)
-if fl_router is not None:
-    router.include_router(fl_router)                 # /fl/* (Flower Federated Learning)
-router.include_router(report_router)             # /reports/* (Training reports and shareable views)
 router.include_router(validation_router)         # /validation/* (Data validation and file type detection)
 router.include_router(plotting_router)           # /plotting/* (Plot generation and export)
 router.include_router(folders_router)            # /folders/* (Folder management)
