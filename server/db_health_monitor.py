@@ -77,23 +77,24 @@ class DatabaseHealthMonitor:
     async def _check_database_health(self):
         """Perform a single health check."""
         try:
-            # Test basic connectivity
-            status = test_database_connection()
-            
-            # Test with a more complex query
-            with SessionLocal() as db:
-                result = db.execute(text("SELECT count(*) as user_count FROM user_account"))
-                user_count = result.scalar()
-                status['user_count'] = user_count
-                
-                # Test connection pool stats
-                pool = engine.pool
-                status.update({
-                    'pool_size': pool.size(),
-                    'pool_checked_in': pool.checkedin(),
-                    'pool_checked_out': pool.checkedout(),
-                    'pool_overflow': pool.overflow()
-                })
+            def run_checks():
+                status = test_database_connection()
+                if status.get('status') != 'connected':
+                    raise RuntimeError(status.get('error') or 'Database connection failed')
+                with SessionLocal() as db:
+                    db.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+                    status['user_count'] = db.execute(text("SELECT count(*) FROM user_account")).scalar()
+                    pool = engine.pool
+                    status.update({
+                        'pool_size': pool.size(),
+                        'pool_checked_in': pool.checkedin(),
+                        'pool_checked_out': pool.checkedout(),
+                        'pool_overflow': pool.overflow()
+                    })
+                return status
+
+            # psycopg2 is synchronous; never run it on FastAPI's event loop.
+            status = await asyncio.wait_for(asyncio.to_thread(run_checks), timeout=12.0)
             
             # Reset failure count on success
             if self.failure_count > 0:
@@ -147,7 +148,10 @@ class DatabaseHealthMonitor:
             await asyncio.sleep(2)
             
             # Test the new connection
-            status = test_database_connection()
+            status = await asyncio.wait_for(
+                asyncio.to_thread(test_database_connection),
+                timeout=8.0,
+            )
             if status['status'] == 'connected':
                 logger.info("Database connection recovery successful")
                 self.failure_count = 0
