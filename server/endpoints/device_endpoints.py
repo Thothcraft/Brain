@@ -471,6 +471,9 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
     
     try:
         stored_count = 0
+        device = db.query(Device).filter(Device.deviceId == device_id).first()
+        hardware_info = _device_hardware_info(device) if device else {}
+        capture_metadata = hardware_info.get("capture_file_metadata") if isinstance(hardware_info.get("capture_file_metadata"), dict) else {}
         for file_info in files:
             # Skip directories (unless it's a timelapse folder)
             file_type_val = file_info.type if hasattr(file_info, 'type') else file_info.get('type')
@@ -478,6 +481,17 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
             
             if not filename:
                 continue
+            def field(name, default=None):
+                return getattr(file_info, name, default) if not isinstance(file_info, dict) else file_info.get(name, default)
+            labels = field('labels') if isinstance(field('labels'), list) else []
+            label = str(field('label') or '').strip()
+            if label and label not in labels:
+                labels.append(label)
+            capture_metadata[filename] = {
+                'labels': [str(item).strip() for item in labels if str(item).strip()],
+                'label': label or (str(labels[0]) if labels else None),
+                'occupancy': field('occupancy') if isinstance(field('occupancy'), dict) else None,
+            }
             
             # Handle timelapse folders
             if file_type_val == 'timelapse' or filename.startswith('timelapse_'):
@@ -541,6 +555,9 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
                 db.add(device_file)
             stored_count += 1
         
+        if device:
+            hardware_info['capture_file_metadata'] = capture_metadata
+            device.hardware_info = json.dumps(hardware_info)
         db.commit()
         logger.info(f"Stored {stored_count} files for device {device_uuid}")
         
@@ -1549,7 +1566,20 @@ async def get_device_files(
             DeviceFile.device_id == device.deviceId
         ).order_by(DeviceFile.modified_at.desc()).all()
 
-        file_list = [f.to_dict() for f in files if _is_minute_file_name(f.filename)]
+        capture_metadata = _device_hardware_info(device).get('capture_file_metadata', {})
+        file_list = []
+        for record in files:
+            if not _is_minute_file_name(record.filename):
+                continue
+            item = record.to_dict()
+            metadata = capture_metadata.get(record.filename, {}) if isinstance(capture_metadata, dict) else {}
+            if isinstance(metadata, dict):
+                item.update({
+                    'label': metadata.get('label'),
+                    'labels': metadata.get('labels') or [],
+                    'occupancy': metadata.get('occupancy'),
+                })
+            file_list.append(item)
         
         return {
             "success": True,

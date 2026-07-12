@@ -29,6 +29,9 @@ class DeviceFileInfo(BaseModel):
     type: Optional[str] = None  # file extension or 'directory'
     data_type: Optional[str] = None
     minute_files: Optional[int] = None
+    label: Optional[str] = None
+    labels: Optional[List[str]] = None
+    occupancy: Optional[Dict[str, Any]] = None
 
 class DeviceHeartbeatRequest(BaseModel):
     device_id: str
