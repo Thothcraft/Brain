@@ -18,11 +18,15 @@ from server.optimize_db import optimize_database
 async def async_db_init():
     """Async wrapper for database initialization."""
     try:
-        if initialize_database():
+        # initialize_database uses synchronous psycopg2. Running it directly in
+        # this coroutine blocks Uvicorn's event loop and prevents Railway's
+        # health check from responding when the database is slow or reconnecting.
+        initialized = await asyncio.to_thread(initialize_database)
+        if initialized:
             logger.info("Database initialization completed successfully")
             # Run optimization after initialization
             try:
-                if optimize_database():
+                if await asyncio.to_thread(optimize_database):
                     logger.info("Database optimization completed successfully")
                 else:
                     logger.warning("Database optimization completed with warnings")

@@ -156,9 +156,15 @@ def initialize_database():
     logger.info("[INIT] Starting database initialization")
     
     try:
-        ensure_trained_model_table()
-        ensure_approved_column()
-        ensure_device_deployment_table()
+        results = {
+            "trained_model": ensure_trained_model_table(),
+            "device.approved": ensure_approved_column(),
+            "device_deployment": ensure_device_deployment_table(),
+        }
+        failed = [name for name, succeeded in results.items() if not succeeded]
+        if failed:
+            logger.warning("[INIT] Database initialization incomplete; failed checks: %s", ", ".join(failed))
+            return False
         logger.info("[INIT] Database initialization completed successfully")
         return True
     except Exception as e:

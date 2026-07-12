@@ -112,25 +112,20 @@ def auto_disconnect_stale_devices():
         timeout_seconds = max(30, int(os.getenv("DEVICE_ONLINE_TIMEOUT_SECONDS", "90")))
         stale_time = datetime.utcnow() - timedelta(seconds=timeout_seconds)
         
-        # Get devices that haven't been seen recently and are currently online
-        stale_devices = db.query(Device).filter(
+        # A bounded bulk UPDATE avoids loading ORM objects and prevents this
+        # maintenance job from holding a connection across a slow row loop.
+        db.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+        stale_count = db.query(Device).filter(
             Device.last_seen < stale_time,
             Device.online == True
-        ).all()
+        ).update({Device.online: False}, synchronize_session=False)
         
-        logger.info(f"[SERVICE] Found {len(stale_devices)} stale devices")
+        logger.info(f"[SERVICE] Found {stale_count} stale devices")
         
-        if stale_devices:
-            for device in stale_devices:
-                device.online = False
-                if hasattr(device, 'disconnected_at'):
-                    device.disconnected_at = datetime.utcnow()
-
-                logger.info(f"[SERVICE] Marked device {getattr(device, 'id', 'unknown')} as offline")
-            
+        if stale_count:
             try:
                 db.commit()
-                logger.info(f"[SERVICE] Successfully marked {len(stale_devices)} devices as offline")
+                logger.info(f"[SERVICE] Successfully marked {stale_count} devices as offline")
             except Exception as commit_err:
                 logger.error(f"[SERVICE] Failed to commit device updates: {commit_err}")
                 db.rollback()
@@ -138,7 +133,7 @@ def auto_disconnect_stale_devices():
         
         duration = (datetime.utcnow() - start_time).total_seconds()
         logger.info(f"[SERVICE] Completed auto_disconnect_stale_devices in {duration:.2f}s")
-        return len(stale_devices) if stale_devices else 0
+        return stale_count
         
     except (OperationalError, DBAPIError) as db_err:
         logger.warning(f"[SERVICE] Database error in auto_disconnect_stale_devices: {db_err}")
@@ -217,7 +212,8 @@ def start_scheduler():
             trigger=IntervalTrigger(seconds=30),
             id='auto_disconnect_job',
             name='Auto disconnect stale devices',
-            replace_existing=True
+            replace_existing=True,
+            next_run_time=datetime.now() + timedelta(seconds=60),
         )
         
         scheduler.start()
