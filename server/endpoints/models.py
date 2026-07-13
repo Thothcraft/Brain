@@ -2,7 +2,7 @@
 
 import uuid
 from ipaddress import ip_address as validate_ip
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, Field, validator
 from typing import Dict, List, Optional, Any
 
 # ============================================================================
@@ -291,13 +291,23 @@ class StandardResponse(BaseModel):
     message: str
     data: Optional[Dict[str, Any]] = None
 
+
+class CaptureSettings(BaseModel):
+    labels: List[str] = Field(default_factory=list)
+    sensors: Dict[str, bool] = Field(default_factory=dict)
+    radar_detection_threshold_db: float = 8.0
+    occupancy_threshold_percent: float = 50.0
+    auto_occupancy_label_enabled: bool = True
+    revision: int = 0
+    updated_at: Optional[str] = None
+
 class DeviceResponse(StandardResponse):
     device_id: str
     device_name: Optional[str] = None
     ip_address: Optional[str] = None
     pending_uploads: Optional[List[str]] = None
     pending_deployments: Optional[List[Dict[str, Any]]] = None
-    capture_settings: Optional[Dict[str, Any]] = None
+    capture_settings: Optional[CaptureSettings] = None
 
 class DataUploadResponse(StandardResponse):
     upload_id: str

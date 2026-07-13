@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Union
 import uuid as uuid_lib
 from ipaddress import ip_address, IPv4Address
@@ -67,6 +67,11 @@ DEFAULT_CAPTURE_SETTINGS = {
         "esp32_csi": True,
         "sense_hat": True,
     },
+    "radar_detection_threshold_db": 8.0,
+    "occupancy_threshold_percent": 50.0,
+    "auto_occupancy_label_enabled": True,
+    "revision": 0,
+    "updated_at": None,
 }
 
 # Rate limiting for device registration (new devices only)
@@ -142,7 +147,43 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
         if key in raw_sensors:
             sensors[key] = bool(raw_sensors.get(key))
 
-    return {"labels": labels, "sensors": sensors}
+    try:
+        radar_threshold = min(40.0, max(0.0, float(source.get("radar_detection_threshold_db", 8.0))))
+    except (TypeError, ValueError):
+        radar_threshold = 8.0
+    try:
+        occupancy_threshold = min(100.0, max(0.0, float(source.get("occupancy_threshold_percent", 50.0))))
+    except (TypeError, ValueError):
+        occupancy_threshold = 50.0
+    auto_label = source.get("auto_occupancy_label_enabled", True)
+    if isinstance(auto_label, str):
+        auto_label = auto_label.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        revision = max(0, int(source.get("revision") or 0))
+    except (TypeError, ValueError):
+        revision = 0
+
+    return {
+        "labels": labels,
+        "sensors": sensors,
+        "radar_detection_threshold_db": radar_threshold,
+        "occupancy_threshold_percent": occupancy_threshold,
+        "auto_occupancy_label_enabled": bool(auto_label),
+        "revision": revision,
+        "updated_at": str(source.get("updated_at")) if source.get("updated_at") else None,
+    }
+
+
+def _capture_settings_sort_key(value: Dict[str, Any]) -> tuple[int, str]:
+    normalized = _normalize_capture_settings(value)
+    return int(normalized.get("revision") or 0), str(normalized.get("updated_at") or "")
+
+
+def _reconcile_capture_settings(current: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    """Select the latest revision so offline device edits cannot be lost."""
+    current_normalized = _normalize_capture_settings(current)
+    incoming_normalized = _normalize_capture_settings(incoming)
+    return incoming_normalized if _capture_settings_sort_key(incoming_normalized) > _capture_settings_sort_key(current_normalized) else current_normalized
 
 
 def _capture_settings_for_device(device: Device) -> Dict[str, Any]:
@@ -150,12 +191,18 @@ def _capture_settings_for_device(device: Device) -> Dict[str, Any]:
     return _normalize_capture_settings(hardware_info.get("capture_settings"))
 
 
-def _set_capture_settings_for_device(device: Device, updates: Dict[str, Any], db: Session) -> Dict[str, Any]:
+def _set_capture_settings_for_device(
+    device: Device, updates: Dict[str, Any], db: Session, *, increment_revision: bool = True
+) -> Dict[str, Any]:
     hardware_info = _device_hardware_info(device)
+    current = _capture_settings_for_device(device)
     merged = _normalize_capture_settings({
-        **_capture_settings_for_device(device),
+        **current,
         **(updates or {}),
     })
+    if increment_revision:
+        merged["revision"] = max(int(current.get("revision") or 0), int(merged.get("revision") or 0)) + 1
+        merged["updated_at"] = datetime.now(timezone.utc).isoformat()
     hardware_info["capture_settings"] = merged
     device.hardware_info = json.dumps(hardware_info)
     db.commit()
@@ -670,7 +717,9 @@ async def register_device(
                 if 'capture_settings' not in hardware_info:
                     hardware_info['capture_settings'] = existing_capture_settings
                 else:
-                    hardware_info['capture_settings'] = _normalize_capture_settings(hardware_info.get('capture_settings'))
+                    hardware_info['capture_settings'] = _reconcile_capture_settings(
+                        existing_capture_settings, hardware_info.get('capture_settings') or {}
+                    )
 
                 if _is_free_plan_user(current_user) and not _can_mark_device_online(
                     db,
@@ -751,7 +800,9 @@ async def register_device(
             db.add(new_device)
             db.commit()
             db.refresh(new_device)
-            capture_settings = _set_capture_settings_for_device(new_device, hardware_info.get("capture_settings") or DEFAULT_CAPTURE_SETTINGS, db)
+            capture_settings = _set_capture_settings_for_device(
+                new_device, hardware_info.get("capture_settings") or DEFAULT_CAPTURE_SETTINGS, db, increment_revision=False
+            )
             
             # Store files pushed from device (if provided)
             if request.files:
@@ -1449,7 +1500,9 @@ async def device_heartbeat(
             if "capture_settings" not in existing_hardware_info:
                 existing_hardware_info["capture_settings"] = existing_capture_settings
             else:
-                existing_hardware_info["capture_settings"] = _normalize_capture_settings(existing_hardware_info.get("capture_settings"))
+                existing_hardware_info["capture_settings"] = _reconcile_capture_settings(
+                    existing_capture_settings, existing_hardware_info.get("capture_settings") or {}
+                )
 
             update_data["hardware_info"] = json.dumps(existing_hardware_info)
         
