@@ -241,7 +241,8 @@ async def upload_file_simple(
         content_type = request.content_type or mimetypes.guess_type(request.filename)[0] or "application/octet-stream"
         
         # Check for existing file with same name from same device (optional deduplication)
-        if request.device_id:
+        timeline_only = isinstance(request.metadata, dict) and request.metadata.get("timeline_only") is True
+        if request.device_id and not timeline_only:
             existing_file = db.query(File).filter(
                 File.userId == current_user.userId,
                 File.filename.like(f"file_{request.device_id}_%_{request.filename}")

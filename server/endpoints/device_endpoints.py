@@ -538,6 +538,7 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
                 'labels': [str(item).strip() for item in labels if str(item).strip()],
                 'label': label or (str(labels[0]) if labels else None),
                 'occupancy': field('occupancy') if isinstance(field('occupancy'), dict) else None,
+                'progress': field('progress') if isinstance(field('progress'), dict) else None,
             }
             
             # Handle timelapse folders
@@ -1631,6 +1632,7 @@ async def get_device_files(
                     'label': metadata.get('label'),
                     'labels': metadata.get('labels') or [],
                     'occupancy': metadata.get('occupancy'),
+                    'progress': metadata.get('progress'),
                 })
             file_list.append(item)
         

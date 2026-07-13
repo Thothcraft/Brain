@@ -32,6 +32,7 @@ class DeviceFileInfo(BaseModel):
     label: Optional[str] = None
     labels: Optional[List[str]] = None
     occupancy: Optional[Dict[str, Any]] = None
+    progress: Optional[Dict[str, Any]] = None
 
 class DeviceHeartbeatRequest(BaseModel):
     device_id: str
