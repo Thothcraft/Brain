@@ -299,6 +299,12 @@ class CaptureSettings(BaseModel):
     radar_detection_threshold_db: float = 8.0
     occupancy_threshold_percent: float = 50.0
     auto_occupancy_label_enabled: bool = True
+    chunk_seconds: float = 10.0
+    system_mode: str = "balanced"
+    occupancy_vote_chunks: int = 1
+    prediction_label_style: str = "occupancy"
+    people_count_label_enabled: bool = False
+    sleep_study_enabled: bool = False
     revision: int = 0
     updated_at: Optional[str] = None
 
