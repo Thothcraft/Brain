@@ -18,12 +18,6 @@ from server.db import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-PLAN_PRICES = {
-    "free": 0,
-    "researcher": 2900,       # $29/mo in cents
-    "organization": 9900,     # $99/mo in cents
-}
-
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
@@ -50,7 +44,7 @@ def _user_dict(u: User) -> Dict[str, Any]:
 
 class UpdateUserRequest(BaseModel):
     role: Optional[int] = None       # 0=user, 1=admin, 2=organization
-    plan: Optional[str] = None       # free | researcher | organization
+    plan: Optional[str] = None       # free | home | pro | research
     org_name: Optional[str] = None
     stripe_customer_id: Optional[str] = None
     stripe_subscription_id: Optional[str] = None
@@ -86,7 +80,7 @@ async def admin_stats(
     ).scalar() or 0
 
     plan_counts = {}
-    for plan in ("free", "researcher", "organization"):
+    for plan in ("free", "home", "pro", "research"):
         cnt = db.query(func.count(User.userId)).filter(User.plan == plan).scalar() or 0
         plan_counts[plan] = cnt
 
@@ -195,7 +189,7 @@ async def update_user(
             raise HTTPException(status_code=400, detail="role must be 0, 1, or 2")
         u.role = data.role
     if data.plan is not None:
-        if data.plan not in ("free", "researcher", "organization"):
+        if data.plan not in ("free", "home", "pro", "research"):
             raise HTTPException(status_code=400, detail="Invalid plan")
         u.plan = data.plan
     if data.org_name is not None:

@@ -1284,6 +1284,8 @@ async def delete_all_devices(
 @router.delete("/{device_id}", response_model=StandardResponse)
 async def delete_device(
     device_id: str,
+    mode: str = "detach",
+    confirmation: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -1297,75 +1299,37 @@ async def delete_device(
     Returns:
         StandardResponse: Deletion confirmation
     """
+    mode = str(mode or "detach").lower()
+    if mode not in {"detach", "erase"}:
+        raise HTTPException(status_code=422, detail="Deletion mode must be detach or erase")
+    device = db.query(Device).filter(
+        Device.device_uuid == device_id, Device.userId == current_user.userId
+    ).first()
+    # Both operations are deliberately idempotent.
+    if not device:
+        return {"success": True, "message": "Device is already detached"}
+    if mode == "erase" and confirmation != f"ERASE {device.device_name}":
+        raise HTTPException(status_code=422, detail=f"Type ERASE {device.device_name} to permanently erase this device")
     try:
-        log_request_start("DELETE", f"/device/{device_id}", current_user.userId)
-        
-        # Find the device
-        device = db.query(Device).filter(
-            Device.device_uuid == device_id,
-            Device.userId == current_user.userId
-        ).first()
-        
-        if not device:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Device not found or access denied"
-            )
-        
-        try:
-            # First, try to delete the device directly
-            db.delete(device)
-            db.commit()
-            
-            log_response(200, {"success": True, "message": "Device deleted"}, f"/device/{device_id}")
-            return {
-                "success": True,
-                "message": "Device deleted successfully"
-            }
-            
-        except Exception as e:
-            db.rollback()
-            log_error(f"Error during device deletion: {str(e)}")
-            
-            # If there's a foreign key constraint error, try to delete related records first
-            if "foreign key constraint" in str(e).lower() or "violates foreign key" in str(e).lower():
-                try:
-                    # Use raw SQL to delete related records
-                    db.execute("""
-                        DELETE FROM device_activity 
-                        WHERE device_id = :device_id
-                    """, {"device_id": device.device_id})
-                    
-                    # Now try to delete the device again
-                    db.delete(device)
-                    db.commit()
-                    
-                    log_response(200, {"success": True, "message": "Device deleted with cleanup"}, f"/device/{device_id}")
-                    return {
-                        "success": True,
-                        "message": "Device and related data deleted successfully"
-                    }
-                    
-                except Exception as cleanup_error:
-                    db.rollback()
-                    log_error(f"Error during device deletion cleanup: {str(cleanup_error)}")
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Failed to clean up device data: {str(cleanup_error)}"
-                    )
-            
-            # If it's a different error, re-raise it
-            raise
-        
-    except HTTPException:
-        raise
-    except Exception as e:
+        records = db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId).all()
+        cloud_file_ids = [record.cloud_file_id for record in records if record.cloud_file_id]
+        db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId).delete(synchronize_session=False)
+        from server.db import FileDeviceUpdate
+        db.query(FileDeviceUpdate).filter(FileDeviceUpdate.deviceId == device.deviceId).delete(synchronize_session=False)
+        db.query(DeviceDeployment).filter(DeviceDeployment.device_uuid == device_id).delete(synchronize_session=False)
+        if mode == "erase" and cloud_file_ids:
+            db.query(File).filter(File.fileId.in_(cloud_file_ids), File.userId == current_user.userId).delete(synchronize_session=False)
+        db.delete(device)
+        db.commit()
+        return {
+            "success": True,
+            "message": "Device and cloud captures permanently erased" if mode == "erase" else "Device detached; uploaded cloud files retained",
+            "data": {"mode": mode, "device_id": device_id},
+        }
+    except Exception as exc:
         db.rollback()
-        log_error(f"Error deleting device: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete device: {str(e)}"
-        )
+        logger.exception("Device %s %s failed", device_id, mode)
+        raise HTTPException(status_code=500, detail=f"Device deletion failed: {exc}")
 
 
 @router.post("/{device_uuid}/sync-files", response_model=StandardResponse)
@@ -1673,8 +1637,16 @@ async def update_device_capture_settings(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
 
+    current = _capture_settings_for_device(device)
+    if "revision" in payload:
+        try:
+            expected_revision = int(payload["revision"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Settings revision must be an integer")
+        if expected_revision != int(current.get("revision") or 0):
+            raise HTTPException(status_code=409, detail="Settings changed on another client; refresh and try again")
+
     if "yellow_threshold_percent" in payload or "green_threshold_percent" in payload:
-        current = _capture_settings_for_device(device)
         try:
             yellow = float(payload.get("yellow_threshold_percent", current["yellow_threshold_percent"]))
             green = float(payload.get("green_threshold_percent", current["green_threshold_percent"]))

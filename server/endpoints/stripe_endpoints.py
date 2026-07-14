@@ -64,6 +64,12 @@ async def stripe_webhook(request: Request):
         await handle_subscription_deleted(event.data.object)
     elif event.type == "invoice.payment_succeeded":
         await handle_payment_succeeded(event.data.object)
+    elif event.type == "invoice.payment_failed":
+        await handle_payment_failed(event.data.object)
+    elif event.type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
+        await handle_hardware_checkout(event.data.object)
+    elif event.type in {"charge.refunded", "refund.created"}:
+        await handle_refund(event.data.object)
     else:
         logger.info(f"Unhandled event type: {event.type}")
 
@@ -189,6 +195,67 @@ async def handle_payment_succeeded(invoice):
         db.close()
 
 
+async def handle_payment_failed(invoice):
+    """Revoke paid entitlements when Stripe reports an unpaid subscription invoice."""
+    db = next(get_db())
+    try:
+        user = db.query(User).filter(User.stripe_customer_id == invoice.customer).first()
+        if user:
+            user.plan = "free"
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Unable to process failed invoice %s", getattr(invoice, "id", None))
+        raise
+    finally:
+        db.close()
+
+
+async def handle_hardware_checkout(session):
+    """Idempotently record paid hardware Checkout for admin fulfillment."""
+    metadata = getattr(session, "metadata", None) or {}
+    if metadata.get("kind") != "hardware" or getattr(session, "payment_status", None) != "paid":
+        return
+    db = next(get_db())
+    try:
+        payment_intent = getattr(session, "payment_intent", None)
+        if payment_intent and db.query(Payment).filter(Payment.stripe_payment_intent == payment_intent).first():
+            return
+        user_id = int(metadata.get("user_id"))
+        db.add(Payment(
+            user_id=user_id, stripe_payment_intent=payment_intent,
+            stripe_invoice_id=getattr(session, "id", None),
+            amount=int(getattr(session, "amount_total", 0) or 0),
+            currency=str(getattr(session, "currency", "usd") or "usd"),
+            plan="hardware", status="succeeded",
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Unable to record hardware Checkout %s", getattr(session, "id", None))
+        raise
+    finally:
+        db.close()
+
+
+async def handle_refund(refund_or_charge):
+    """Mark the matching payment refunded; repeated events are idempotent."""
+    db = next(get_db())
+    try:
+        payment_intent = getattr(refund_or_charge, "payment_intent", None)
+        if payment_intent:
+            payment = db.query(Payment).filter(Payment.stripe_payment_intent == payment_intent).first()
+            if payment:
+                payment.status = "refunded"
+                db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Unable to process refund")
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/create-checkout-session")
 async def create_checkout_session(
     plan: str,
@@ -228,6 +295,7 @@ async def create_checkout_session(
             mode="subscription",
             allow_promotion_codes=True,
             automatic_tax={"enabled": True},
+            customer_update={"address": "auto"},
             success_url=os.getenv("STRIPE_SUCCESS_URL", "http://localhost:3000/settings?success=true"),
             cancel_url=os.getenv("STRIPE_CANCEL_URL", "http://localhost:3000/settings?cancel=true"),
             metadata={"plan": plan, "user_id": current_user.userId}
@@ -260,6 +328,7 @@ async def create_hardware_checkout_session(
         "line_items": [{"price": price_id, "quantity": 1}],
         "mode": "payment", "allow_promotion_codes": True,
         "automatic_tax": {"enabled": True},
+        "customer_update": {"address": "auto", "shipping": "auto"},
         "shipping_address_collection": {"allowed_countries": countries},
         "success_url": os.getenv("STRIPE_SUCCESS_URL", "http://localhost:3000/checkout/success"),
         "cancel_url": os.getenv("STRIPE_CANCEL_URL", "http://localhost:3000/checkout/cancel"),
