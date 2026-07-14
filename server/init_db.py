@@ -102,6 +102,28 @@ def ensure_approved_column():
     return True
 
 
+def ensure_product_core_schema():
+    """Apply small, idempotent schema improvements required by the product UI."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                ALTER TABLE user_account
+                    ADD COLUMN IF NOT EXISTS email VARCHAR(320),
+                    ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS supabase_auth_user_id VARCHAR(36)
+            """))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_account_email ON user_account (lower(email)) WHERE email IS NOT NULL"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_account_supabase_auth ON user_account (supabase_auth_user_id) WHERE supabase_auth_user_id IS NOT NULL"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_invoice ON payment (stripe_invoice_id) WHERE stripe_invoice_id IS NOT NULL"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_user_activity ON device (user_id, approved, last_seen DESC)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_file_visible_minutes ON device_file (device_id, modified_at DESC) WHERE on_device = TRUE"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_file_cloud_history ON device_file (user_id, modified_at DESC) WHERE on_cloud = TRUE"))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring product core schema: {e}")
+        return False
+
+
 def ensure_device_deployment_table():
     """Ensure the device_deployment table exists for pull-based model delivery."""
     try:
@@ -157,6 +179,7 @@ def initialize_database():
     
     try:
         results = {
+            "product_core": ensure_product_core_schema(),
             "trained_model": ensure_trained_model_table(),
             "device.approved": ensure_approved_column(),
             "device_deployment": ensure_device_deployment_table(),

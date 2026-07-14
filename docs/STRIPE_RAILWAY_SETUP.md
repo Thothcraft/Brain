@@ -1,5 +1,15 @@
 # Stripe + Railway setup for Thoth
 
+## Short version: do these steps now
+
+1. In Stripe Workbench, open webhook `we_1TtDcrROEVpJQ0fpam7PeQls` and copy its **test signing secret**.
+2. In Railway → Brain → Variables, add `STRIPE_WEBHOOK_SECRET` with that value and confirm the price variables in the block below are present.
+3. Add `SUPABASE_EMAIL_REDIRECT_URL=https://portal-three-rho.vercel.app/auth?verified=1`, then redeploy Brain.
+4. In Supabase → Authentication → URL Configuration, set the Site URL to `https://portal-three-rho.vercel.app` and add `https://portal-three-rho.vercel.app/auth**` as an allowed redirect. Under Email provider, keep **Confirm email** enabled.
+5. Test one registration, one $5 Home subscription, one plan change from Portal Settings, and one $500 hardware checkout in test mode. If all five work, repeat the same objects and variables in Stripe live mode.
+
+That is the complete owner action list. The sections below are reference material and troubleshooting.
+
 This guide connects the Brain backend on Railway to Stripe Checkout, Stripe Tax, promotion codes, shipping, subscriptions, and the Customer Portal. Complete everything in Stripe **test mode first**. Prices and discounts live in Stripe; this repository stores only their IDs.
 
 ## Current setup status (2026-07-14)
@@ -137,6 +147,10 @@ Open Brain → Variables and add:
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 SECRET_KEY=<long-random-application-secret>
 NEXTAUTH_URL=https://portal-three-rho.vercel.app
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=<Supabase publishable/anon key>
+SUPABASE_SERVICE_KEY=<Supabase service-role key; Railway secret only>
+SUPABASE_EMAIL_REDIRECT_URL=https://portal-three-rho.vercel.app/auth?verified=1
 
 STRIPE_PUBLISHABLE_KEY=pk_test_...
 STRIPE_SECRET_KEY=<new test restricted-or-secret key stored only in Railway>

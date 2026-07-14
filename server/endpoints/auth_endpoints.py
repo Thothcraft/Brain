@@ -1,9 +1,11 @@
 """Authentication endpoints for user login, registration, and token management."""
 
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 import os
+import requests
+import asyncio
 from fastapi import Request
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -35,8 +37,9 @@ class LoginRequest(BaseModel):
 
 class RegisterRequest(BaseModel):
     username: str
+    email: str
     password: str
-    phone_number: int = None
+    phone_number: Optional[int] = None
     
     @validator('username')
     def validate_username(cls, v):
@@ -50,18 +53,28 @@ class RegisterRequest(BaseModel):
             raise ValueError('Password must be at least 6 characters')
         return v
 
+    @validator('email')
+    def validate_email(cls, v):
+        value = str(v or '').strip().lower()
+        if '@' not in value or value.startswith('@') or value.endswith('@') or len(value) > 320:
+            raise ValueError('Enter a valid email address')
+        return value
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int
     user_id: int
     username: str
+    role: int = 0
+    plan: str = "free"
 
 class RegisterResponse(BaseModel):
     success: bool
     user_id: int
     username: str
     message: str
+    verification_required: bool = True
 
 class UserResponse(BaseModel):
     userId: int
@@ -118,7 +131,6 @@ async def login_for_access_token(
                 logging.warning(f"User not found: {login_data.username}")
             else:
                 logging.warning(f"User found but password verification failed for: {login_data.username}")
-                logging.debug(f"Stored hash: {db_user.hashed_password}")
             
             log_error("Authentication failed for user", None, {"username": login_data.username}, "/token")
             raise HTTPException(
@@ -126,6 +138,24 @@ async def login_for_access_token(
                 detail="Incorrect username or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+        if user.supabase_auth_user_id and not user.email_verified:
+            service_key = os.getenv("SUPABASE_SERVICE_KEY", "")
+            supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+            if not service_key or not supabase_url:
+                raise HTTPException(status_code=503, detail="Email verification service is unavailable")
+            verification = await asyncio.to_thread(
+                requests.get,
+                f"{supabase_url}/auth/v1/admin/users/{user.supabase_auth_user_id}",
+                headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+                timeout=8,
+            )
+            if verification.status_code != 200:
+                raise HTTPException(status_code=503, detail="Unable to verify email status")
+            if not verification.json().get("email_confirmed_at"):
+                raise HTTPException(status_code=403, detail="Confirm your email before signing in")
+            user.email_verified = True
+            db.commit()
             
         logging.info(f"Successfully authenticated user: {user.username} (ID: {user.userId})")
         
@@ -143,9 +173,10 @@ async def login_for_access_token(
             "user_id": user.userId,
             "username": user.username,
             "role": user.role,
+            "plan": user.plan or "free",
         }
         
-        log_response(200, response_data, "/token")
+        log_response(200, {"user_id": user.userId, "username": user.username}, "/token")
         return response_data
         
     except HTTPException:
@@ -196,14 +227,39 @@ async def register_user(
         
         # Check if user already exists
         existing_user = db.query(User).filter(
-            User.username == register_data.username
+            (User.username == register_data.username) | (User.email == register_data.email)
         ).first()
         
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username already registered"
+                detail="Username or email already registered"
             )
+
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        anon_key = os.getenv("SUPABASE_ANON_KEY", "")
+        if not supabase_url or not anon_key:
+            raise HTTPException(status_code=503, detail="Email registration is not configured")
+        redirect_url = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1")
+        signup = await asyncio.to_thread(
+            requests.post,
+            f"{supabase_url}/auth/v1/signup",
+            params={"redirect_to": redirect_url},
+            headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}", "Content-Type": "application/json"},
+            json={
+                "email": register_data.email,
+                "password": register_data.password,
+                "data": {"username": register_data.username},
+            },
+            timeout=10,
+        )
+        if signup.status_code not in (200, 201):
+            logging.warning("Supabase signup failed with status %s", signup.status_code)
+            raise HTTPException(status_code=400, detail="Unable to register that email address")
+        auth_user = (signup.json() or {}).get("user") or signup.json()
+        auth_user_id = auth_user.get("id") if isinstance(auth_user, dict) else None
+        if not auth_user_id:
+            raise HTTPException(status_code=502, detail="Verification provider returned an invalid response")
         
         # Import password hashing function
         from server.auth import get_password_hash
@@ -211,6 +267,9 @@ async def register_user(
         # Create new user
         new_user = User(
             username=register_data.username,
+            email=register_data.email,
+            email_verified=bool(auth_user.get("email_confirmed_at")),
+            supabase_auth_user_id=str(auth_user_id),
             hashed_password=get_password_hash(register_data.password),
             phone_number=register_data.phone_number
         )
@@ -223,7 +282,8 @@ async def register_user(
             "success": True,
             "user_id": new_user.userId,
             "username": new_user.username,
-            "message": "User registered successfully"
+            "message": "Check your email to verify your account, then sign in.",
+            "verification_required": not new_user.email_verified,
         }
         
         log_response(201, "User registered successfully", "/register")

@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import asyncio
+import time
 from fastapi import APIRouter, Request, HTTPException, status, Depends
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -31,6 +33,38 @@ PRICE_IDS = {
     for plan in ("home", "pro", "research")
     for period in ("monthly", "annual")
 }
+_CATALOG_CACHE = {"expires": 0.0, "payload": None}
+
+
+@router.get("/catalog")
+async def get_catalog():
+    """Return configured Stripe prices without exposing secret keys."""
+    if not STRIPE_AVAILABLE or not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(status_code=503, detail="Payment catalogue is unavailable")
+    if _CATALOG_CACHE["payload"] and time.monotonic() < _CATALOG_CACHE["expires"]:
+        return _CATALOG_CACHE["payload"]
+    configured = {**PRICE_IDS, "hardware": os.getenv("STRIPE_HARDWARE_PRICE_ID")}
+
+    def retrieve():
+        prices = {}
+        for name, price_id in configured.items():
+            if not price_id:
+                continue
+            price = stripe.Price.retrieve(price_id)
+            prices[name] = {
+                "unit_amount": price.unit_amount,
+                "currency": price.currency,
+                "interval": getattr(getattr(price, "recurring", None), "interval", None),
+            }
+        return {"prices": prices}
+
+    try:
+        payload = await asyncio.to_thread(retrieve)
+    except Exception:
+        logger.exception("Unable to load Stripe catalogue")
+        raise HTTPException(status_code=503, detail="Payment catalogue is temporarily unavailable")
+    _CATALOG_CACHE.update({"expires": time.monotonic() + 300, "payload": payload})
+    return payload
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -289,10 +323,10 @@ async def create_checkout_session(
     try:
         # Get or create Stripe customer
         if not current_user.stripe_customer_id:
-            customer = stripe.Customer.create(
-                email=current_user.email,
-                metadata={"user_id": current_user.userId}
-            )
+            customer_params = {"metadata": {"user_id": current_user.userId}}
+            if current_user.email:
+                customer_params["email"] = current_user.email
+            customer = stripe.Customer.create(**customer_params)
             current_user.stripe_customer_id = customer.id
             db.commit()
         
@@ -329,7 +363,10 @@ async def create_hardware_checkout_session(
     if not STRIPE_AVAILABLE or not price_id:
         raise HTTPException(status_code=503, detail="Hardware checkout is not configured")
     if not current_user.stripe_customer_id:
-        customer = stripe.Customer.create(email=current_user.email, metadata={"user_id": current_user.userId})
+        customer_params = {"metadata": {"user_id": current_user.userId}}
+        if current_user.email:
+            customer_params["email"] = current_user.email
+        customer = stripe.Customer.create(**customer_params)
         current_user.stripe_customer_id = customer.id
         db.commit()
     countries = [value.strip().upper() for value in os.getenv("STRIPE_ALLOWED_SHIPPING_COUNTRIES", "CA,US").split(",") if value.strip()]

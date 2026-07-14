@@ -38,7 +38,7 @@ try:
 except (ImportError, ValueError) as e:
     print(f"[DB] Pro Plan config not available, using standard configuration: {e}")
 
-print(f"[DB] Using DATABASE_URL: {DATABASE_URL}")
+print("[DB] Database URL configured")
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -243,6 +243,10 @@ class User(Base):
     """When the current plan expires"""
     org_name = Column("org_name", String(255), nullable=True)
     """Organization display name (for role=2 accounts)"""
+    email = Column("email", String(320), nullable=True, unique=True, index=True)
+    """Verified contact email used for Supabase Auth and Stripe."""
+    email_verified = Column("email_verified", Boolean, nullable=False, default=False)
+    supabase_auth_user_id = Column("supabase_auth_user_id", String(36), nullable=True, unique=True, index=True)
     
     # Relationships
     files = relationship("File", back_populates="user")
