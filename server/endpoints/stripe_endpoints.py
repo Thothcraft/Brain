@@ -27,15 +27,10 @@ WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 # Price IDs (update these after running setup_stripe.py)
 PRICE_IDS = {
-    "researcher": os.getenv("STRIPE_PRICE_ID_RESEARCHER"),
-    "organization": os.getenv("STRIPE_PRICE_ID_ORGANIZATION"),
+    f"{plan}_{period}": os.getenv(f"STRIPE_PRICE_ID_{plan.upper()}_{period.upper()}")
+    for plan in ("home", "pro", "research")
+    for period in ("monthly", "annual")
 }
-
-PLAN_PRICES = {
-    "researcher": 2900,  # $29.00 in cents
-    "organization": 9900,  # $99.00 in cents
-}
-
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -86,7 +81,7 @@ async def handle_subscription_created(subscription):
         plan = None
         for plan_name, pid in PRICE_IDS.items():
             if pid == price_id:
-                plan = plan_name
+                plan = plan_name.rsplit("_", 1)[0]
                 break
         
         if not plan:
@@ -122,6 +117,11 @@ async def handle_subscription_updated(subscription):
         user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
         
         if user:
+            price_id = subscription.items.data[0].price.id
+            matched = next((name.rsplit("_", 1)[0] for name, value in PRICE_IDS.items() if value == price_id), None)
+            active = str(subscription.status) in {"active", "trialing"}
+            user.plan = matched if active and matched else "free"
+            user.stripe_subscription_id = subscription.id if active else None
             user.plan_expires_at = subscription.current_period_end
             db.commit()
             logger.info(f"Updated subscription for user {user.username}")
@@ -164,6 +164,9 @@ async def handle_payment_succeeded(invoice):
         user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
         if not user:
             return
+        if invoice.id and db.query(Payment).filter(Payment.stripe_invoice_id == invoice.id).first():
+            logger.info("Ignoring duplicate invoice event %s", invoice.id)
+            return
         
         # Create payment record
         payment = Payment(
@@ -189,6 +192,7 @@ async def handle_payment_succeeded(invoice):
 @router.post("/create-checkout-session")
 async def create_checkout_session(
     plan: str,
+    billing_period: str = "monthly",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -197,14 +201,17 @@ async def create_checkout_session(
         logger.error("Stripe package not installed")
         raise HTTPException(status_code=503, detail="Payment service not available")
     
-    if plan not in PRICE_IDS or not PRICE_IDS[plan]:
+    aliases = {"researcher": "research", "organization": "pro"}
+    plan = aliases.get(plan, plan)
+    price_id = PRICE_IDS.get(f"{plan}_{billing_period}")
+    if plan not in {"home", "pro", "research"} or billing_period not in {"monthly", "annual"} or not price_id:
         raise HTTPException(status_code=400, detail="Invalid plan")
     
     try:
         # Get or create Stripe customer
         if not current_user.stripe_customer_id:
             customer = stripe.Customer.create(
-                email=f"{current_user.username}@example.com",
+                email=current_user.email,
                 metadata={"user_id": current_user.userId}
             )
             current_user.stripe_customer_id = customer.id
@@ -215,10 +222,12 @@ async def create_checkout_session(
             customer=current_user.stripe_customer_id,
             payment_method_types=["card"],
             line_items=[{
-                "price": PRICE_IDS[plan],
+                "price": price_id,
                 "quantity": 1,
             }],
             mode="subscription",
+            allow_promotion_codes=True,
+            automatic_tax={"enabled": True},
             success_url=os.getenv("STRIPE_SUCCESS_URL", "http://localhost:3000/settings?success=true"),
             cancel_url=os.getenv("STRIPE_CANCEL_URL", "http://localhost:3000/settings?cancel=true"),
             metadata={"plan": plan, "user_id": current_user.userId}
@@ -229,3 +238,45 @@ async def create_checkout_session(
     except Exception as e:
         logger.error(f"Error creating checkout session: {e}")
         raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+
+@router.post("/create-hardware-checkout-session")
+async def create_hardware_checkout_session(
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Create Stripe-hosted payment checkout for the separately sold Thoth SKU."""
+    price_id = os.getenv("STRIPE_HARDWARE_PRICE_ID")
+    if not STRIPE_AVAILABLE or not price_id:
+        raise HTTPException(status_code=503, detail="Hardware checkout is not configured")
+    if not current_user.stripe_customer_id:
+        customer = stripe.Customer.create(email=current_user.email, metadata={"user_id": current_user.userId})
+        current_user.stripe_customer_id = customer.id
+        db.commit()
+    countries = [value.strip().upper() for value in os.getenv("STRIPE_ALLOWED_SHIPPING_COUNTRIES", "CA,US").split(",") if value.strip()]
+    shipping_rates = [value.strip() for value in os.getenv("STRIPE_SHIPPING_RATE_IDS", "").split(",") if value.strip()]
+    options = [{"shipping_rate": rate} for rate in shipping_rates]
+    params = {
+        "customer": current_user.stripe_customer_id,
+        "line_items": [{"price": price_id, "quantity": 1}],
+        "mode": "payment", "allow_promotion_codes": True,
+        "automatic_tax": {"enabled": True},
+        "shipping_address_collection": {"allowed_countries": countries},
+        "success_url": os.getenv("STRIPE_SUCCESS_URL", "http://localhost:3000/checkout/success"),
+        "cancel_url": os.getenv("STRIPE_CANCEL_URL", "http://localhost:3000/checkout/cancel"),
+        "metadata": {"kind": "hardware", "user_id": current_user.userId},
+    }
+    if options:
+        params["shipping_options"] = options
+    session = stripe.checkout.Session.create(**params)
+    return {"url": session.url}
+
+
+@router.post("/billing-portal")
+async def create_billing_portal(current_user: User = Depends(get_current_user)):
+    if not STRIPE_AVAILABLE or not current_user.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="No Stripe customer is associated with this account")
+    session = stripe.billing_portal.Session.create(
+        customer=current_user.stripe_customer_id,
+        return_url=os.getenv("STRIPE_PORTAL_RETURN_URL", os.getenv("NEXTAUTH_URL", "http://localhost:3000") + "/settings"),
+    )
+    return {"url": session.url}

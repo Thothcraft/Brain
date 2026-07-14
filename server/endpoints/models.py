@@ -40,6 +40,9 @@ class DeviceHeartbeatRequest(BaseModel):
     device_type: Optional[str] = None
     hardware_info: Optional[Dict[str, Any]] = None
     files: Optional[List[DeviceFileInfo]] = None
+    inventory_revision: Optional[int] = Field(default=None, ge=0)
+    inventory_timestamp: Optional[str] = None
+    inventory_complete: bool = False
     battery_level: Optional[int] = None
     wifi_connected: Optional[bool] = None
     collection_active: Optional[bool] = None

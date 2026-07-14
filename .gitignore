@@ -1,5 +1,9 @@
 # ignore venv
 venv/
+.venv/
+.env
+.env.*
+!.env.example
 
 # ignore logs
 logs/

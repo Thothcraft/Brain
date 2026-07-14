@@ -24,6 +24,8 @@ from sqlalchemy import or_
 from server.db import get_db, Device, User, File, DeviceFile, DeviceDeployment
 from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
+from server.calibration import REGIONS as CALIBRATION_REGIONS, derive_thresholds
+from server.inventory import is_newer_snapshot
 from .models import (
     DeviceRegisterRequest, 
     DeviceStatusRequest, 
@@ -39,7 +41,6 @@ router = APIRouter(prefix="/device", tags=["devices"])
 
 # Cache for device authentication tokens
 device_auth_cache = {}
-FREE_PLAN_MAX_ONLINE_DEVICES = 1
 DEVICE_ONLINE_TIMEOUT_SECONDS = max(30, int(os.getenv("DEVICE_ONLINE_TIMEOUT_SECONDS", "90")))
 
 
@@ -69,6 +70,8 @@ DEFAULT_CAPTURE_SETTINGS = {
     },
     "radar_detection_threshold_db": 8.0,
     "occupancy_threshold_percent": 50.0,
+    "yellow_threshold_percent": 20.0,
+    "green_threshold_percent": 60.0,
     "auto_occupancy_label_enabled": True,
     "chunk_seconds": 10.0,
     "system_mode": "balanced",
@@ -76,6 +79,7 @@ DEFAULT_CAPTURE_SETTINGS = {
     "prediction_label_style": "occupancy",
     "people_count_label_enabled": False,
     "sleep_study_enabled": False,
+    "calibrations": {},
     "revision": 0,
     "updated_at": None,
 }
@@ -92,15 +96,25 @@ class DeviceRegistrationError(Exception):
     pass
 
 
-def _is_free_plan_user(user: Union[User, Any]) -> bool:
-    """
-    Treat role=0 as Free plan.
-    Paid/organization users can use role values above 0.
-    """
-    try:
-        return int(getattr(user, "role", 0) or 0) == 0
-    except (TypeError, ValueError):
-        return True
+PLAN_DEVICE_LIMITS = {"free": 1, "home": 1, "pro": 10, "research": 10}
+PLAN_FEATURES = {
+    "free": {"basic_occupancy"},
+    "home": {"basic_occupancy", "presence", "maps", "har", "people_count", "zones", "labels", "calibration", "predictions"},
+    "pro": {"basic_occupancy", "presence", "maps", "har", "people_count", "zones", "labels", "calibration", "predictions", "spaces", "multi_device"},
+    "research": {"basic_occupancy", "presence", "maps", "har", "people_count", "zones", "labels", "calibration", "predictions", "spaces", "multi_device", "detailed_labels", "data_export", "academy", "assistant"},
+}
+
+
+def _product_plan(user: Union[User, Any]) -> str:
+    """Resolve product access from verified billing state, never admin role."""
+    aliases = {"researcher": "research", "organization": "pro"}
+    plan = aliases.get(str(getattr(user, "plan", "free") or "free").lower(), str(getattr(user, "plan", "free") or "free").lower())
+    return plan if plan in PLAN_DEVICE_LIMITS else "free"
+
+
+def _require_feature(user: Union[User, Any], feature: str) -> None:
+    if feature not in PLAN_FEATURES[_product_plan(user)]:
+        raise HTTPException(status_code=403, detail=f"{feature.replace('_', ' ').title()} requires a paid plan")
 
 
 def _portal_upload_allowed_for_device(device: Device) -> bool:
@@ -161,6 +175,13 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
         occupancy_threshold = min(100.0, max(0.0, float(source.get("occupancy_threshold_percent", 50.0))))
     except (TypeError, ValueError):
         occupancy_threshold = 50.0
+    try:
+        yellow_threshold = min(100.0, max(0.0, float(source.get("yellow_threshold_percent", 20.0))))
+        green_threshold = min(100.0, max(0.0, float(source.get("green_threshold_percent", 60.0))))
+        if yellow_threshold >= green_threshold:
+            raise ValueError("yellow threshold must be below green threshold")
+    except (TypeError, ValueError):
+        yellow_threshold, green_threshold = 20.0, 60.0
     auto_label = source.get("auto_occupancy_label_enabled", True)
     if isinstance(auto_label, str):
         auto_label = auto_label.strip().lower() in {"1", "true", "yes", "on"}
@@ -194,6 +215,8 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
         "sensors": sensors,
         "radar_detection_threshold_db": radar_threshold,
         "occupancy_threshold_percent": occupancy_threshold,
+        "yellow_threshold_percent": yellow_threshold,
+        "green_threshold_percent": green_threshold,
         "auto_occupancy_label_enabled": bool(auto_label),
         "chunk_seconds": chunk_seconds,
         "system_mode": system_mode,
@@ -201,6 +224,7 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
         "prediction_label_style": prediction_label_style,
         "people_count_label_enabled": bool(people_count_label),
         "sleep_study_enabled": bool(sleep_study),
+        "calibrations": source.get("calibrations") if isinstance(source.get("calibrations"), dict) else {},
         "revision": revision,
         "updated_at": str(source.get("updated_at")) if source.get("updated_at") else None,
     }
@@ -244,18 +268,18 @@ def _set_capture_settings_for_device(
 
 def _can_mark_device_online(
     db: Session,
-    user_id: int,
+    user: Union[User, Any],
     current_device_id: Optional[int] = None
 ) -> bool:
     """Return True when user can bring another device online."""
     online_count_query = db.query(Device).filter(
-        Device.userId == user_id,
+        Device.userId == user.userId,
         Device.online == True
     )
     if current_device_id is not None:
         online_count_query = online_count_query.filter(Device.deviceId != current_device_id)
     online_count = online_count_query.count()
-    return online_count < FREE_PLAN_MAX_ONLINE_DEVICES
+    return online_count < PLAN_DEVICE_LIMITS[_product_plan(user)]
 
 def validate_ip_address(ip_str: str) -> bool:
     """Validate an IP address string."""
@@ -533,7 +557,7 @@ def _get_file_type_from_extension(filename: str) -> str:
         return 'other'
 
 
-def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: list, db: Session):
+def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: list, db: Session, *, commit: bool = True):
     """Store file list pushed from device into database.
     
     Args:
@@ -638,12 +662,47 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
         if device:
             hardware_info['capture_file_metadata'] = capture_metadata
             device.hardware_info = json.dumps(hardware_info)
-        db.commit()
+        if commit:
+            db.commit()
         logger.info(f"Stored {stored_count} files for device {device_uuid}")
         
     except Exception as e:
         db.rollback()
         logger.error(f"Error storing device files: {e}")
+        if not commit:
+            raise
+
+
+def _apply_inventory_snapshot(device: Device, user_id: int, request: DeviceHeartbeatRequest, db: Session) -> bool:
+    """Atomically reconcile a complete, monotonically revisioned device inventory."""
+    if not request.inventory_complete or request.files is None or request.inventory_revision is None:
+        return False
+    hardware_info = _device_hardware_info(device)
+    current = hardware_info.get("inventory_snapshot") if isinstance(hardware_info.get("inventory_snapshot"), dict) else {}
+    incoming_revision = int(request.inventory_revision)
+    incoming_timestamp = str(request.inventory_timestamp or "")
+    if not is_newer_snapshot(incoming_revision, incoming_timestamp, current):
+        logger.info("Ignored stale inventory snapshot for %s at revision %s", device.device_uuid, incoming_revision)
+        return False
+
+    _store_device_files(device.deviceId, user_id, str(device.device_uuid), request.files, db, commit=False)
+    present_names = {str(item.name) for item in request.files if item.name}
+    now = datetime.utcnow()
+    for record in db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId).all():
+        if record.filename not in present_names and record.on_device:
+            record.on_device = False
+            record.last_synced = now
+    device = db.query(Device).filter(Device.deviceId == device.deviceId).first()
+    hardware_info = _device_hardware_info(device)
+    metadata = hardware_info.get("capture_file_metadata") if isinstance(hardware_info.get("capture_file_metadata"), dict) else {}
+    hardware_info["capture_file_metadata"] = {name: value for name, value in metadata.items() if name in present_names}
+    hardware_info["inventory_snapshot"] = {
+        "revision": incoming_revision, "timestamp": incoming_timestamp,
+        "received_at": datetime.now(timezone.utc).isoformat(), "count": len(present_names),
+    }
+    device.hardware_info = json.dumps(hardware_info)
+    db.commit()
+    return True
 
 @router.post("/register", response_model=DeviceResponse)
 async def register_device(
@@ -754,14 +813,14 @@ async def register_device(
                         existing_capture_settings, hardware_info.get('capture_settings') or {}
                     )
 
-                if _is_free_plan_user(current_user) and not _can_mark_device_online(
+                if not _can_mark_device_online(
                     db,
-                    user_id,
+                    current_user,
                     current_device_id=existing_device.deviceId
                 ):
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+                        detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
                     )
 
                 # Portal/user renames are canonical. Routine device
@@ -812,10 +871,10 @@ async def register_device(
                     "data": {"capture_settings": capture_settings}
                 }
             
-            if _is_free_plan_user(current_user) and not _can_mark_device_online(db, user_id):
+            if not _can_mark_device_online(db, current_user):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+                    detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
                 )
             # Create new device record — not yet approved; user must confirm in portal
             new_device = Device(
@@ -1121,14 +1180,14 @@ async def update_device_status(
         # Update device status
         now = datetime.utcnow()
         requested_online = request.status.lower() == "online" if hasattr(request, 'status') else device.online
-        if requested_online and _is_free_plan_user(current_user) and not _can_mark_device_online(
+        if requested_online and not _can_mark_device_online(
             db,
-            current_user.userId,
+            current_user,
             current_device_id=device.deviceId
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+                detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
             )
 
         update_data = {
@@ -1494,14 +1553,14 @@ async def device_heartbeat(
         # Update device status
         now = datetime.utcnow()
         requested_online = request.online if hasattr(request, 'online') and request.online is not None else True
-        if requested_online and _is_free_plan_user(current_user) and not _can_mark_device_online(
+        if requested_online and not _can_mark_device_online(
             db,
-            current_user.userId,
+            current_user,
             current_device_id=device.deviceId
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
+                detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
             )
 
         update_data = {
@@ -1548,7 +1607,10 @@ async def device_heartbeat(
         # Apply updates
         db.query(Device).filter(Device.deviceId == device.deviceId).update(update_data)
         db.commit()
-        if request.files:
+        if request.inventory_complete:
+            _apply_inventory_snapshot(device, current_user.userId, request, db)
+        elif request.files:
+            # Backward-compatible partial metadata update from older Thoth builds.
             _store_device_files(device.deviceId, current_user.userId, str(request.device_id), request.files, db)
         
         logger.debug(f"Heartbeat received from device {request.device_id}")
@@ -1611,6 +1673,16 @@ async def update_device_capture_settings(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
 
+    if "yellow_threshold_percent" in payload or "green_threshold_percent" in payload:
+        current = _capture_settings_for_device(device)
+        try:
+            yellow = float(payload.get("yellow_threshold_percent", current["yellow_threshold_percent"]))
+            green = float(payload.get("green_threshold_percent", current["green_threshold_percent"]))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Detection thresholds must be numeric")
+        if not 0.0 <= yellow < green <= 100.0:
+            raise HTTPException(status_code=422, detail="Thresholds must satisfy 0 <= yellow < green <= 100")
+
     settings = _set_capture_settings_for_device(device, payload, db)
     return {
         "success": True,
@@ -1618,6 +1690,123 @@ async def update_device_capture_settings(
         "device_id": device_uuid,
         "capture_settings": settings,
     }
+
+
+def _owned_device(device_uuid: str, user: User, db: Session) -> Device:
+    device = db.query(Device).filter(Device.device_uuid == device_uuid, Device.userId == user.userId).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return device
+
+
+@router.post("/{device_uuid}/calibrations", response_model=Dict[str, Any])
+async def create_device_calibration(
+    device_uuid: str, payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    _require_feature(current_user, "calibration")
+    device = _owned_device(device_uuid, current_user, db)
+    mode = str(payload.get("processing_mode") or "balanced").lower()
+    if mode not in {"responsive", "balanced", "precision"}:
+        raise HTTPException(status_code=422, detail="Unknown processing mode")
+    hardware = _device_hardware_info(device)
+    runs = hardware.get("calibration_runs") if isinstance(hardware.get("calibration_runs"), dict) else {}
+    run_id = str(uuid_lib.uuid4())
+    runs[run_id] = {
+        "id": run_id, "processing_mode": mode, "status": "collecting",
+        "created_at": datetime.now(timezone.utc).isoformat(), "regions": {},
+        "base_settings_revision": int(_capture_settings_for_device(device).get("revision") or 0),
+    }
+    hardware["calibration_runs"] = runs
+    device.hardware_info = json.dumps(hardware)
+    db.commit()
+    return {"success": True, "calibration": runs[run_id]}
+
+
+@router.post("/{device_uuid}/calibrations/{run_id}/regions/{region}/start", response_model=Dict[str, Any])
+async def record_calibration_region(
+    device_uuid: str, run_id: str, region: str, payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    _require_feature(current_user, "calibration")
+    device = _owned_device(device_uuid, current_user, db)
+    if region not in CALIBRATION_REGIONS:
+        raise HTTPException(status_code=422, detail="Region must be red, yellow, or green")
+    hardware = _device_hardware_info(device)
+    runs = hardware.get("calibration_runs") if isinstance(hardware.get("calibration_runs"), dict) else {}
+    run = runs.get(run_id)
+    if not isinstance(run, dict) or run.get("status") != "collecting":
+        raise HTTPException(status_code=409, detail="Calibration run is unavailable")
+    values = payload.get("ratio_percent_samples")
+    if not isinstance(values, list) or not values:
+        raise HTTPException(status_code=422, detail="A completed minute of ratio samples is required")
+    try:
+        cleaned = [float(value) for value in values]
+        if any(value < 0.0 or value > 100.0 for value in cleaned):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Ratio samples must be between 0 and 100")
+    run.setdefault("regions", {})[region] = {
+        "ratio_percent_samples": cleaned, "completed_at": datetime.now(timezone.utc).isoformat(),
+        "calibration_only": True,
+    }
+    device.hardware_info = json.dumps(hardware)
+    db.commit()
+    return {"success": True, "calibration": run}
+
+
+@router.get("/{device_uuid}/calibrations/{run_id}", response_model=Dict[str, Any])
+async def get_device_calibration(
+    device_uuid: str, run_id: str, current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    _require_feature(current_user, "calibration")
+    device = _owned_device(device_uuid, current_user, db)
+    run = (_device_hardware_info(device).get("calibration_runs") or {}).get(run_id)
+    if not isinstance(run, dict):
+        raise HTTPException(status_code=404, detail="Calibration run not found")
+    return {"success": True, "calibration": run}
+
+
+@router.post("/{device_uuid}/calibrations/{run_id}/commit", response_model=Dict[str, Any])
+async def commit_device_calibration(
+    device_uuid: str, run_id: str, current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    _require_feature(current_user, "calibration")
+    device = _owned_device(device_uuid, current_user, db)
+    hardware = _device_hardware_info(device)
+    run = (hardware.get("calibration_runs") or {}).get(run_id)
+    if not isinstance(run, dict) or run.get("status") != "collecting":
+        raise HTTPException(status_code=409, detail="Calibration run is unavailable")
+    current = _capture_settings_for_device(device)
+    if int(current.get("revision") or 0) != int(run.get("base_settings_revision") or 0):
+        raise HTTPException(status_code=409, detail="Capture settings changed during calibration")
+    try:
+        derived = derive_thresholds({
+            region: ((run.get("regions") or {}).get(region) or {}).get("ratio_percent_samples")
+            for region in CALIBRATION_REGIONS
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    committed_at = datetime.now(timezone.utc).isoformat()
+    calibration = {
+        **derived, "run_id": run_id, "processing_mode": run["processing_mode"],
+        "calibrated_at": committed_at,
+    }
+    calibrations = current.get("calibrations") if isinstance(current.get("calibrations"), dict) else {}
+    calibrations[run["processing_mode"]] = calibration
+    settings = _set_capture_settings_for_device(device, {
+        "yellow_threshold_percent": derived["yellow_threshold_percent"],
+        "green_threshold_percent": derived["green_threshold_percent"],
+        "calibrations": calibrations,
+    }, db)
+    device = db.query(Device).filter(Device.deviceId == device.deviceId).first()
+    hardware = _device_hardware_info(device)
+    hardware["calibration_runs"][run_id].update({"status": "committed", "committed_at": committed_at, "result": calibration})
+    device.hardware_info = json.dumps(hardware)
+    db.commit()
+    return {"success": True, "calibration": hardware["calibration_runs"][run_id], "capture_settings": settings}
 
 
 @router.get("/{device_uuid}/files", response_model=Dict[str, Any])
@@ -1650,7 +1839,8 @@ async def get_device_files(
         
         # Get all files for this device
         files = db.query(DeviceFile).filter(
-            DeviceFile.device_id == device.deviceId
+            DeviceFile.device_id == device.deviceId,
+            DeviceFile.on_device == True,
         ).order_by(DeviceFile.modified_at.desc()).all()
 
         capture_metadata = _device_hardware_info(device).get('capture_file_metadata', {})
