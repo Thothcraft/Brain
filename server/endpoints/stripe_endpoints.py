@@ -100,8 +100,11 @@ async def handle_subscription_created(subscription):
             logger.error(f"User not found for customer: {customer_id}")
             return
         
-        # Update user
-        user.plan = plan
+        active = str(subscription.status) in {"active", "trialing"}
+        # A subscription.created event can arrive while the first payment is
+        # still incomplete. Never grant product access until Stripe says the
+        # subscription is active or trialing.
+        user.plan = plan if active else "free"
         user.stripe_subscription_id = subscription.id
         user.plan_expires_at = subscription.current_period_end
         
@@ -111,6 +114,7 @@ async def handle_subscription_created(subscription):
     except Exception as e:
         logger.error(f"Error handling subscription created: {e}")
         db.rollback()
+        raise
     finally:
         db.close()
 
@@ -135,6 +139,7 @@ async def handle_subscription_updated(subscription):
     except Exception as e:
         logger.error(f"Error handling subscription updated: {e}")
         db.rollback()
+        raise
     finally:
         db.close()
 
@@ -156,6 +161,7 @@ async def handle_subscription_deleted(subscription):
     except Exception as e:
         logger.error(f"Error handling subscription deleted: {e}")
         db.rollback()
+        raise
     finally:
         db.close()
 
@@ -191,6 +197,7 @@ async def handle_payment_succeeded(invoice):
     except Exception as e:
         logger.error(f"Error handling payment succeeded: {e}")
         db.rollback()
+        raise
     finally:
         db.close()
 
@@ -273,6 +280,11 @@ async def create_checkout_session(
     price_id = PRICE_IDS.get(f"{plan}_{billing_period}")
     if plan not in {"home", "pro", "research"} or billing_period not in {"monthly", "annual"} or not price_id:
         raise HTTPException(status_code=400, detail="Invalid plan")
+    if current_user.stripe_subscription_id:
+        raise HTTPException(
+            status_code=409,
+            detail="This account already has a Stripe subscription. Change plans in the billing portal instead of creating a second subscription.",
+        )
     
     try:
         # Get or create Stripe customer
