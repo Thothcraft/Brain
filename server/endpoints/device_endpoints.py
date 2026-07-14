@@ -70,6 +70,12 @@ DEFAULT_CAPTURE_SETTINGS = {
     "radar_detection_threshold_db": 8.0,
     "occupancy_threshold_percent": 50.0,
     "auto_occupancy_label_enabled": True,
+    "chunk_seconds": 10.0,
+    "system_mode": "balanced",
+    "occupancy_vote_chunks": 1,
+    "prediction_label_style": "occupancy",
+    "people_count_label_enabled": False,
+    "sleep_study_enabled": False,
     "revision": 0,
     "updated_at": None,
 }
@@ -159,6 +165,26 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
     if isinstance(auto_label, str):
         auto_label = auto_label.strip().lower() in {"1", "true", "yes", "on"}
     try:
+        chunk_seconds = min(30.0, max(2.0, float(source.get("chunk_seconds", 10.0))))
+    except (TypeError, ValueError):
+        chunk_seconds = 10.0
+    system_mode = str(source.get("system_mode") or "balanced").strip().lower()
+    if system_mode not in {"responsive", "balanced", "precision"}:
+        system_mode = "balanced"
+    try:
+        occupancy_vote_chunks = min(60, max(1, int(source.get("occupancy_vote_chunks", 1))))
+    except (TypeError, ValueError):
+        occupancy_vote_chunks = 1
+    prediction_label_style = str(source.get("prediction_label_style") or "occupancy").strip().lower()
+    if prediction_label_style not in {"occupancy", "presence"}:
+        prediction_label_style = "occupancy"
+    people_count_label = source.get("people_count_label_enabled", False)
+    sleep_study = source.get("sleep_study_enabled", False)
+    if isinstance(people_count_label, str):
+        people_count_label = people_count_label.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(sleep_study, str):
+        sleep_study = sleep_study.strip().lower() in {"1", "true", "yes", "on"}
+    try:
         revision = max(0, int(source.get("revision") or 0))
     except (TypeError, ValueError):
         revision = 0
@@ -169,6 +195,12 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
         "radar_detection_threshold_db": radar_threshold,
         "occupancy_threshold_percent": occupancy_threshold,
         "auto_occupancy_label_enabled": bool(auto_label),
+        "chunk_seconds": chunk_seconds,
+        "system_mode": system_mode,
+        "occupancy_vote_chunks": occupancy_vote_chunks,
+        "prediction_label_style": prediction_label_style,
+        "people_count_label_enabled": bool(people_count_label),
+        "sleep_study_enabled": bool(sleep_study),
         "revision": revision,
         "updated_at": str(source.get("updated_at")) if source.get("updated_at") else None,
     }
@@ -732,8 +764,9 @@ async def register_device(
                         detail="Free plan allows only one online device. Disconnect another device or upgrade your plan."
                     )
 
-                # Update existing device
-                existing_device.device_name = device_name
+                # Portal/user renames are canonical. Routine device
+                # re-registration must not reset them to the local default.
+                device_name = existing_device.device_name or device_name
                 existing_device.device_type = request.device_type or existing_device.device_type
                 existing_device.ip_address = ip_address or existing_device.ip_address
                 existing_device.mac_address = mac_address or existing_device.mac_address
