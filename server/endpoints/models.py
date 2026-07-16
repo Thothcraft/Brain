@@ -299,7 +299,7 @@ class StandardResponse(BaseModel):
 class CaptureSettings(BaseModel):
     labels: List[str] = Field(default_factory=list)
     sensors: Dict[str, bool] = Field(default_factory=dict)
-    radar_detection_threshold_db: float = 8.0
+    radar_detection_threshold_normalized: float = Field(default=0.45, ge=0.05, le=0.95)
     occupancy_threshold_percent: float = 50.0
     auto_occupancy_label_enabled: bool = True
     chunk_seconds: float = 10.0

@@ -79,9 +79,45 @@ class RegisterResponse(BaseModel):
 class UserResponse(BaseModel):
     userId: int
     username: str
+    email: Optional[str] = None
+    email_verified: bool = False
+    phone_number: Optional[int] = None
+    role: int = 0
+    plan: str = "free"
+    org_name: Optional[str] = None
+    created_at: Optional[str] = None
+
+class ProfileUpdateRequest(BaseModel):
+    username: Optional[str] = None
+    phone_number: Optional[int] = None
+    org_name: Optional[str] = None
+
+    @validator('username')
+    def validate_optional_username(cls, value):
+        if value is None:
+            return value
+        cleaned = value.strip()
+        if len(cleaned) < 3:
+            raise ValueError('Username must be at least 3 characters')
+        return cleaned
+
+class ResendVerificationRequest(BaseModel):
     email: str
-    phone_number: int = None
-    created_at: str
+
+    @validator('email')
+    def validate_resend_email(cls, value):
+        cleaned = str(value or '').strip().lower()
+        if '@' not in cleaned or len(cleaned) > 320:
+            raise ValueError('Enter a valid email address')
+        return cleaned
+
+@router.get('/registration-status', summary="Email registration capability")
+async def registration_status() -> Dict[str, Any]:
+    return {
+        "email_registration_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY")),
+        "email_verification_check_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY")),
+        "redirect_url": os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1"),
+    }
 
 @router.post(
     "/token",
@@ -323,6 +359,24 @@ async def logout(
         "message": "Logged out successfully"
     }
 
+@router.post('/resend-verification', summary="Resend signup verification email")
+async def resend_verification(payload: ResendVerificationRequest) -> Dict[str, Any]:
+    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    anon_key = os.getenv("SUPABASE_ANON_KEY", "")
+    if not supabase_url or not anon_key:
+        raise HTTPException(status_code=503, detail="Email registration is not configured")
+    redirect_url = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1")
+    response = await asyncio.to_thread(
+        requests.post,
+        f"{supabase_url}/auth/v1/resend",
+        headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}", "Content-Type": "application/json"},
+        json={"type": "signup", "email": payload.email, "options": {"emailRedirectTo": redirect_url}},
+        timeout=10,
+    )
+    if response.status_code not in (200, 201):
+        logging.warning("Supabase verification resend failed with status %s", response.status_code)
+    return {"success": True, "message": "If the account is awaiting confirmation, a new verification email has been sent."}
+
 @router.get(
     '/profile', 
     response_model=UserResponse,
@@ -360,9 +414,10 @@ async def get_user_profile(
             "role": current_user.role,
             "plan": current_user.plan or "free",
             "org_name": current_user.org_name,
-            "email": f"{current_user.username}@example.com",  # Default email since it's not in the model
-            "phone_number": current_user.phone_number or 0,  # Default to 0 if None
-            "created_at": datetime.utcnow().isoformat()  # Add current timestamp
+            "email": current_user.email,
+            "email_verified": bool(current_user.email_verified),
+            "phone_number": current_user.phone_number,
+            "created_at": None,
         }
         
         log_response(200, "Profile retrieved successfully", "/profile")
@@ -374,3 +429,35 @@ async def get_user_profile(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve profile: {str(e)}"
         )
+
+@router.put('/profile', response_model=UserResponse, summary="Update user profile")
+async def update_user_profile(
+    payload: ProfileUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    if payload.username and payload.username != current_user.username:
+        duplicate = db.query(User).filter(
+            User.username == payload.username,
+            User.userId != current_user.userId,
+        ).first()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Username is already in use")
+        current_user.username = payload.username
+    if 'phone_number' in payload.__fields_set__:
+        current_user.phone_number = payload.phone_number
+    if 'org_name' in payload.__fields_set__ and current_user.role == 2:
+        current_user.org_name = (payload.org_name or '').strip() or None
+    db.commit()
+    db.refresh(current_user)
+    return {
+        "userId": current_user.userId,
+        "username": current_user.username,
+        "email": current_user.email,
+        "email_verified": bool(current_user.email_verified),
+        "phone_number": current_user.phone_number,
+        "role": current_user.role,
+        "plan": current_user.plan or "free",
+        "org_name": current_user.org_name,
+        "created_at": None,
+    }

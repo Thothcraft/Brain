@@ -68,7 +68,7 @@ DEFAULT_CAPTURE_SETTINGS = {
         "esp32_csi": True,
         "sense_hat": True,
     },
-    "radar_detection_threshold_db": 8.0,
+    "radar_detection_threshold_normalized": 0.45,
     "occupancy_threshold_percent": 50.0,
     "yellow_threshold_percent": 20.0,
     "green_threshold_percent": 60.0,
@@ -168,9 +168,12 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
             sensors[key] = bool(raw_sensors.get(key))
 
     try:
-        radar_threshold = min(40.0, max(0.0, float(source.get("radar_detection_threshold_db", 8.0))))
+        radar_value = source.get("radar_detection_threshold_normalized")
+        if radar_value is None and "radar_detection_threshold_db" in source:
+            radar_value = float(source["radar_detection_threshold_db"]) / 10.0
+        radar_threshold = min(0.95, max(0.05, float(radar_value if radar_value is not None else 0.45)))
     except (TypeError, ValueError):
-        radar_threshold = 8.0
+        radar_threshold = 0.45
     try:
         occupancy_threshold = min(100.0, max(0.0, float(source.get("occupancy_threshold_percent", 50.0))))
     except (TypeError, ValueError):
@@ -213,7 +216,7 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
     return {
         "labels": labels,
         "sensors": sensors,
-        "radar_detection_threshold_db": radar_threshold,
+        "radar_detection_threshold_normalized": radar_threshold,
         "occupancy_threshold_percent": occupancy_threshold,
         "yellow_threshold_percent": yellow_threshold,
         "green_threshold_percent": green_threshold,
@@ -252,9 +255,20 @@ def _set_capture_settings_for_device(
 ) -> Dict[str, Any]:
     hardware_info = _device_hardware_info(device)
     current = _capture_settings_for_device(device)
+    incoming = dict(updates or {})
+    if (
+        "radar_detection_threshold_normalized" not in incoming
+        and "radar_detection_threshold_db" in incoming
+    ):
+        try:
+            incoming["radar_detection_threshold_normalized"] = (
+                float(incoming["radar_detection_threshold_db"]) / 10.0
+            )
+        except (TypeError, ValueError):
+            pass
     merged = _normalize_capture_settings({
         **current,
-        **(updates or {}),
+        **incoming,
     })
     if increment_revision:
         merged["revision"] = max(int(current.get("revision") or 0), int(merged.get("revision") or 0)) + 1
