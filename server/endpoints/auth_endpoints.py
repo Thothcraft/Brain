@@ -18,6 +18,20 @@ from server.utils.logging_utils import log_request_start, log_response, log_erro
 
 router = APIRouter(prefix="", tags=["auth"])
 
+
+def _supabase_signup_key() -> str:
+    """Resolve the server-side key across legacy and current Supabase names."""
+    return next((
+        os.getenv(name, "")
+        for name in (
+            "SUPABASE_ANON_KEY",
+            "SUPABASE_PUBLISHABLE_KEY",
+            "SUPABASE_KEY",
+            "SUPABASE_SERVICE_KEY",
+        )
+        if os.getenv(name, "")
+    ), "")
+
 # Request/Response Models
 class LoginRequest(BaseModel):
     username: str
@@ -114,7 +128,7 @@ class ResendVerificationRequest(BaseModel):
 @router.get('/registration-status', summary="Email registration capability")
 async def registration_status() -> Dict[str, Any]:
     return {
-        "email_registration_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY")),
+        "email_registration_configured": bool(os.getenv("SUPABASE_URL") and _supabase_signup_key()),
         "email_verification_check_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY")),
         "redirect_url": os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1"),
     }
@@ -273,7 +287,7 @@ async def register_user(
             )
 
         supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-        anon_key = os.getenv("SUPABASE_ANON_KEY", "")
+        anon_key = _supabase_signup_key()
         if not supabase_url or not anon_key:
             raise HTTPException(status_code=503, detail="Email registration is not configured")
         redirect_url = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1")
@@ -362,7 +376,7 @@ async def logout(
 @router.post('/resend-verification', summary="Resend signup verification email")
 async def resend_verification(payload: ResendVerificationRequest) -> Dict[str, Any]:
     supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-    anon_key = os.getenv("SUPABASE_ANON_KEY", "")
+    anon_key = _supabase_signup_key()
     if not supabase_url or not anon_key:
         raise HTTPException(status_code=503, detail="Email registration is not configured")
     redirect_url = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1")
