@@ -5,6 +5,7 @@ It includes the User model and database connection configuration.
 """
 
 import os
+import json
 import time
 import logging
 from datetime import datetime
@@ -526,6 +527,7 @@ class DeviceFile(Base):
     cloud_file_id = Column("cloud_file_id", Integer, ForeignKey("file.file_id"), nullable=True)
     upload_requested = Column("upload_requested", Boolean, default=False)  # Set by Research Portal to request upload
     last_synced = Column("last_synced", DateTime, default=datetime.utcnow)
+    metadata_json = Column("metadata_json", Text, nullable=True)
     
     # Unique constraint: one file per device
     __table_args__ = (
@@ -541,6 +543,10 @@ class DeviceFile(Base):
         def _utc(value):
             return value.isoformat() + "Z" if value else None
 
+        try:
+            metadata = json.loads(self.metadata_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
         return {
             "id": self.id,
             "filename": self.filename,
@@ -553,6 +559,42 @@ class DeviceFile(Base):
             "cloud_file_id": self.cloud_file_id,
             "upload_requested": self.upload_requested,
             "last_synced": _utc(self.last_synced),
+            "metadata": metadata,
+        }
+
+
+class DeviceCaptureChunk(Base):
+    """Current-minute live analysis, optimized for frequent idempotent upserts."""
+    __tablename__ = "device_capture_chunk"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey("device.device_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    minute = Column(String(13), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="loading")
+    occupied = Column(Boolean, nullable=True)
+    frame_count = Column(Integer, nullable=False, default=10)
+    payload = Column(Text, nullable=False, default="{}")
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("device_id", "minute", "chunk_index", name="uq_device_capture_chunk"),
+    )
+
+    def to_dict(self):
+        try:
+            payload = json.loads(self.payload or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        return {
+            **payload,
+            "minute": self.minute,
+            "chunk_index": self.chunk_index,
+            "status": self.status,
+            "occupied": self.occupied,
+            "frame_count": self.frame_count,
+            "updated_at": self.updated_at.isoformat() + "Z" if self.updated_at else None,
         }
 
 

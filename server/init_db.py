@@ -118,6 +118,24 @@ def ensure_product_core_schema():
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_user_activity ON device (user_id, approved, last_seen DESC)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_file_visible_minutes ON device_file (device_id, modified_at DESC) WHERE on_device = TRUE"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_file_cloud_history ON device_file (user_id, modified_at DESC) WHERE on_cloud = TRUE"))
+            conn.execute(text("ALTER TABLE device_file ADD COLUMN IF NOT EXISTS metadata_json TEXT"))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS device_capture_chunk (
+                    id SERIAL PRIMARY KEY,
+                    device_id INTEGER NOT NULL REFERENCES device(device_id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    minute VARCHAR(13) NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'loading',
+                    occupied BOOLEAN,
+                    frame_count INTEGER NOT NULL DEFAULT 10,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_device_capture_chunk UNIQUE (device_id, minute, chunk_index)
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_live_chunk_device_minute ON device_capture_chunk (device_id, minute, chunk_index)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_live_chunk_user_updated ON device_capture_chunk (user_id, updated_at DESC)"))
         return True
     except Exception as e:
         logger.error(f"[INIT] Error ensuring product core schema: {e}")

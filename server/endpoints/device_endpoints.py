@@ -17,11 +17,11 @@ import uuid as uuid_lib
 from ipaddress import ip_address, IPv4Address
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, Body, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from server.db import get_db, Device, User, File, DeviceFile, DeviceDeployment
+from server.db import get_db, Device, User, File, DeviceFile, DeviceDeployment, DeviceCaptureChunk
 from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.calibration import REGIONS as CALIBRATION_REGIONS, derive_thresholds
@@ -588,9 +588,6 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
     
     try:
         stored_count = 0
-        device = db.query(Device).filter(Device.deviceId == device_id).first()
-        hardware_info = _device_hardware_info(device) if device else {}
-        capture_metadata = hardware_info.get("capture_file_metadata") if isinstance(hardware_info.get("capture_file_metadata"), dict) else {}
         for file_info in files:
             # Skip directories (unless it's a timelapse folder)
             file_type_val = file_info.type if hasattr(file_info, 'type') else file_info.get('type')
@@ -604,7 +601,7 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
             label = str(field('label') or '').strip()
             if label and label not in labels:
                 labels.append(label)
-            capture_metadata[filename] = {
+            record_metadata = {
                 'labels': [str(item).strip() for item in labels if str(item).strip()],
                 'label': label or (str(labels[0]) if labels else None),
                 'occupancy': field('occupancy') if isinstance(field('occupancy'), dict) else None,
@@ -656,6 +653,7 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
                 existing.modified_at = modified_at
                 existing.on_device = True
                 existing.last_synced = datetime.utcnow()
+                existing.metadata_json = json.dumps(record_metadata, separators=(",", ":"))
             else:
                 # Create new record
                 device_file = DeviceFile(
@@ -668,14 +666,12 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
                     modified_at=modified_at,
                     on_device=True,
                     on_cloud=False,
-                    last_synced=datetime.utcnow()
+                    last_synced=datetime.utcnow(),
+                    metadata_json=json.dumps(record_metadata, separators=(",", ":")),
                 )
                 db.add(device_file)
             stored_count += 1
         
-        if device:
-            hardware_info['capture_file_metadata'] = capture_metadata
-            device.hardware_info = json.dumps(hardware_info)
         if commit:
             db.commit()
         logger.info(f"Stored {stored_count} files for device {device_uuid}")
@@ -708,8 +704,7 @@ def _apply_inventory_snapshot(device: Device, user_id: int, request: DeviceHeart
             record.last_synced = now
     device = db.query(Device).filter(Device.deviceId == device.deviceId).first()
     hardware_info = _device_hardware_info(device)
-    metadata = hardware_info.get("capture_file_metadata") if isinstance(hardware_info.get("capture_file_metadata"), dict) else {}
-    hardware_info["capture_file_metadata"] = {name: value for name, value in metadata.items() if name in present_names}
+    hardware_info.pop("capture_file_metadata", None)
     hardware_info["inventory_snapshot"] = {
         "revision": incoming_revision, "timestamp": incoming_timestamp,
         "received_at": datetime.now(timezone.utc).isoformat(), "count": len(present_names),
@@ -1617,6 +1612,158 @@ async def device_heartbeat(
         )
 
 
+@router.post("/{device_uuid}/live-chunks", response_model=Dict[str, Any])
+async def upsert_live_capture_chunk(
+    device_uuid: str,
+    payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Store one current-minute chunk without rewriting device or file rows."""
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    minute = str(payload.get("minute") or "")
+    if not MINUTE_DIR_RE.fullmatch(minute):
+        raise HTTPException(status_code=422, detail="minute must use YYYYMMDD_HHMM")
+    try:
+        chunk_index = int(payload.get("chunk_index"))
+        frame_count = int(payload.get("chunk_frames") or payload.get("frame_count") or 10)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="chunk_index and frame_count must be integers")
+    if chunk_index < 0 or frame_count != 10:
+        raise HTTPException(status_code=422, detail="live chunks require exactly 10 frames")
+
+    current_minute = db.query(DeviceCaptureChunk.minute).filter(
+        DeviceCaptureChunk.device_id == device.deviceId
+    ).order_by(DeviceCaptureChunk.minute.desc()).limit(1).scalar()
+    if current_minute and minute < current_minute:
+        return {"success": True, "ignored": True, "reason": "stale minute"}
+    if current_minute and minute > current_minute:
+        db.query(DeviceCaptureChunk).filter(
+            DeviceCaptureChunk.device_id == device.deviceId
+        ).delete(synchronize_session=False)
+
+    occupancy = payload.get("occupancy") if isinstance(payload.get("occupancy"), dict) else {}
+    label = str(occupancy.get("label") or payload.get("status") or "loading")
+    status_value = label if label in {"occupied", "empty"} else "loading"
+    occupied = status_value == "occupied" if status_value != "loading" else None
+    compact = {
+        key: payload.get(key)
+        for key in (
+            "occupancy", "location", "score", "people_count", "targets",
+            "labels", "activity_labels", "xy_map", "camera_filename", "captured_at",
+        )
+        if payload.get(key) is not None
+    }
+    row = db.query(DeviceCaptureChunk).filter(
+        DeviceCaptureChunk.device_id == device.deviceId,
+        DeviceCaptureChunk.minute == minute,
+        DeviceCaptureChunk.chunk_index == chunk_index,
+    ).first()
+    if row is None:
+        row = DeviceCaptureChunk(
+            device_id=device.deviceId,
+            user_id=current_user.userId,
+            minute=minute,
+            chunk_index=chunk_index,
+        )
+        db.add(row)
+    row.status = status_value
+    row.occupied = occupied
+    row.frame_count = frame_count
+    row.payload = json.dumps(compact, separators=(",", ":"))
+    row.updated_at = datetime.utcnow()
+    device.last_seen = datetime.utcnow()
+    device.online = True
+    db.commit()
+    return {"success": True, "minute": minute, "chunk_index": chunk_index}
+
+
+@router.get("/live-chunks", response_model=Dict[str, Any])
+async def get_account_live_capture_chunks(
+    after: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return changed live chunks for all of the account's devices in one query."""
+    query = db.query(DeviceCaptureChunk, Device.device_uuid).join(
+        Device, Device.deviceId == DeviceCaptureChunk.device_id
+    ).filter(DeviceCaptureChunk.user_id == current_user.userId)
+    if after:
+        try:
+            cursor = datetime.fromisoformat(after.replace("Z", "+00:00")).replace(tzinfo=None)
+            query = query.filter(DeviceCaptureChunk.updated_at > cursor)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="after must be an ISO timestamp")
+    rows = query.order_by(
+        DeviceCaptureChunk.updated_at.asc(),
+        DeviceCaptureChunk.chunk_index.asc(),
+    ).all()
+    devices: Dict[str, Dict[str, Any]] = {}
+    for row, device_uuid in rows:
+        bucket = devices.setdefault(str(device_uuid), {"minute": row.minute, "chunks": []})
+        if row.minute > str(bucket["minute"]):
+            bucket["minute"] = row.minute
+            bucket["chunks"] = []
+        if row.minute == bucket["minute"]:
+            bucket["chunks"].append(row.to_dict())
+    newest = db.query(DeviceCaptureChunk.updated_at).filter(
+        DeviceCaptureChunk.user_id == current_user.userId
+    ).order_by(DeviceCaptureChunk.updated_at.desc()).limit(1).scalar()
+    return {
+        "success": True,
+        "devices": devices,
+        "cursor": newest.isoformat() + "Z" if newest else None,
+    }
+
+
+@router.get("/{device_uuid}/live-chunks", response_model=Dict[str, Any])
+async def get_live_capture_chunks(
+    device_uuid: str,
+    after: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return current-minute chunks, optionally only rows newer than a cursor."""
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    latest_minute = db.query(DeviceCaptureChunk.minute).filter(
+        DeviceCaptureChunk.device_id == device.deviceId
+    ).order_by(DeviceCaptureChunk.minute.desc()).limit(1).scalar()
+    if not latest_minute:
+        return {"success": True, "minute": None, "chunks": [], "cursor": None}
+    query = db.query(DeviceCaptureChunk).filter(
+        DeviceCaptureChunk.device_id == device.deviceId,
+        DeviceCaptureChunk.minute == latest_minute,
+    )
+    if after:
+        try:
+            cursor = datetime.fromisoformat(after.replace("Z", "+00:00")).replace(tzinfo=None)
+            query = query.filter(DeviceCaptureChunk.updated_at > cursor)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="after must be an ISO timestamp")
+    rows = query.order_by(DeviceCaptureChunk.chunk_index.asc()).all()
+    newest = db.query(DeviceCaptureChunk.updated_at).filter(
+        DeviceCaptureChunk.device_id == device.deviceId,
+        DeviceCaptureChunk.minute == latest_minute,
+    ).order_by(DeviceCaptureChunk.updated_at.desc()).limit(1).scalar()
+    return {
+        "success": True,
+        "minute": latest_minute,
+        "chunks": [row.to_dict() for row in rows],
+        "cursor": newest.isoformat() + "Z" if newest else None,
+    }
+
+
 @router.get("/{device_uuid}/capture-settings", response_model=Dict[str, Any])
 async def get_device_capture_settings(
     device_uuid: str,
@@ -1835,7 +1982,9 @@ async def get_device_files(
             if not _is_minute_file_name(record.filename):
                 continue
             item = record.to_dict()
-            metadata = capture_metadata.get(record.filename, {}) if isinstance(capture_metadata, dict) else {}
+            metadata = item.pop("metadata", {})
+            if not metadata and isinstance(capture_metadata, dict):
+                metadata = capture_metadata.get(record.filename, {})
             if isinstance(metadata, dict):
                 item.update({
                     'label': metadata.get('label'),
