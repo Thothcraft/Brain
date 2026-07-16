@@ -12,6 +12,7 @@ This module handles the core AI functionality, including:
 import logging
 import os
 import sys
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 import json
 from dotenv import load_dotenv
@@ -34,6 +35,8 @@ DEFAULT_DATA_PATH = os.path.join(_BOT_PATH, "data")
 from aiagent.memory.memory_manager import BaseMemoryManager, LongTermMemoryManager, ShortTermMemoryManager
 from aiagent.context.reference import read_references
 from aiagent.functions.registry import FunctionsRegistry
+
+CURRENT_USER_ID = ContextVar("current_user_id", default=None)
 
 
 def query_openai(
@@ -133,7 +136,7 @@ Use this information to answer questions about the user's devices, data, trainin
     
     # Make current user id globally accessible to function tools
     if aux_data and aux_data.get("current_user_id") is not None:
-        globals()["CURRENT_USER_ID"] = aux_data["current_user_id"]
+        CURRENT_USER_ID.set(aux_data["current_user_id"])
 
     # Query OPENAI
     model_name = os.getenv("MODEL_NAME")
@@ -186,16 +189,9 @@ Use this information to answer questions about the user's devices, data, trainin
                 logging.error(f"Failed to parse arguments for {function_name}: {e}. Raw: {raw_args}")
                 parsed_args = {}
 
-            # Call through registry helper first (allows additional wrappers)
+            # Execute exactly once through the registry.
             function_result = tools.resolve_function(function_name, parsed_args)
             logging.info(f"[AI Agent] Tool result: {function_result}")
-
-            # If the concrete callable is present, execute directly as well
-            if function_name in function_map:
-                try:
-                    function_result = function_map[function_name](**parsed_args)
-                except Exception as e:
-                    logging.error(f"Error while executing {function_name}: {e}")
 
             # Serialise result for message content
             serialised_result = (
@@ -442,6 +438,4 @@ def ask_ai(
         logging.warning("Skipping memory update due to query error")
 
     return response
-
-
 

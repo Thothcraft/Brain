@@ -136,6 +136,21 @@ def ensure_product_core_schema():
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_live_chunk_device_minute ON device_capture_chunk (device_id, minute, chunk_index)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_live_chunk_user_updated ON device_capture_chunk (user_id, updated_at DESC)"))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS device_command (
+                    id SERIAL PRIMARY KEY,
+                    device_id INTEGER NOT NULL REFERENCES device(device_id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    command VARCHAR(40) NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    delivered_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    result TEXT
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_command_pending ON device_command (device_id, status, created_at)"))
         return True
     except Exception as e:
         logger.error(f"[INIT] Error ensuring product core schema: {e}")

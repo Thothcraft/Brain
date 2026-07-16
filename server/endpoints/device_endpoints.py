@@ -19,9 +19,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, Body, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 
-from server.db import get_db, Device, User, File, DeviceFile, DeviceDeployment, DeviceCaptureChunk
+from server.db import get_db, Device, User, File, DeviceFile, DeviceDeployment, DeviceCaptureChunk, DeviceCommand
 from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.calibration import REGIONS as CALIBRATION_REGIONS, derive_thresholds
@@ -606,6 +606,9 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
                 'label': label or (str(labels[0]) if labels else None),
                 'occupancy': field('occupancy') if isinstance(field('occupancy'), dict) else None,
                 'progress': field('progress') if isinstance(field('progress'), dict) else None,
+                'manifest_schema': field('manifest_schema'),
+                'collection_unit': field('collection_unit') or 'minute',
+                'assets': field('assets') if isinstance(field('assets'), list) else [],
             }
             
             # Handle timelapse folders
@@ -1326,6 +1329,7 @@ async def delete_device(
         from server.db import FileDeviceUpdate
         db.query(FileDeviceUpdate).filter(FileDeviceUpdate.deviceId == device.deviceId).delete(synchronize_session=False)
         db.query(DeviceDeployment).filter(DeviceDeployment.device_uuid == device_id).delete(synchronize_session=False)
+        db.query(DeviceCommand).filter(DeviceCommand.device_id == device.deviceId).delete(synchronize_session=False)
         if mode == "erase" and cloud_file_ids:
             db.query(File).filter(File.fileId.in_(cloud_file_ids), File.userId == current_user.userId).delete(synchronize_session=False)
         db.delete(device)
@@ -1590,6 +1594,22 @@ async def device_heartbeat(
         db.refresh(device)
         capture_settings = _capture_settings_for_device(device)
         pending_uploads = _get_pending_uploads(device.deviceId, db)
+        pending_commands = db.query(DeviceCommand).filter(
+            DeviceCommand.device_id == device.deviceId,
+            or_(
+                DeviceCommand.status == "pending",
+                and_(
+                    DeviceCommand.status == "delivered",
+                    DeviceCommand.delivered_at < datetime.utcnow() - timedelta(seconds=30),
+                ),
+            ),
+        ).order_by(DeviceCommand.created_at.asc()).limit(20).all()
+        if pending_commands:
+            delivered_at = datetime.utcnow()
+            for command in pending_commands:
+                command.status = "delivered"
+                command.delivered_at = delivered_at
+            db.commit()
         
         return {
             "success": True,
@@ -1599,6 +1619,7 @@ async def device_heartbeat(
                 "timestamp": now.isoformat(),
                 "capture_settings": capture_settings,
                 "pending_uploads": pending_uploads,
+                "pending_commands": [command.to_dict() for command in pending_commands],
             }
         }
     except HTTPException:
@@ -1610,6 +1631,63 @@ async def device_heartbeat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process heartbeat: {str(e)}"
         )
+
+
+@router.post("/{device_uuid}/commands", response_model=Dict[str, Any])
+async def create_device_command(
+    device_uuid: str,
+    payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Queue a collection command for an owned Thoth device."""
+    device = _owned_device(device_uuid, current_user, db)
+    command_name = str(payload.get("command") or "").strip()
+    if command_name not in {"start_collection", "stop_collection", "label_current_chunk"}:
+        raise HTTPException(status_code=422, detail="Unsupported device command")
+    command_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    command = DeviceCommand(
+        device_id=device.deviceId,
+        user_id=current_user.userId,
+        command=command_name,
+        payload=json.dumps(command_payload, separators=(",", ":")),
+    )
+    db.add(command)
+    db.commit()
+    db.refresh(command)
+    return {"success": True, "command": command.to_dict()}
+
+
+@router.post("/{device_uuid}/commands/{command_id}/ack", response_model=Dict[str, Any])
+async def acknowledge_device_command(
+    device_uuid: str,
+    command_id: int,
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Acknowledge a command using the device's owner token."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+    current_user = await get_user_from_token(token)
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    command = db.query(DeviceCommand).filter(
+        DeviceCommand.id == command_id,
+        DeviceCommand.device_id == device.deviceId,
+    ).first()
+    if not command:
+        raise HTTPException(status_code=404, detail="Command not found")
+    command.status = "completed" if payload.get("success") is not False else "failed"
+    command.completed_at = datetime.utcnow()
+    command.result = json.dumps(payload, separators=(",", ":"))
+    db.commit()
+    return {"success": True, "command_id": command_id, "status": command.status}
 
 
 @router.post("/{device_uuid}/live-chunks", response_model=Dict[str, Any])

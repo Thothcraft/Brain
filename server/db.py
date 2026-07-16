@@ -598,6 +598,35 @@ class DeviceCaptureChunk(Base):
         }
 
 
+class DeviceCommand(Base):
+    """Durable portal/assistant command claimed by a device heartbeat."""
+    __tablename__ = "device_command"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey("device.device_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    command = Column(String(40), nullable=False)
+    payload = Column(Text, nullable=False, default="{}")
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    delivered_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    result = Column(Text, nullable=True)
+
+    def to_dict(self):
+        try:
+            payload = json.loads(self.payload or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        return {
+            "id": self.id,
+            "command": self.command,
+            "payload": payload,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+        }
+
+
 class TrainingDataset(Base):
     """Dataset for training - groups files with labels."""
     __tablename__ = "training_dataset"
