@@ -1986,11 +1986,40 @@ async def get_device_files(
             if not metadata and isinstance(capture_metadata, dict):
                 metadata = capture_metadata.get(record.filename, {})
             if isinstance(metadata, dict):
+                labels = [
+                    str(label).strip()
+                    for label in (metadata.get('labels') or [])
+                    if str(label).strip()
+                ]
+                occupancy = metadata.get('occupancy') if isinstance(metadata.get('occupancy'), dict) else {}
+                occupancy_label = str(occupancy.get('label') or '')
+                progress = metadata.get('progress') if isinstance(metadata.get('progress'), dict) else {}
+                chunks = progress.get('chunks') if isinstance(progress.get('chunks'), list) else []
+                completed = [
+                    chunk for chunk in chunks
+                    if isinstance(chunk, dict) and str(chunk.get('state') or '') in {'occupied', 'empty'}
+                ]
+                if not labels and occupancy_label in {'occupied', 'empty'}:
+                    labels = [occupancy_label, 'present' if occupancy_label == 'occupied' else 'absent']
+                if not labels and completed:
+                    latest = completed[-1]
+                    latest_state = str(latest.get('state'))
+                    labels = [
+                        str(label).strip()
+                        for label in (latest.get('labels') or [])
+                        if str(label).strip()
+                    ] or [latest_state, 'present' if latest_state == 'occupied' else 'absent']
+                if not labels:
+                    has_captured_chunk = any(
+                        isinstance(chunk, dict) and str(chunk.get('state') or '') != 'waiting'
+                        for chunk in chunks
+                    )
+                    labels = ['processing' if has_captured_chunk else 'no-radar-data']
                 item.update({
-                    'label': metadata.get('label'),
-                    'labels': metadata.get('labels') or [],
-                    'occupancy': metadata.get('occupancy'),
-                    'progress': metadata.get('progress'),
+                    'label': metadata.get('label') or labels[0],
+                    'labels': labels,
+                    'occupancy': occupancy or None,
+                    'progress': progress or None,
                 })
             file_list.append(item)
         
