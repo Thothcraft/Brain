@@ -70,10 +70,6 @@ async def process_ai_query(
     Returns:
         QueryResponse: AI response and query metadata
     """
-    plan_aliases = {"researcher": "research", "organization": "pro"}
-    product_plan = plan_aliases.get(str(current_user.plan or "free").lower(), str(current_user.plan or "free").lower())
-    if product_plan not in {"pro", "research"}:
-        raise HTTPException(status_code=403, detail="The contextual assistant requires the Pro or Research plan")
     try:
         log_request_start("POST", "/query", current_user.userId)
         log_ai_call(query_data.query, "default_model", "/query")
