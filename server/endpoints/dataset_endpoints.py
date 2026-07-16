@@ -63,6 +63,16 @@ def _deployment_requests_allowed_for_device(device) -> bool:
     return True
 
 
+def _require_ai_model_plan(user) -> None:
+    aliases = {"researcher": "research", "organization": "pro"}
+    plan = str(getattr(user, "plan", "free") or "free").lower()
+    if aliases.get(plan, plan) not in {"pro", "research"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Private AI model deployment requires the Pro plan",
+        )
+
+
 # ============================================================================
 # REQUEST/RESPONSE MODELS
 # ============================================================================
@@ -1589,6 +1599,7 @@ async def deploy_model_to_device(
     """
     from ..db import Device, DeviceDeployment
     import base64
+    _require_ai_model_plan(current_user)
 
     try:
         # Validate model
@@ -1683,6 +1694,7 @@ async def deploy_pretrained_model_to_device(
     """Queue a built-in pretrained model for deployment."""
     from ..db import Device, DeviceDeployment
     import base64
+    _require_ai_model_plan(current_user)
 
     try:
         if request.model_key != "opencv_person_detector":

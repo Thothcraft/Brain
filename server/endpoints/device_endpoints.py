@@ -96,12 +96,12 @@ class DeviceRegistrationError(Exception):
     pass
 
 
-PLAN_DEVICE_LIMITS = {"free": 1, "home": 1, "pro": 10, "research": 10}
+PLAN_DEVICE_LIMITS = {"free": 1, "home": 5, "pro": 10, "research": 10}
 PLAN_FEATURES = {
-    "free": {"basic_occupancy"},
-    "home": {"basic_occupancy", "presence", "maps", "har", "people_count", "zones", "labels", "calibration", "predictions"},
-    "pro": {"basic_occupancy", "presence", "maps", "har", "people_count", "zones", "labels", "calibration", "predictions", "spaces", "multi_device"},
-    "research": {"basic_occupancy", "presence", "maps", "har", "people_count", "zones", "labels", "calibration", "predictions", "spaces", "multi_device", "detailed_labels", "data_export", "academy", "assistant"},
+    "free": {"basic_occupancy", "maps", "home_assistant", "labels", "data_export", "calibration"},
+    "home": {"basic_occupancy", "presence", "maps", "home_assistant", "labels", "data_export", "calibration", "predictions", "zones", "spaces", "multi_device"},
+    "pro": {"basic_occupancy", "presence", "maps", "home_assistant", "labels", "data_export", "calibration", "predictions", "zones", "spaces", "multi_device", "har", "people_count", "ai_models", "federated_learning"},
+    "research": {"basic_occupancy", "presence", "maps", "home_assistant", "labels", "data_export", "calibration", "predictions", "zones", "spaces", "multi_device", "har", "people_count", "ai_models", "federated_learning", "detailed_labels", "academy", "assistant"},
 }
 
 

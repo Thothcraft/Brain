@@ -56,7 +56,15 @@ async def get_catalog():
                 "currency": price.currency,
                 "interval": getattr(getattr(price, "recurring", None), "interval", None),
             }
-        return {"prices": prices}
+        return {
+            "prices": prices,
+            "plans": {
+                "free": {"device_limit": 1},
+                "home": {"device_limit": 5},
+                "pro": {"device_limit": 10},
+                "research": {"device_limit": 10},
+            },
+        }
 
     try:
         payload = await asyncio.to_thread(retrieve)
