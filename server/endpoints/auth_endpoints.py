@@ -32,6 +32,26 @@ def _supabase_signup_key() -> str:
         if os.getenv(name, "")
     ), "")
 
+
+def _local_registration_fallback_enabled() -> bool:
+    """Keep username registration available when email verification is down."""
+    return os.getenv("ALLOW_LOCAL_REGISTRATION_FALLBACK", "true").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _supabase_error(response: requests.Response) -> tuple[str, str]:
+    """Extract a loggable provider error code and a safe client message."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    code = str(payload.get("code") or payload.get("error_code") or "").strip()
+    message = str(payload.get("msg") or payload.get("message") or payload.get("error") or "").strip()
+    return code, message
+
 # Request/Response Models
 class LoginRequest(BaseModel):
     username: str
@@ -89,6 +109,7 @@ class RegisterResponse(BaseModel):
     username: str
     message: str
     verification_required: bool = True
+    email_verification_available: bool = True
 
 class UserResponse(BaseModel):
     userId: int
@@ -127,9 +148,12 @@ class ResendVerificationRequest(BaseModel):
 
 @router.get('/registration-status', summary="Email registration capability")
 async def registration_status() -> Dict[str, Any]:
+    provider_configured = bool(os.getenv("SUPABASE_URL") and _supabase_signup_key())
     return {
-        "email_registration_configured": bool(os.getenv("SUPABASE_URL") and _supabase_signup_key()),
+        "account_registration_available": provider_configured or _local_registration_fallback_enabled(),
+        "email_registration_configured": provider_configured,
         "email_verification_check_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY")),
+        "local_registration_fallback_enabled": _local_registration_fallback_enabled(),
         "redirect_url": os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1"),
     }
 
@@ -212,7 +236,14 @@ async def login_for_access_token(
         access_token_days = int(os.getenv("ACCESS_TOKEN_EXPIRE_DAYS", "3650"))
         access_token_expires = timedelta(days=access_token_days)
         access_token = create_access_token(
-            data={"sub": str(user.userId), "role": user.role}, expires_delta=access_token_expires
+            data={
+                "sub": str(user.userId),
+                "username": user.username,
+                "email": user.email,
+                "email_verified": bool(user.email_verified),
+                "role": user.role,
+            },
+            expires_delta=access_token_expires,
         )
         expires_in = int(access_token_expires.total_seconds())
         
@@ -288,28 +319,54 @@ async def register_user(
 
         supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
         anon_key = _supabase_signup_key()
-        if not supabase_url or not anon_key:
+        fallback_enabled = _local_registration_fallback_enabled()
+        auth_user: Dict[str, Any] = {}
+        auth_user_id: Optional[str] = None
+        verification_available = False
+
+        if supabase_url and anon_key:
+            redirect_url = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1")
+            try:
+                signup = await asyncio.to_thread(
+                    requests.post,
+                    f"{supabase_url}/auth/v1/signup",
+                    params={"redirect_to": redirect_url},
+                    headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}", "Content-Type": "application/json"},
+                    json={
+                        "email": register_data.email,
+                        "password": register_data.password,
+                        "data": {"username": register_data.username},
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException as exc:
+                logging.warning("Supabase signup request failed: %s", exc)
+                if not fallback_enabled:
+                    raise HTTPException(status_code=503, detail="Email verification service is temporarily unavailable")
+            else:
+                if signup.status_code in (200, 201):
+                    signup_payload = signup.json() or {}
+                    auth_user = signup_payload.get("user") or signup_payload
+                    auth_user_id = auth_user.get("id") if isinstance(auth_user, dict) else None
+                    if not auth_user_id:
+                        raise HTTPException(status_code=502, detail="Verification provider returned an invalid response")
+                    verification_available = True
+                else:
+                    provider_code, provider_message = _supabase_error(signup)
+                    logging.warning(
+                        "Supabase signup failed with status %s code=%s message=%s",
+                        signup.status_code, provider_code or "unknown", provider_message or "unavailable",
+                    )
+                    temporary_failure = signup.status_code in {402, 408, 425, 429} or signup.status_code >= 500
+                    if temporary_failure:
+                        if not fallback_enabled:
+                            raise HTTPException(status_code=503, detail="Email verification service is temporarily unavailable")
+                    elif provider_code in {"email_exists", "user_already_exists"}:
+                        raise HTTPException(status_code=400, detail="That email address is already registered")
+                    else:
+                        raise HTTPException(status_code=400, detail="Unable to register that email address")
+        elif not fallback_enabled:
             raise HTTPException(status_code=503, detail="Email registration is not configured")
-        redirect_url = os.getenv("SUPABASE_EMAIL_REDIRECT_URL", "https://portal-three-rho.vercel.app/auth?verified=1")
-        signup = await asyncio.to_thread(
-            requests.post,
-            f"{supabase_url}/auth/v1/signup",
-            params={"redirect_to": redirect_url},
-            headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}", "Content-Type": "application/json"},
-            json={
-                "email": register_data.email,
-                "password": register_data.password,
-                "data": {"username": register_data.username},
-            },
-            timeout=10,
-        )
-        if signup.status_code not in (200, 201):
-            logging.warning("Supabase signup failed with status %s", signup.status_code)
-            raise HTTPException(status_code=400, detail="Unable to register that email address")
-        auth_user = (signup.json() or {}).get("user") or signup.json()
-        auth_user_id = auth_user.get("id") if isinstance(auth_user, dict) else None
-        if not auth_user_id:
-            raise HTTPException(status_code=502, detail="Verification provider returned an invalid response")
         
         # Import password hashing function
         from server.auth import get_password_hash
@@ -319,21 +376,46 @@ async def register_user(
             username=register_data.username,
             email=register_data.email,
             email_verified=bool(auth_user.get("email_confirmed_at")),
-            supabase_auth_user_id=str(auth_user_id),
+            supabase_auth_user_id=str(auth_user_id) if auth_user_id else None,
             hashed_password=get_password_hash(register_data.password),
             phone_number=register_data.phone_number
         )
         
         db.add(new_user)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            # Do not strand an Auth identity when the application account
+            # could not be committed; a retry must be able to use the email.
+            service_key = os.getenv("SUPABASE_SERVICE_KEY", "")
+            if service_key and auth_user_id:
+                try:
+                    await asyncio.to_thread(
+                        requests.delete,
+                        f"{supabase_url}/auth/v1/admin/users/{auth_user_id}",
+                        headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+                        timeout=8,
+                    )
+                except Exception:
+                    logging.exception("Unable to roll back Supabase signup after database failure")
+            raise
         db.refresh(new_user)
         
+        verification_required = bool(auth_user_id and not new_user.email_verified)
+        if verification_required:
+            registration_message = "Check your email to verify your account, then sign in."
+        elif new_user.email_verified:
+            registration_message = "Account created. You can sign in now."
+        else:
+            registration_message = "Account created. Email verification is temporarily unavailable; sign in with your username."
         response_data = {
             "success": True,
             "user_id": new_user.userId,
             "username": new_user.username,
-            "message": "Check your email to verify your account, then sign in.",
-            "verification_required": not new_user.email_verified,
+            "message": registration_message,
+            "verification_required": verification_required,
+            "email_verification_available": verification_available,
         }
         
         log_response(201, "User registered successfully", "/register")

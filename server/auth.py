@@ -14,6 +14,7 @@ from fastapi import status
 from datetime import datetime, timedelta
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 from typing import Optional
 import os
@@ -178,8 +179,16 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
     try:
         logging.info(f"[Auth] Starting authentication for user: {username}")
         
-        # Find user by username
-        user = db.query(User).filter(User.username == username).first()
+        # The verified email and username are equivalent login identities for
+        # both the device dashboard and Research Portal.
+        identity = str(username or '').strip()
+        user = db.query(User).filter(or_(
+            User.username == identity,
+            and_(
+                func.lower(User.email) == identity.lower(),
+                User.email_verified.is_(True),
+            ),
+        )).first()
         
         if not user:
             logging.warning(f"[Auth] User not found: {username}")
