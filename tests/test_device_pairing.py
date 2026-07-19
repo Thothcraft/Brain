@@ -171,7 +171,7 @@ def test_active_device_requires_its_current_token_to_start_repairing():
             device_name="Re-paired Thoth",
         ), database, None))
     except HTTPException as exc:
-        assert exc.status_code == 401
+        assert exc.status_code == 409
     else:
         raise AssertionError("an existing device must not be re-paired without its token")
 
@@ -199,6 +199,26 @@ def test_active_device_can_start_repairing_with_its_current_token():
             device_id="device-id",
             device_name="Re-paired Thoth",
         ), database, "Bearer current-device-token"))
+
+    assert started["status"] == "pending"
+    assert len(started["code"]) == 8
+
+
+def test_stale_device_can_recover_when_its_previous_token_expired():
+    stale_device = Device(
+        userId=6,
+        device_uuid="device-id",
+        device_name="Old Thoth",
+        device_type="thoth",
+        online=True,
+        last_seen=datetime.utcnow() - timedelta(minutes=5),
+    )
+    database = _Database({Device: [stale_device]})
+
+    started = asyncio.run(start_device_pairing(DevicePairingStartRequest(
+        device_id="device-id",
+        device_name="Recovered Thoth",
+    ), database, None))
 
     assert started["status"] == "pending"
     assert len(started["code"]) == 8

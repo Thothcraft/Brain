@@ -775,15 +775,24 @@ async def start_device_pairing(
     device_uuid = _normalized_device_uuid(request.device_id)
     existing_device = db.query(Device).filter(Device.device_uuid == device_uuid).first()
     if existing_device:
-        if not authorization or not isinstance(authorization, str):
-            raise HTTPException(status_code=401, detail="The current device token is required to re-pair this device")
-        token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
-        token_user = await get_user_from_token(token)
-        if token_user.userId != existing_device.userId:
-            raise HTTPException(status_code=403, detail="The current device token does not own this device")
-        if "device" in (token_user.get("scopes", []) or []):
-            if token_user.get("device_id") != device_uuid:
-                raise HTTPException(status_code=403, detail="Device token does not match this device")
+        if authorization and isinstance(authorization, str):
+            token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+            token_user = await get_user_from_token(token)
+            if token_user.userId != existing_device.userId:
+                raise HTTPException(status_code=403, detail="The current device token does not own this device")
+            if "device" in (token_user.get("scopes", []) or []):
+                if token_user.get("device_id") != device_uuid:
+                    raise HTTPException(status_code=403, detail="Device token does not match this device")
+        else:
+            recovery_cutoff = now - timedelta(seconds=DEVICE_ONLINE_TIMEOUT_SECONDS)
+            if existing_device.last_seen and existing_device.last_seen >= recovery_cutoff:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This device is still online. Wait for its previous session to expire or use its current token to re-pair.",
+                )
+            # Expired JWTs cannot authenticate a recovery request. Once the old
+            # heartbeat is stale, possession of the device's random UUID and
+            # the code shown by its local dashboard is the recovery proof.
 
     db.query(DevicePairing).filter(
         DevicePairing.device_uuid == device_uuid,
