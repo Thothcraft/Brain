@@ -129,7 +129,7 @@ Use one Railway project containing:
 
 - a PostgreSQL service;
 - the Brain service from the `Brain` repository;
-- optionally the ResearchPortal service if it is also hosted on Railway.
+- optionally the thothHUB service if it is also hosted on Railway.
 
 For Brain, Railway detects the repository `Dockerfile`. Generate a public HTTPS domain under Brain → Settings → Networking. Railway exposes `RAILWAY_PUBLIC_DOMAIN`; the webhook URL will be:
 
@@ -183,7 +183,7 @@ python server/setup_stripe.py
 
 It exits nonzero and lists any missing required identifiers.
 
-## 6. Connect ResearchPortal to Brain
+## 6. Connect thothHUB to Brain
 
 On the Portal deployment set one server-side variable:
 

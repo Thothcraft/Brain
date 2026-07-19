@@ -93,6 +93,31 @@ class DeviceRegisterRequest(BaseModel):
         except ValueError:
             raise ValueError('Invalid IP address format')
 
+
+class DevicePairingStartRequest(BaseModel):
+    device_id: str
+    device_name: Optional[str] = None
+    device_type: str = "thoth"
+    hardware_info: Optional[Dict[str, Any]] = None
+
+    @validator('device_id')
+    def validate_pairing_device_id(cls, value):
+        cleaned = str(value or '').strip()
+        if len(cleaned) < 3 or len(cleaned) > 255:
+            raise ValueError('Device ID must be between 3 and 255 characters')
+        return cleaned
+
+
+class DevicePairingClaimRequest(BaseModel):
+    code: str
+
+    @validator('code')
+    def validate_pairing_code(cls, value):
+        cleaned = ''.join(character for character in str(value or '').upper() if character.isalnum())
+        if len(cleaned) != 8:
+            raise ValueError('Pairing code must contain 8 characters')
+        return cleaned
+
 class DeviceStatusRequest(BaseModel):
     status: str
     battery_level: Optional[int] = None

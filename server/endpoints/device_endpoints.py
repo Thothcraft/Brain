@@ -6,6 +6,8 @@ It handles the communication between Thoth devices and the Brain server.
 """
 
 import json
+import hashlib
+import secrets
 import time
 import logging
 import os
@@ -21,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, 
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 
-from server.db import get_db, Device, User, File, DeviceFile, DeviceDeployment, DeviceCaptureChunk, DeviceCommand
+from server.db import get_db, Device, DevicePairing, User, File, DeviceFile, DeviceDeployment, DeviceCaptureChunk, DeviceCommand
 from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.calibration import REGIONS as CALIBRATION_REGIONS, derive_thresholds
@@ -31,7 +33,9 @@ from .models import (
     DeviceStatusRequest, 
     DeviceResponse, 
     StandardResponse,
-    DeviceHeartbeatRequest
+    DeviceHeartbeatRequest,
+    DevicePairingStartRequest,
+    DevicePairingClaimRequest,
 )
 
 # Set up logging
@@ -42,6 +46,19 @@ router = APIRouter(prefix="/device", tags=["devices"])
 # Cache for device authentication tokens
 device_auth_cache = {}
 DEVICE_ONLINE_TIMEOUT_SECONDS = max(30, int(os.getenv("DEVICE_ONLINE_TIMEOUT_SECONDS", "90")))
+PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+PAIRING_TTL_MINUTES = max(2, min(30, int(os.getenv("DEVICE_PAIRING_TTL_MINUTES", "10"))))
+
+
+def _pairing_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _normalized_device_uuid(value: str) -> str:
+    try:
+        return str(uuid_lib.UUID(value))
+    except (ValueError, AttributeError):
+        return str(uuid_lib.uuid5(uuid_lib.NAMESPACE_DNS, value))
 
 
 def _expire_stale_devices(db: Session, user_id: Optional[int] = None) -> int:
@@ -716,6 +733,165 @@ def _apply_inventory_snapshot(device: Device, user_id: int, request: DeviceHeart
     db.commit()
     return True
 
+@router.post("/pairing/start", response_model=Dict[str, Any])
+async def start_device_pairing(
+    request: DevicePairingStartRequest,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Create a short-lived code that can be claimed from thothHUB."""
+    now = datetime.utcnow()
+    device_uuid = _normalized_device_uuid(request.device_id)
+    existing_device = db.query(Device).filter(Device.device_uuid == device_uuid).first()
+    if existing_device and existing_device.last_seen is not None:
+        raise HTTPException(status_code=409, detail="This device is already paired. Detach it in thothHUB before pairing it again.")
+
+    db.query(DevicePairing).filter(
+        DevicePairing.device_uuid == device_uuid,
+        DevicePairing.status == "pending",
+    ).update({DevicePairing.status: "expired"}, synchronize_session=False)
+
+    pairing_code = None
+    for _attempt in range(8):
+        candidate = ''.join(secrets.choice(PAIRING_CODE_ALPHABET) for _ in range(8))
+        if not db.query(DevicePairing).filter(DevicePairing.code_hash == _pairing_hash(candidate)).first():
+            pairing_code = candidate
+            break
+    if pairing_code is None:
+        raise HTTPException(status_code=503, detail="Unable to allocate a pairing code")
+
+    pairing_secret = secrets.token_urlsafe(32)
+    expires_at = now + timedelta(minutes=PAIRING_TTL_MINUTES)
+    pairing = DevicePairing(
+        device_uuid=device_uuid,
+        device_name=(request.device_name or f"Thoth-{device_uuid[:8]}")[:255],
+        device_type=(request.device_type or "thoth")[:50],
+        hardware_info=json.dumps(request.hardware_info or {}),
+        code_hash=_pairing_hash(pairing_code),
+        secret_hash=_pairing_hash(pairing_secret),
+        status="pending",
+        created_at=now,
+        expires_at=expires_at,
+    )
+    db.add(pairing)
+    db.commit()
+    return {
+        "success": True,
+        "status": "pending",
+        "code": pairing_code,
+        "pairing_secret": pairing_secret,
+        "device_id": device_uuid,
+        "expires_at": expires_at.replace(tzinfo=timezone.utc).isoformat(),
+        "expires_in": PAIRING_TTL_MINUTES * 60,
+    }
+
+
+@router.get("/pairing/status", response_model=Dict[str, Any])
+async def device_pairing_status(
+    pairing_secret: Optional[str] = Header(None, alias="X-Pairing-Secret"),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Let only the initiating device exchange its secret for a device JWT."""
+    if not pairing_secret:
+        raise HTTPException(status_code=401, detail="Pairing secret is required")
+    pairing = db.query(DevicePairing).filter(
+        DevicePairing.secret_hash == _pairing_hash(pairing_secret)
+    ).first()
+    if not pairing:
+        raise HTTPException(status_code=404, detail="Pairing session not found")
+    if pairing.expires_at <= datetime.utcnow():
+        pairing.status = "expired"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Pairing code expired")
+    if pairing.status == "pending":
+        return {"success": True, "status": "pending", "expires_at": pairing.expires_at.replace(tzinfo=timezone.utc).isoformat()}
+    if pairing.status != "claimed" or not pairing.user_id:
+        raise HTTPException(status_code=409, detail="Pairing session is no longer active")
+
+    user = db.query(User).filter(User.userId == pairing.user_id).first()
+    device = db.query(Device).filter(
+        Device.device_uuid == pairing.device_uuid,
+        Device.userId == pairing.user_id,
+    ).first()
+    if not user or not device:
+        raise HTTPException(status_code=409, detail="Paired account or device is unavailable")
+    from server.auth import create_access_token
+    token = create_access_token(
+        data={
+            "sub": str(user.userId),
+            "username": user.username,
+            "email": user.email,
+            "email_verified": bool(user.email_verified),
+            "role": user.role,
+            "scopes": ["device"],
+            "device_id": pairing.device_uuid,
+        },
+        expires_delta=timedelta(days=int(os.getenv("DEVICE_TOKEN_EXPIRE_DAYS", "3650"))),
+    )
+    return {
+        "success": True,
+        "status": "paired",
+        "access_token": token,
+        "token_type": "bearer",
+        "device_id": pairing.device_uuid,
+        "device_name": device.device_name,
+        "user": {"user_id": user.userId, "username": user.username, "email": user.email},
+    }
+
+
+@router.post("/pairing/claim", response_model=Dict[str, Any])
+async def claim_device_pairing(
+    request: DevicePairingClaimRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Bind the physical device represented by a one-time code to this user."""
+    now = datetime.utcnow()
+    pairing = db.query(DevicePairing).filter(
+        DevicePairing.code_hash == _pairing_hash(request.code),
+        DevicePairing.status == "pending",
+        DevicePairing.expires_at > now,
+    ).first()
+    if not pairing:
+        raise HTTPException(status_code=404, detail="Pairing code is invalid or expired")
+
+    device = db.query(Device).filter(Device.device_uuid == pairing.device_uuid).first()
+    if device and device.userId != current_user.userId:
+        if device.last_seen is not None:
+            raise HTTPException(status_code=409, detail="This device belongs to another account and must be detached there first")
+        # A claim that was never completed by a physical device must not
+        # permanently squat its UUID. A fresh code can safely replace it.
+        device.userId = current_user.userId
+        device.device_name = pairing.device_name
+        device.device_type = pairing.device_type
+        device.hardware_info = pairing.hardware_info
+    if not device:
+        device = Device(
+            userId=current_user.userId,
+            device_uuid=pairing.device_uuid,
+            device_name=pairing.device_name,
+            device_type=pairing.device_type,
+            hardware_info=pairing.hardware_info,
+            approved=True,
+            online=False,
+            last_seen=None,
+        )
+        db.add(device)
+    else:
+        device.approved = True
+        device.device_name = device.device_name or pairing.device_name
+    pairing.user_id = current_user.userId
+    pairing.status = "claimed"
+    pairing.claimed_at = now
+    db.commit()
+    return {
+        "success": True,
+        "status": "paired",
+        "device_id": pairing.device_uuid,
+        "device_name": device.device_name,
+        "message": f"{device.device_name} is paired with thothHUB",
+    }
+
+
 @router.post("/register", response_model=DeviceResponse)
 async def register_device(
     request: DeviceRegisterRequest,
@@ -749,7 +925,13 @@ async def register_device(
             if authorization.lower().startswith("bearer "):
                 token = authorization[7:]
             current_user = await get_user_from_token(token)
+            if "device" in (current_user.get("scopes", []) or []):
+                token_device_id = current_user.get("device_id")
+                if not token_device_id or token_device_id != _normalized_device_uuid(request.device_id):
+                    raise HTTPException(status_code=403, detail="Device token does not match this device")
             log_request_start("POST", "/device/register", current_user.userId)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.warning(f"Device auth token invalid: {e}")
             raise HTTPException(

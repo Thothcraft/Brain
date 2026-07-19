@@ -180,7 +180,7 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
         logging.info(f"[Auth] Starting authentication for user: {username}")
         
         # The verified email and username are equivalent login identities for
-        # both the device dashboard and Research Portal.
+        # both the device dashboard and thothHUB.
         identity = str(username or '').strip()
         user = db.query(User).filter(or_(
             User.username == identity,
@@ -279,7 +279,8 @@ async def get_user_from_token(token: str) -> TokenUser:
             "user_id": user_id,
             "userId": user_id,  # Alias for compatibility
             "email": payload.get("email"),
-            "scopes": payload.get("scopes", [])
+            "scopes": payload.get("scopes", []),
+            "device_id": payload.get("device_id"),
         })
     except JWTError as e:
         logging.error(f"[Auth] JWT validation error: {str(e)}")
@@ -322,6 +323,12 @@ def get_current_user(
             token[:10] + '...' if token else None,
         )
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
+        # Device-scoped pairing tokens are accepted only by endpoints that
+        # explicitly use get_user_from_token and validate the device claim.
+        if "device" in (payload.get("scopes") or []):
+            logging.warning("[AUTH] Device-scoped token rejected by user endpoint")
+            raise credentials_exception
         
         # Log the full payload for debugging
         logging.getLogger("lms.server").debug(

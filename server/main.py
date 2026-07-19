@@ -252,11 +252,11 @@ async def redoc_html():
 
 # List of allowed origins for CORS with credentials
 ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # Research Portal local
+    "http://localhost:3000",  # thothHUB local
     "http://localhost:3001",  # Education Portal
     "http://localhost:3002",  # Website
     "https://thoth-frontend-sable.vercel.app",
-    "https://portal-three-rho.vercel.app",  # Research Portal on Vercel
+    "https://portal-three-rho.vercel.app",  # thothHUB on Vercel
     "https://web-production-d7d37.up.railway.app",  # Backend domain
 ]
 

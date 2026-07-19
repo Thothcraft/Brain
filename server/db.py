@@ -488,6 +488,24 @@ class Device(Base):
         }
 
 
+class DevicePairing(Base):
+    """Short-lived handshake used to bind a physical Thoth to thothHUB."""
+    __tablename__ = "device_pairing"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_uuid = Column(String(255), nullable=False, index=True)
+    device_name = Column(String(255), nullable=False)
+    device_type = Column(String(50), nullable=False, default="thoth")
+    hardware_info = Column(Text, nullable=True)
+    code_hash = Column(String(64), nullable=False, unique=True, index=True)
+    secret_hash = Column(String(64), nullable=False, unique=True, index=True)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id", ondelete="CASCADE"), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    claimed_at = Column(DateTime, nullable=True)
+
+
 
 class FileDeviceUpdate(Base):
     """Model representing updates of files across devices."""
@@ -525,7 +543,7 @@ class DeviceFile(Base):
     on_device = Column("on_device", Boolean, default=True)
     on_cloud = Column("on_cloud", Boolean, default=False)
     cloud_file_id = Column("cloud_file_id", Integer, ForeignKey("file.file_id"), nullable=True)
-    upload_requested = Column("upload_requested", Boolean, default=False)  # Set by Research Portal to request upload
+    upload_requested = Column("upload_requested", Boolean, default=False)  # Set by thothHUB to request upload
     last_synced = Column("last_synced", DateTime, default=datetime.utcnow)
     metadata_json = Column("metadata_json", Text, nullable=True)
     

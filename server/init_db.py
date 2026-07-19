@@ -151,6 +151,24 @@ def ensure_product_core_schema():
                 )
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_command_pending ON device_command (device_id, status, created_at)"))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS device_pairing (
+                    id SERIAL PRIMARY KEY,
+                    device_uuid VARCHAR(255) NOT NULL,
+                    device_name VARCHAR(255) NOT NULL,
+                    device_type VARCHAR(50) NOT NULL DEFAULT 'thoth',
+                    hardware_info TEXT,
+                    code_hash VARCHAR(64) NOT NULL UNIQUE,
+                    secret_hash VARCHAR(64) NOT NULL UNIQUE,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    user_id INTEGER REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP NOT NULL,
+                    claimed_at TIMESTAMP
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_pairing_device ON device_pairing (device_uuid, status)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_pairing_expiry ON device_pairing (expires_at)"))
         return True
     except Exception as e:
         logger.error(f"[INIT] Error ensuring product core schema: {e}")
