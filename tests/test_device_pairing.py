@@ -222,3 +222,30 @@ def test_stale_device_can_recover_when_its_previous_token_expired():
 
     assert started["status"] == "pending"
     assert len(started["code"]) == 8
+
+
+def test_stale_device_can_recover_with_the_intended_new_account_token():
+    stale_device = Device(
+        userId=6,
+        device_uuid="device-id",
+        device_name="Old Thoth",
+        device_type="thoth",
+        online=True,
+        last_seen=datetime.utcnow() - timedelta(minutes=5),
+    )
+    database = _Database({Device: [stale_device]})
+    new_owner_token = mock.Mock(userId=7)
+    new_owner_token.get.side_effect = lambda key, default=None: {
+        "scopes": [], "device_id": None,
+    }.get(key, default)
+
+    with mock.patch(
+        "server.endpoints.device_endpoints.get_user_from_token",
+        new=mock.AsyncMock(return_value=new_owner_token),
+    ):
+        started = asyncio.run(start_device_pairing(DevicePairingStartRequest(
+            device_id="device-id",
+            device_name="Recovered Thoth",
+        ), database, "Bearer new-owner-token"))
+
+    assert started["status"] == "pending"
