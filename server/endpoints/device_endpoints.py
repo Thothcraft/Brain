@@ -23,7 +23,10 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, 
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 
-from server.db import get_db, Device, DevicePairing, User, File, DeviceFile, DeviceDeployment, DeviceCaptureChunk, DeviceCommand
+from server.db import (
+    get_db, Device, DevicePairing, User, File, FileDeviceUpdate, DeviceFile,
+    DeviceDeployment, DeviceCaptureChunk, DeviceCommand,
+)
 from server.auth import get_current_user, get_user_from_token
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.calibration import REGIONS as CALIBRATION_REGIONS, derive_thresholds
@@ -59,6 +62,34 @@ def _normalized_device_uuid(value: str) -> str:
         return str(uuid_lib.UUID(value))
     except (ValueError, AttributeError):
         return str(uuid_lib.uuid5(uuid_lib.NAMESPACE_DNS, value))
+
+
+def _transfer_device_ownership(db: Session, device: Device, user_id: int) -> None:
+    """Move a physically re-paired device without exposing its old account state."""
+    if device.userId == user_id:
+        return
+
+    # Inventory, live captures, commands, file links, and deployments are all
+    # scoped to the previous owner. The cloud files themselves remain with that
+    # account; the newly paired device will publish a fresh local inventory.
+    db.query(FileDeviceUpdate).filter(
+        FileDeviceUpdate.deviceId == device.deviceId
+    ).delete(synchronize_session=False)
+    db.query(DeviceFile).filter(
+        DeviceFile.device_id == device.deviceId
+    ).delete(synchronize_session=False)
+    db.query(DeviceCaptureChunk).filter(
+        DeviceCaptureChunk.device_id == device.deviceId
+    ).delete(synchronize_session=False)
+    db.query(DeviceCommand).filter(
+        DeviceCommand.device_id == device.deviceId
+    ).delete(synchronize_session=False)
+    db.query(DeviceDeployment).filter(
+        DeviceDeployment.device_uuid == str(device.device_uuid)
+    ).delete(synchronize_session=False)
+    device.userId = user_id
+    device.online = False
+    device.last_seen = None
 
 
 def _expire_stale_devices(db: Session, user_id: Optional[int] = None) -> int:
@@ -737,13 +768,22 @@ def _apply_inventory_snapshot(device: Device, user_id: int, request: DeviceHeart
 async def start_device_pairing(
     request: DevicePairingStartRequest,
     db: Session = Depends(get_db),
+    authorization: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     """Create a short-lived code that can be claimed from thothHUB."""
     now = datetime.utcnow()
     device_uuid = _normalized_device_uuid(request.device_id)
     existing_device = db.query(Device).filter(Device.device_uuid == device_uuid).first()
-    if existing_device and existing_device.last_seen is not None:
-        raise HTTPException(status_code=409, detail="This device is already paired. Detach it in thothHUB before pairing it again.")
+    if existing_device:
+        if not authorization or not isinstance(authorization, str):
+            raise HTTPException(status_code=401, detail="The current device token is required to re-pair this device")
+        token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+        token_user = await get_user_from_token(token)
+        if token_user.userId != existing_device.userId:
+            raise HTTPException(status_code=403, detail="The current device token does not own this device")
+        if "device" in (token_user.get("scopes", []) or []):
+            if token_user.get("device_id") != device_uuid:
+                raise HTTPException(status_code=403, detail="Device token does not match this device")
 
     db.query(DevicePairing).filter(
         DevicePairing.device_uuid == device_uuid,
@@ -856,11 +896,10 @@ async def claim_device_pairing(
 
     device = db.query(Device).filter(Device.device_uuid == pairing.device_uuid).first()
     if device and device.userId != current_user.userId:
-        if device.last_seen is not None:
-            raise HTTPException(status_code=409, detail="This device belongs to another account and must be detached there first")
-        # A claim that was never completed by a physical device must not
-        # permanently squat its UUID. A fresh code can safely replace it.
-        device.userId = current_user.userId
+        # The short-lived code came directly from the physical device. Claiming
+        # it is the explicit authorization to move an existing UUID to the new
+        # account, including devices whose previous token is still active.
+        _transfer_device_ownership(db, device, current_user.userId)
         device.device_name = pairing.device_name
         device.device_type = pairing.device_type
         device.hardware_info = pairing.hardware_info
@@ -982,19 +1021,21 @@ async def register_device(
             if 'cloud_sync_allowed' not in hardware_info:
                 hardware_info['cloud_sync_allowed'] = True
             
-            # Check if device already exists (by UUID for this user)
             user_id = current_user.userId
+            device_uuid = _normalized_device_uuid(request.device_id)
+
+            # UUID is globally unique. Looking it up with user_id made an
+            # existing device appear absent after re-pairing and caused an
+            # INSERT to fail with device_device_uuid_key instead of returning a
+            # useful ownership response.
             existing_device = db.query(Device).filter(
-                Device.device_uuid == request.device_id,
-                Device.userId == user_id
+                Device.device_uuid == device_uuid
             ).first()
-            
-            # Convert device_id to UUID if it's not already in UUID format
-            try:
-                device_uuid = str(uuid_lib.UUID(request.device_id)) if not isinstance(request.device_id, uuid_lib.UUID) else request.device_id
-            except (ValueError, AttributeError):
-                # If conversion fails, create a UUID from the string
-                device_uuid = str(uuid_lib.uuid5(uuid_lib.NAMESPACE_DNS, request.device_id))
+            if existing_device and existing_device.userId != user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This device is paired with another account. Start pairing on the device and claim its new code in thothHUB.",
+                )
             
             now = datetime.utcnow()
             
@@ -1113,6 +1154,9 @@ async def register_device(
                 "data": {"capture_settings": capture_settings}
             }
             
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception as e:
             db.rollback()
             logger.error(f"Error processing device registration: {str(e)}", exc_info=True)

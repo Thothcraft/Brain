@@ -2,7 +2,12 @@ import asyncio
 from datetime import datetime, timedelta
 from unittest import mock
 
-from server.db import Device, DevicePairing, User
+from fastapi import HTTPException
+
+from server.db import (
+    Device, DeviceCaptureChunk, DeviceCommand, DeviceDeployment, DeviceFile,
+    DevicePairing, FileDeviceUpdate, User,
+)
 from server.endpoints.device_endpoints import (
     claim_device_pairing,
     device_pairing_status,
@@ -27,6 +32,11 @@ class _Query:
                 setattr(record, key, value)
         return len(self.records)
 
+    def delete(self, synchronize_session=False):
+        count = len(self.records)
+        self.records.clear()
+        return count
+
 
 class _Database:
     def __init__(self, records=None):
@@ -48,7 +58,7 @@ def test_device_can_start_and_account_can_claim_pairing():
         device_id="physical-device",
         device_name="Bedroom Thoth",
         hardware_info={"hostname": "thoth"},
-    ), database))
+    ), database, None))
     pairing = database.records[DevicePairing][0]
     # The endpoint stores only hashes; use the returned code by assigning its
     # hash to the in-memory record exactly as a database lookup would.
@@ -85,3 +95,110 @@ def test_only_initiating_device_receives_paired_token():
 
     assert result["status"] == "paired"
     assert result["access_token"] == "device-token"
+
+
+def test_fresh_physical_pairing_moves_an_existing_device_to_the_new_account():
+    now = datetime.utcnow()
+    pairing = DevicePairing(
+        device_uuid="device-id",
+        device_name="Re-paired Thoth",
+        device_type="thoth",
+        hardware_info='{"hostname":"thoth"}',
+        code_hash="code-hash",
+        secret_hash="secret-hash",
+        status="pending",
+        expires_at=now + timedelta(minutes=5),
+    )
+    device = Device(
+        deviceId=3,
+        userId=6,
+        device_uuid="device-id",
+        device_name="Old Thoth",
+        device_type="thoth",
+        online=True,
+        last_seen=now,
+    )
+    database = _Database({
+        DevicePairing: [pairing],
+        Device: [device],
+        DeviceFile: [DeviceFile(device_id=3, user_id=6, filename="radar.bin")],
+        DeviceCaptureChunk: [DeviceCaptureChunk(
+            device_id=3, user_id=6, minute="20260719_0508", chunk_index=0,
+        )],
+        DeviceCommand: [DeviceCommand(
+            device_id=3, user_id=6, command="capture", payload="{}",
+        )],
+        FileDeviceUpdate: [FileDeviceUpdate(fileId=4, deviceId=3)],
+        DeviceDeployment: [DeviceDeployment(
+            deployment_id="deploy-1", device_uuid="device-id", model_id=2,
+            user_id=6, payload="{}",
+        )],
+    })
+    new_owner = User(userId=7, username="new-owner", email="new@example.com", role=0)
+
+    with mock.patch("server.endpoints.device_endpoints._pairing_hash", return_value="code-hash"):
+        result = asyncio.run(claim_device_pairing(
+            DevicePairingClaimRequest(code="PAIRCODE"), new_owner, database,
+        ))
+
+    assert result["status"] == "paired"
+    assert device.userId == 7
+    assert device.device_name == "Re-paired Thoth"
+    assert device.online is False
+    assert device.last_seen is None
+    assert pairing.user_id == 7
+    assert not database.records[DeviceFile]
+    assert not database.records[DeviceCaptureChunk]
+    assert not database.records[DeviceCommand]
+    assert not database.records[FileDeviceUpdate]
+    assert not database.records[DeviceDeployment]
+
+
+def test_active_device_requires_its_current_token_to_start_repairing():
+    active_device = Device(
+        userId=6,
+        device_uuid="device-id",
+        device_name="Old Thoth",
+        device_type="thoth",
+        online=True,
+        last_seen=datetime.utcnow(),
+    )
+    database = _Database({Device: [active_device]})
+
+    try:
+        asyncio.run(start_device_pairing(DevicePairingStartRequest(
+            device_id="device-id",
+            device_name="Re-paired Thoth",
+        ), database, None))
+    except HTTPException as exc:
+        assert exc.status_code == 401
+    else:
+        raise AssertionError("an existing device must not be re-paired without its token")
+
+
+def test_active_device_can_start_repairing_with_its_current_token():
+    active_device = Device(
+        userId=6,
+        device_uuid="device-id",
+        device_name="Old Thoth",
+        device_type="thoth",
+        online=True,
+        last_seen=datetime.utcnow(),
+    )
+    database = _Database({Device: [active_device]})
+    token_user = mock.Mock(userId=6)
+    token_user.get.side_effect = lambda key, default=None: {
+        "scopes": ["device"], "device_id": "device-id",
+    }.get(key, default)
+
+    with mock.patch(
+        "server.endpoints.device_endpoints.get_user_from_token",
+        new=mock.AsyncMock(return_value=token_user),
+    ):
+        started = asyncio.run(start_device_pairing(DevicePairingStartRequest(
+            device_id="device-id",
+            device_name="Re-paired Thoth",
+        ), database, "Bearer current-device-token"))
+
+    assert started["status"] == "pending"
+    assert len(started["code"]) == 8
