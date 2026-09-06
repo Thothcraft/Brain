@@ -1,21 +1,26 @@
 """File management endpoints."""
 
 import base64
-import io
 import json
 import mimetypes
 import os
+import queue
+import re
+import threading
 import time
 import zipfile
+from collections import OrderedDict
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, Iterator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request, status, UploadFile, File as FastAPIFile, Form
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, Request, status, UploadFile, File as FastAPIFile, Form
+from fastapi.responses import StreamingResponse
+from sqlalchemy import or_
+from sqlalchemy.orm import defer, Session
 
-from server.db import get_db
+from server.db import get_db, SessionLocal
 from server.auth import get_current_user
-from server.db import User, File, DeviceFile, Device, DatasetFile, TrainingDataset
+from server.db import User, File, DeviceFile, Device, DeviceCommand, DatasetFile, TrainingDataset
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.utils.error_handler import (
     APIError, handle_api_error, file_error, validation_error, 
@@ -25,6 +30,11 @@ from .models import FileUploadSimpleRequest, FileUploadResponse, PaginatedRespon
 
 router = APIRouter(prefix="/file", tags=["files"])
 SIMPLE_UPLOAD_MAX_BYTES = int(os.getenv("SIMPLE_UPLOAD_MAX_BYTES", str(250 * 1024 * 1024)))
+CONTAINER_CACHE_MAX_BYTES = int(os.getenv("CONTAINER_CACHE_MAX_BYTES", str(128 * 1024 * 1024)))
+CONTAINER_CACHE_TTL_SECONDS = int(os.getenv("CONTAINER_CACHE_TTL_SECONDS", "120"))
+_container_cache: "OrderedDict[tuple[int, str, int], tuple[float, bytes]]" = OrderedDict()
+_container_cache_lock = threading.Lock()
+_container_cache_bytes = 0
 
 
 def _original_filename(stored_filename: str) -> str:
@@ -32,19 +42,145 @@ def _original_filename(stored_filename: str) -> str:
     return parts[-1] if len(parts) >= 4 else stored_filename
 
 
-def _file_content(file_record: File) -> Optional[bytes]:
+def _file_content(file_record: File, storage_client=None) -> Optional[bytes]:
     if file_record.storage_path:
         try:
             from server.utils.supabase_storage import download_file_sync
             path_parts = file_record.storage_path.split('/', 1)
             if len(path_parts) == 2:
                 bucket, path = path_parts
-                success, content = download_file_sync(bucket, path)
+                success, content = download_file_sync(bucket, path, client=storage_client)
                 if success and content:
                     return content
         except Exception as storage_error:
             log_error(f"Failed to download from storage, trying DB: {storage_error}")
     return file_record.content
+
+
+def _container_content(file_record: File) -> Optional[bytes]:
+    """Cache immutable container bytes briefly across metadata/frame requests."""
+    global _container_cache_bytes
+    key = (int(file_record.fileId), str(file_record.storage_path or "db"), int(file_record.size or 0))
+    now = time.monotonic()
+    with _container_cache_lock:
+        cached = _container_cache.get(key)
+        if cached and now - cached[0] <= CONTAINER_CACHE_TTL_SECONDS:
+            _container_cache.move_to_end(key)
+            return cached[1]
+        if cached:
+            _container_cache_bytes -= len(cached[1])
+            del _container_cache[key]
+
+    content = _file_content(file_record)
+    if content is None or len(content) > CONTAINER_CACHE_MAX_BYTES:
+        return content
+
+    with _container_cache_lock:
+        existing = _container_cache.pop(key, None)
+        if existing:
+            _container_cache_bytes -= len(existing[1])
+        _container_cache[key] = (now, content)
+        _container_cache_bytes += len(content)
+        while _container_cache and _container_cache_bytes > CONTAINER_CACHE_MAX_BYTES:
+            _, (_, evicted) = _container_cache.popitem(last=False)
+            _container_cache_bytes -= len(evicted)
+    return content
+
+
+class _StreamingZipWriter:
+    """A non-seekable zip target that applies backpressure to the producer."""
+
+    def __init__(self, chunks: "queue.Queue[object]", cancelled: threading.Event):
+        self.chunks = chunks
+        self.cancelled = cancelled
+
+    def write(self, data: bytes) -> int:
+        if not data:
+            return 0
+        while not self.cancelled.is_set():
+            try:
+                self.chunks.put(bytes(data), timeout=0.25)
+                return len(data)
+            except queue.Full:
+                continue
+        raise BrokenPipeError("Archive download was cancelled")
+
+    def flush(self) -> None:
+        return None
+
+
+def _stream_zip(
+    entries: list[tuple[int, str]],
+    record_loader: Optional[Callable[[int], Optional[File]]] = None,
+) -> Iterator[bytes]:
+    """Build a ZIP concurrently so clients receive data as files are fetched."""
+    chunks: "queue.Queue[object]" = queue.Queue(maxsize=16)
+    cancelled = threading.Event()
+    finished = object()
+
+    def produce() -> None:
+        writer = _StreamingZipWriter(chunks, cancelled)
+        archive_db = None
+        try:
+            import httpx
+
+            load_record = record_loader
+            if load_record is None:
+                archive_db = SessionLocal()
+                load_record = lambda file_id: archive_db.query(File).filter(File.fileId == file_id).first()
+
+            # Capture files are mostly MP4/BIN/CSV. Storing them avoids a long,
+            # CPU-heavy preparation phase and lets the first bytes leave at once.
+            with httpx.Client(timeout=300.0) as storage_client:
+                with zipfile.ZipFile(writer, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+                    failed_names = []
+                    for file_id, archive_name in entries:
+                        if cancelled.is_set():
+                            break
+                        record = load_record(file_id)
+                        if record is None:
+                            failed_names.append(archive_name)
+                            continue
+                        try:
+                            content = _file_content(record, storage_client=storage_client)
+                            if content is not None:
+                                archive.writestr(archive_name, content)
+                            else:
+                                failed_names.append(archive_name)
+                        finally:
+                            if archive_db is not None:
+                                archive_db.expunge(record)
+                    if failed_names:
+                        archive.writestr(
+                            "_DOWNLOAD_ERRORS.txt",
+                            "The following cloud files could not be retrieved:\n"
+                            + "\n".join(failed_names)
+                            + "\n",
+                        )
+        except BrokenPipeError:
+            pass
+        except Exception as exc:
+            log_error(f"Streaming ZIP failed: {exc}")
+        finally:
+            if archive_db is not None:
+                archive_db.close()
+            while not cancelled.is_set():
+                try:
+                    chunks.put(finished, timeout=0.25)
+                    break
+                except queue.Full:
+                    continue
+
+    producer = threading.Thread(target=produce, name="minute-zip-stream", daemon=True)
+    producer.start()
+    try:
+        while True:
+            chunk = chunks.get()
+            if chunk is finished:
+                break
+            yield chunk  # type: ignore[misc]
+    finally:
+        cancelled.set()
 
 
 def _device_file_for_upload(db: Session, device: Optional[Device], upload_filename: str) -> Optional[DeviceFile]:
@@ -229,6 +365,20 @@ async def upload_file_simple(
         if len(content_bytes) > SIMPLE_UPLOAD_MAX_BYTES:
             max_mb = SIMPLE_UPLOAD_MAX_BYTES // (1024 * 1024)
             raise HTTPException(status_code=413, detail=f"File too large (max {max_mb}MB)")
+
+        owned_device = None
+        if request.device_id:
+            owned_device = db.query(Device).filter(
+                Device.device_uuid == request.device_id,
+                Device.userId == current_user.userId,
+            ).first()
+            if not owned_device:
+                # Do not reveal whether another account owns the identifier.
+                raise HTTPException(status_code=404, detail="Device not found")
+            scopes = current_user.get("scopes", []) if hasattr(current_user, "get") else []
+            token_device_id = current_user.get("device_id") if hasattr(current_user, "get") else None
+            if "device" in (scopes or []) and token_device_id != request.device_id:
+                raise HTTPException(status_code=403, detail="Device token does not match upload device")
         
         # Generate unique filename
         timestamp = int(time.time())
@@ -251,9 +401,7 @@ async def upload_file_simple(
             if existing_file:
                 # Update DeviceFile record even if file already exists
                 try:
-                    device = db.query(Device).filter(
-                        Device.device_uuid == request.device_id
-                    ).first()
+                    device = owned_device
                     
                     if device:
                         device_file = _device_file_for_upload(db, device, request.filename)
@@ -289,6 +437,7 @@ async def upload_file_simple(
             DetectedFileType.IMAGE: "image",
             DetectedFileType.VIDEO: "video",
             DetectedFileType.AUDIO: "audio",
+            DetectedFileType.NUMPY: "numpy",
         }
         data_type = type_to_data_type.get(detection.detected_type, "unknown")
         
@@ -388,9 +537,7 @@ async def upload_file_simple(
         if request.device_id:
             try:
                 # Find the device by UUID
-                device = db.query(Device).filter(
-                    Device.device_uuid == request.device_id
-                ).first()
+                device = owned_device
                 
                 if device:
                     device_file = _device_file_for_upload(db, device, request.filename)
@@ -502,6 +649,18 @@ async def upload_file_multipart(
         
         content_bytes = b''.join(chunks)
         logger.info(f"File read complete: {filename} ({len(content_bytes)} bytes)")
+
+        if device_id:
+            owned_device = db.query(Device).filter(
+                Device.device_uuid == device_id,
+                Device.userId == current_user.userId,
+            ).first()
+            if not owned_device:
+                raise HTTPException(status_code=404, detail="Device not found")
+            scopes = current_user.get("scopes", []) if hasattr(current_user, "get") else []
+            token_device_id = current_user.get("device_id") if hasattr(current_user, "get") else None
+            if "device" in (scopes or []) and token_device_id != device_id:
+                raise HTTPException(status_code=403, detail="Device token does not match upload device")
         
         # Generate unique filename
         timestamp = int(time.time())
@@ -526,6 +685,7 @@ async def upload_file_multipart(
             DetectedFileType.IMAGE: "image",
             DetectedFileType.VIDEO: "video",
             DetectedFileType.AUDIO: "audio",
+            DetectedFileType.NUMPY: "numpy",
         }
         data_type = type_to_data_type.get(detection.detected_type, "unknown")
         
@@ -655,10 +815,11 @@ async def download_minute_bundle(
 ):
     """Download all cloud files for a minute as one zip archive."""
     try:
-        query = db.query(File).filter(
+        query = db.query(File).options(defer(File.content)).filter(
             File.userId == current_user.userId,
             File.filename.like("file_%"),
             File.filename.like(f"%{minute}%"),
+            or_(File.storage_path.isnot(None), File.content.isnot(None)),
         )
         if device_id:
             query = query.filter(File.filename.like(f"file_{device_id}_%"))
@@ -667,34 +828,200 @@ async def download_minute_bundle(
         if not files:
             raise HTTPException(status_code=404, detail="No cloud files found for this minute")
 
-        archive = io.BytesIO()
         used_names = set()
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for file_record in files:
-                content = _file_content(file_record)
-                if content is None:
-                    continue
-                name = _original_filename(file_record.filename)
-                if name in used_names:
-                    name = f"{file_record.fileId}_{name}"
-                used_names.add(name)
-                zf.writestr(name, content)
+        entries = []
+        for file_record in files:
+            name = _original_filename(file_record.filename)
+            if name in used_names:
+                name = f"{file_record.fileId}_{name}"
+            used_names.add(name)
+            entries.append((file_record.fileId, name))
 
-        if not used_names:
+        if not entries:
             raise HTTPException(status_code=404, detail="Minute files have no downloadable content")
 
-        archive.seek(0)
         filename = f"{minute}.zip"
-        return Response(
-            content=archive.getvalue(),
+        return StreamingResponse(
+            _stream_zip(entries),
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Archive-Mode": "streaming",
+            },
         )
     except HTTPException:
         raise
     except Exception as e:
         log_error(f"Error downloading minute bundle: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to download minute bundle")
+
+
+@router.post("/minutes/download")
+async def download_minute_bundles(
+    payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download multiple selected cloud minutes in one ZIP archive."""
+    raw_minutes = payload.get("minutes")
+    if not isinstance(raw_minutes, list):
+        raise HTTPException(status_code=422, detail="minutes must be a list")
+    minutes = list(dict.fromkeys(str(value).strip() for value in raw_minutes if str(value).strip()))
+    if not minutes or len(minutes) > 5000:
+        raise HTTPException(status_code=422, detail="Select between 1 and 5000 minutes")
+    for minute in minutes:
+        if not re.fullmatch(r"\d{8}_\d{4}", minute):
+            raise HTTPException(status_code=422, detail=f"Invalid minute: {minute}")
+
+    query = db.query(File).options(defer(File.content)).filter(
+        File.userId == current_user.userId,
+        File.filename.like("file_%"),
+        or_(File.storage_path.isnot(None), File.content.isnot(None)),
+    )
+    device_id = str(payload.get("device_id") or "").strip()
+    if device_id:
+        query = query.filter(File.filename.like(f"file_{device_id}_%"))
+    records = query.order_by(File.filename.asc()).all()
+
+    used_names: set[str] = set()
+    entries = []
+    minute_order = {minute: index for index, minute in enumerate(minutes)}
+    minute_pattern = re.compile(r"\d{8}_\d{4}")
+    for record in records:
+        original = _original_filename(record.filename)
+        matches = set(minute_pattern.findall(f"{record.filename} {original}")).intersection(minute_order)
+        if not matches:
+            continue
+        minute = min(matches, key=minute_order.__getitem__)
+        archive_name = f"{minute}/{original}"
+        if archive_name in used_names:
+            archive_name = f"{minute}/{record.fileId}_{original}"
+        used_names.add(archive_name)
+        entries.append((record.fileId, archive_name))
+    if not entries:
+        raise HTTPException(status_code=404, detail="Selected minutes have no downloadable cloud files")
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return StreamingResponse(
+        _stream_zip(entries),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="thoth-captures-{timestamp}.zip"',
+            "X-Archive-Mode": "streaming",
+            "X-Archive-Minutes": str(len(minutes)),
+            "X-Archive-Files": str(len(entries)),
+        },
+    )
+
+
+@router.post("/minutes/delete")
+async def delete_minute_bundles(
+    payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Delete selected or all uploaded capture minutes for one owned device."""
+    device_id = str(payload.get("device_id") or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=422, detail="device_id is required")
+    device = db.query(Device).filter(
+        Device.device_uuid == device_id,
+        Device.userId == current_user.userId,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    delete_all = payload.get("all") is True
+    raw_minutes = payload.get("minutes")
+    minutes = list(dict.fromkeys(
+        str(value).strip() for value in (raw_minutes if isinstance(raw_minutes, list) else [])
+        if str(value).strip()
+    ))
+    if not delete_all and not minutes:
+        raise HTTPException(status_code=422, detail="Select minutes or set all=true")
+    if len(minutes) > 5000 or any(not re.fullmatch(r"\d{8}_\d{4}", value) for value in minutes):
+        raise HTTPException(status_code=422, detail="Invalid minute selection")
+
+    local_records = db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId).all()
+    local_minutes = {
+        str(record.filename) for record in local_records
+        if re.fullmatch(r"\d{8}_\d{4}", str(record.filename or ""))
+    }
+    records = db.query(File).filter(
+        File.userId == current_user.userId,
+        File.filename.like(f"file_{device_id}_%"),
+    ).all()
+    minute_pattern = re.compile(r"\d{8}_\d{4}")
+    selected_records = []
+    selected_minutes: set[str] = set(local_minutes if delete_all else local_minutes.intersection(minutes))
+    for record in records:
+        found = set(minute_pattern.findall(f"{record.filename} {_original_filename(record.filename)}"))
+        if not found:
+            continue
+        if delete_all or found.intersection(minutes):
+            selected_records.append(record)
+            selected_minutes.update(found if delete_all else found.intersection(minutes))
+    if not selected_minutes:
+        raise HTTPException(status_code=404, detail="No capture minutes matched")
+
+    file_ids = [record.fileId for record in selected_records]
+    referenced = db.query(DatasetFile).filter(DatasetFile.file_id.in_(file_ids)).first() if file_ids else None
+    if referenced:
+        raise HTTPException(status_code=409, detail="One or more selected files are used by a dataset")
+
+    try:
+        from server.utils.supabase_storage import delete_file as delete_storage_file
+        deleted_records: list[File] = []
+        storage_failures: list[str] = []
+        for record in selected_records:
+            if record.storage_path and "/" in record.storage_path:
+                bucket, storage_key = record.storage_path.split("/", 1)
+                if not await delete_storage_file(bucket, storage_key):
+                    storage_failures.append(_original_filename(record.filename))
+                    continue
+            deleted_records.append(record)
+        deleted_file_ids = [record.fileId for record in deleted_records]
+        if deleted_file_ids:
+            db.query(DeviceFile).filter(DeviceFile.cloud_file_id.in_(deleted_file_ids)).update(
+                {DeviceFile.on_cloud: False, DeviceFile.cloud_file_id: None},
+                synchronize_session=False,
+            )
+        for record in deleted_records:
+            db.delete(record)
+        # Collapse unclaimed delete requests into one latest command. The
+        # device acknowledges this only after all local folders are removed.
+        pending_delete_query = db.query(DeviceCommand).filter(
+            DeviceCommand.device_id == device.deviceId,
+            DeviceCommand.command == "delete_capture_minutes",
+            DeviceCommand.status.in_(["pending", "delivered"]),
+        )
+        for pending_command in pending_delete_query.all():
+            try:
+                pending_payload = json.loads(pending_command.payload or "{}")
+                selected_minutes.update(str(value) for value in (pending_payload.get("minutes") or []))
+            except (TypeError, json.JSONDecodeError):
+                continue
+        pending_delete_query.delete(synchronize_session=False)
+        command = DeviceCommand(
+            device_id=device.deviceId,
+            user_id=current_user.userId,
+            command="delete_capture_minutes",
+            payload=json.dumps({"minutes": sorted(selected_minutes)}, separators=(",", ":")),
+        )
+        db.add(command)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log_error(f"Bulk minute deletion failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to delete capture minutes")
+
+    return {
+        "success": not storage_failures,
+        "minutes": sorted(selected_minutes),
+        "minute_count": len(selected_minutes),
+        "file_count": len(deleted_records),
+        "storage_failures": storage_failures,
+        "device_delete": "pending" if device.online else "queued_until_online",
+    }
 
 
 @router.get("/minute/{minute}/assets")
@@ -725,6 +1052,91 @@ async def list_minute_assets(
             "size": record.size,
         })
     return {"success": True, "minute": minute, "assets": assets}
+
+
+def _minute_container_record(
+    minute: str,
+    device_id: Optional[str],
+    user_id: int,
+    db: Session,
+) -> File:
+    if not re.fullmatch(r"\d{8}_\d{4}", minute):
+        raise HTTPException(status_code=422, detail="Invalid minute")
+    query = db.query(File).filter(
+        File.userId == user_id,
+        File.filename.like(f"%{minute}%"),
+        File.filename.like("%capture.npz"),
+    )
+    if device_id:
+        query = query.filter(File.filename.like(f"file_{device_id}_%"))
+    record = query.order_by(File.uploaded_at.desc()).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Synchronized capture container not found")
+    return record
+
+
+@router.get("/minute/{minute}/container/metadata")
+async def get_minute_container_metadata(
+    minute: str,
+    device_id: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Read safe JSON metadata without exposing NumPy pickle loading."""
+    record = _minute_container_record(minute, device_id, current_user.userId, db)
+    content = _container_content(record)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Container content not available")
+    try:
+        from server.utils.capture_container import metadata
+        return {"success": True, "minute": minute, "metadata": metadata(content)}
+    except (ValueError, KeyError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid capture container: {exc}")
+
+
+@router.get("/minute/{minute}/container/camera/{second_index}")
+async def get_minute_container_camera_frame(
+    minute: str,
+    second_index: int,
+    device_id: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if second_index < 0 or second_index > 3599:
+        raise HTTPException(status_code=422, detail="second_index is out of range")
+    record = _minute_container_record(minute, device_id, current_user.userId, db)
+    content = _container_content(record)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Container content not available")
+    try:
+        from server.utils.capture_container import camera_frame
+        frame = camera_frame(content, second_index)
+    except (ValueError, KeyError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid capture container: {exc}")
+    if not frame:
+        raise HTTPException(status_code=404, detail="No camera frame for this second")
+    return Response(content=frame, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=60"})
+
+
+@router.get("/minute/{minute}/container/csi")
+async def get_minute_container_csi(
+    minute: str,
+    second_index: Optional[int] = Query(None, ge=0, le=3599),
+    limit: int = Query(2400, ge=1, le=10000),
+    device_id: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    record = _minute_container_record(minute, device_id, current_user.userId, db)
+    content = _container_content(record)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Container content not available")
+    try:
+        from server.utils.capture_container import csi_payload
+        payload = csi_payload(content, second_index=second_index, limit=limit)
+        return {"success": True, "minute": minute, **payload}
+    except (ValueError, KeyError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid capture container: {exc}")
 
 
 @router.get("/{file_id}")

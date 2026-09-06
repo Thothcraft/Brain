@@ -12,6 +12,7 @@ from server.endpoints.device_endpoints import (
     claim_device_pairing,
     device_pairing_status,
     start_device_pairing,
+    update_device_identity,
 )
 from server.endpoints.models import DevicePairingClaimRequest, DevicePairingStartRequest
 
@@ -50,6 +51,51 @@ class _Database:
 
     def commit(self):
         pass
+
+    def refresh(self, value):
+        pass
+
+
+def test_identity_endpoint_updates_only_the_authenticated_device():
+    device = Device(userId=7, device_uuid="device-id", device_name="Old name", device_type="thoth")
+    database = _Database({Device: [device]})
+    token_user = mock.Mock(userId=7)
+    token_user.get.side_effect = lambda key, default=None: {
+        "scopes": ["device"], "device_id": "device-id",
+    }.get(key, default)
+
+    with mock.patch(
+        "server.endpoints.device_endpoints.get_user_from_token",
+        new=mock.AsyncMock(return_value=token_user),
+    ):
+        result = asyncio.run(update_device_identity(
+            "device-id", {"device_name": "Bedroom Thoth"}, "Bearer device-token", database,
+        ))
+
+    assert result["device_name"] == "Bedroom Thoth"
+    assert device.device_name == "Bedroom Thoth"
+
+
+def test_identity_endpoint_rejects_a_token_for_another_device():
+    device = Device(userId=7, device_uuid="device-id", device_name="Old name", device_type="thoth")
+    database = _Database({Device: [device]})
+    token_user = mock.Mock(userId=7)
+    token_user.get.side_effect = lambda key, default=None: {
+        "scopes": ["device"], "device_id": "different-device",
+    }.get(key, default)
+
+    with mock.patch(
+        "server.endpoints.device_endpoints.get_user_from_token",
+        new=mock.AsyncMock(return_value=token_user),
+    ):
+        try:
+            asyncio.run(update_device_identity(
+                "device-id", {"device_name": "Bedroom Thoth"}, "Bearer device-token", database,
+            ))
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        else:
+            raise AssertionError("a token for another device must be rejected")
 
 
 def test_device_can_start_and_account_can_claim_pairing():

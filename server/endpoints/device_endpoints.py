@@ -127,6 +127,7 @@ DEFAULT_CAPTURE_SETTINGS = {
     "prediction_label_style": "occupancy",
     "people_count_label_enabled": False,
     "sleep_study_enabled": False,
+    "csi_device_ids": {},
     "calibrations": {},
     "revision": 0,
     "updated_at": None,
@@ -275,6 +276,11 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
         "prediction_label_style": prediction_label_style,
         "people_count_label_enabled": bool(people_count_label),
         "sleep_study_enabled": bool(sleep_study),
+        "csi_device_ids": {
+            str(port): str(device_id).strip()
+            for port, device_id in (source.get("csi_device_ids") or {}).items()
+            if str(port).strip() and str(device_id).strip()
+        } if isinstance(source.get("csi_device_ids"), dict) else {},
         "calibrations": source.get("calibrations") if isinstance(source.get("calibrations"), dict) else {},
         "revision": revision,
         "updated_at": str(source.get("updated_at")) if source.get("updated_at") else None,
@@ -1069,8 +1075,9 @@ async def register_device(
                         detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
                     )
 
-                # Portal/user renames are canonical. Routine device
-                # re-registration must not reset them to the local default.
+                # Only the explicit identity endpoint changes the canonical
+                # user-visible ID. Routine registration must never restore a
+                # generated/default name over a portal edit.
                 device_name = existing_device.device_name or device_name
                 existing_device.device_type = request.device_type or existing_device.device_type
                 existing_device.ip_address = ip_address or existing_device.ip_address
@@ -1382,6 +1389,48 @@ async def list_user_devices(
                 "type": type(e).__name__
             }
         )
+
+
+@router.put("/{device_id}", response_model=Dict[str, Any], include_in_schema=False)
+@router.put("/{device_id}/identity", response_model=Dict[str, Any])
+async def update_device_identity(
+    device_id: str,
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Persist the user-editable device identifier/name.
+
+    The hardware UUID remains stable so existing files, tokens, and capture
+    relationships do not break when a researcher changes the visible ID.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+    current_user = await get_user_from_token(token)
+    scopes = current_user.get("scopes", []) or []
+    if "device" in scopes:
+        token_device_id = current_user.get("device_id")
+        if not token_device_id or _normalized_device_uuid(str(token_device_id)) != _normalized_device_uuid(device_id):
+            raise HTTPException(status_code=403, detail="Device token does not match this device")
+    device = db.query(Device).filter(
+        Device.device_uuid == device_id,
+        Device.userId == current_user.userId,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    editable_id = str(payload.get("device_id") or payload.get("device_name") or "").strip()
+    if not 1 <= len(editable_id) <= 255:
+        raise HTTPException(status_code=422, detail="Device ID must be between 1 and 255 characters")
+    device.device_name = editable_id
+    db.commit()
+    db.refresh(device)
+    return {
+        "success": True,
+        "device_uuid": device.device_uuid,
+        "device_id": device.device_name,
+        "device_name": device.device_name,
+    }
 
 @router.put("/{device_id}/status")
 async def update_device_status(
@@ -1744,6 +1793,12 @@ async def device_heartbeat(
             if authorization.lower().startswith("bearer "):
                 token = authorization[7:]
             current_user = await get_user_from_token(token)
+            if "device" in (current_user.get("scopes", []) or []):
+                raw_token_device_id = current_user.get("device_id")
+                if not raw_token_device_id or _normalized_device_uuid(str(raw_token_device_id)) != _normalized_device_uuid(request.device_id):
+                    raise HTTPException(status_code=403, detail="Device token does not match this device")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.warning(f"Device heartbeat auth failed: {e}")
             raise HTTPException(
@@ -1853,6 +1908,7 @@ async def device_heartbeat(
             "message": "Heartbeat received",
             "data": {
                 "device_id": str(request.device_id),
+                "device_name": device.device_name,
                 "timestamp": now.isoformat(),
                 "capture_settings": capture_settings,
                 "pending_uploads": pending_uploads,
@@ -1950,8 +2006,8 @@ async def upsert_live_capture_chunk(
         frame_count = int(payload.get("chunk_frames") or payload.get("frame_count") or 10)
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="chunk_index and frame_count must be integers")
-    if chunk_index < 0 or frame_count != 10:
-        raise HTTPException(status_code=422, detail="live chunks require exactly 10 frames")
+    if chunk_index < 0 or not 1 <= frame_count <= 10000:
+        raise HTTPException(status_code=422, detail="live chunks require a positive bounded sample count")
 
     current_minute = db.query(DeviceCaptureChunk.minute).filter(
         DeviceCaptureChunk.device_id == device.deviceId
@@ -2137,6 +2193,92 @@ async def update_device_capture_settings(
         "message": "Capture settings updated",
         "device_id": device_uuid,
         "capture_settings": settings,
+    }
+
+
+@router.patch("/{device_uuid}/captures/{minute}/labels", response_model=Dict[str, Any])
+async def update_device_capture_labels(
+    device_uuid: str,
+    minute: str,
+    payload: Dict[str, Any] = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Update a minute's labels and queue the same atomic change on its device."""
+    device = db.query(Device).filter(
+        Device.device_uuid == device_uuid,
+        Device.userId == current_user.userId,
+    ).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not MINUTE_DIR_RE.fullmatch(minute):
+        raise HTTPException(status_code=422, detail="minute must use YYYYMMDD_HHMM")
+    raw_labels = payload.get("labels")
+    if isinstance(raw_labels, str):
+        values = raw_labels.split(",")
+    elif isinstance(raw_labels, list):
+        values = raw_labels
+    else:
+        raise HTTPException(status_code=422, detail="labels must be a list or comma-separated string")
+    labels: list[str] = []
+    for value in values:
+        label = " ".join(str(value or "").replace("/", "_").replace("\\", "_").split())
+        if label and label not in labels:
+            labels.append(label)
+    if len(labels) > 100 or any(len(label) > 255 for label in labels):
+        raise HTTPException(status_code=422, detail="Too many labels or label too long")
+
+    records = db.query(DeviceFile).filter(
+        DeviceFile.device_id == device.deviceId,
+        DeviceFile.filename == minute,
+    ).all()
+    if not records:
+        raise HTTPException(status_code=404, detail="Capture minute not found")
+    for record in records:
+        try:
+            metadata = json.loads(record.metadata_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        metadata["labels"] = labels
+        metadata["label"] = labels[0] if labels else None
+        record.metadata_json = json.dumps(metadata, separators=(",", ":"))
+
+    cloud_records = db.query(File).filter(
+        File.userId == current_user.userId,
+        File.filename.like(f"file_{device_uuid}_%"),
+        File.filename.like(f"%{minute}%"),
+    ).all()
+    for record in cloud_records:
+        try:
+            metadata = json.loads(record.file_hash or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        metadata["labels"] = labels
+        metadata["primary_label"] = labels[0] if labels else ""
+        record.file_hash = json.dumps(metadata, separators=(",", ":"))
+
+    db.query(DeviceCommand).filter(
+        DeviceCommand.device_id == device.deviceId,
+        DeviceCommand.command == "update_capture_labels",
+        DeviceCommand.status.in_(["pending", "delivered"]),
+        DeviceCommand.payload.like(f'%"minute":"{minute}"%'),
+    ).delete(synchronize_session=False)
+    command = DeviceCommand(
+        device_id=device.deviceId,
+        user_id=current_user.userId,
+        command="update_capture_labels",
+        payload=json.dumps({"minute": minute, "labels": labels}, separators=(",", ":")),
+    )
+    db.add(command)
+    db.commit()
+    db.refresh(command)
+    return {
+        "success": True,
+        "device_id": device_uuid,
+        "minute": minute,
+        "labels": labels,
+        "sync_status": "pending" if device.online else "queued_until_online",
+        "command": command.to_dict(),
     }
 
 

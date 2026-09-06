@@ -308,22 +308,31 @@ def upload_file_sync(
         return False, str(e)
 
 
-def download_file_sync(bucket: str, path: str) -> Tuple[bool, Optional[bytes]]:
+def download_file_sync(
+    bucket: str,
+    path: str,
+    client: Optional[httpx.Client] = None,
+) -> Tuple[bool, Optional[bytes]]:
     """Synchronous version of download_file."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return False, None
     
     try:
-        with httpx.Client(timeout=300.0) as client:
+        if client is not None:
             response = client.get(
                 f"{get_storage_url()}/object/{bucket}/{path}",
                 headers=get_supabase_headers()
             )
-            
-            if response.status_code == 200:
-                return True, response.content
-            else:
-                return False, None
+        else:
+            with httpx.Client(timeout=300.0) as temporary_client:
+                response = temporary_client.get(
+                    f"{get_storage_url()}/object/{bucket}/{path}",
+                    headers=get_supabase_headers()
+                )
+
+        if response.status_code == 200:
+            return True, response.content
+        return False, None
                 
     except Exception as e:
         logger.error(f"Download error: {e}")
