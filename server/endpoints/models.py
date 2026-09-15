@@ -33,6 +33,8 @@ class DeviceFileInfo(BaseModel):
     labels: Optional[List[str]] = None
     occupancy: Optional[Dict[str, Any]] = None
     progress: Optional[Dict[str, Any]] = None
+    model_predictions: Optional[List[Dict[str, Any]]] = None
+    upload: Optional[Dict[str, Any]] = None
 
 class DeviceHeartbeatRequest(BaseModel):
     device_id: str
@@ -324,14 +326,8 @@ class StandardResponse(BaseModel):
 class CaptureSettings(BaseModel):
     labels: List[str] = Field(default_factory=list)
     sensors: Dict[str, bool] = Field(default_factory=dict)
-    radar_detection_threshold_normalized: float = Field(default=0.45, ge=0.05, le=0.95)
-    occupancy_threshold_percent: float = 50.0
-    auto_occupancy_label_enabled: bool = True
     chunk_seconds: float = 10.0
     system_mode: str = "balanced"
-    occupancy_vote_chunks: int = 1
-    prediction_label_style: str = "occupancy"
-    people_count_label_enabled: bool = False
     sleep_study_enabled: bool = False
     revision: int = 0
     updated_at: Optional[str] = None

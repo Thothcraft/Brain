@@ -7,7 +7,7 @@ This module handles:
 - Model evaluation and deployment
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Body, Response
+from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks, Body, Response, UploadFile, File as FormFile, Form
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -19,12 +19,16 @@ import asyncio
 import random
 import logging
 import zipfile
+import hashlib
+import tempfile
+from pathlib import Path
 
 from sqlalchemy.orm import selectinload, load_only
 
-from ..db import get_db, TrainingDataset, DatasetFile, TrainingJob, TrainedModel, File, PreprocessingPipeline
+from ..db import get_db, TrainingDataset, DatasetFile, TrainingJob, TrainedModel, File, PreprocessingPipeline, Device, DeviceDeployment, DeviceCommand
 from ..auth import get_current_user
 from .models import StandardResponse
+from ..model_contract import validate_torchscript, ModelContractError
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -1383,12 +1387,8 @@ async def list_trained_models(
             "operation": "list_models",
             "status": "completed"
         }
-        
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
         logger.error(f"[MODELS] Error listing models: {str(e)}")
-        # Return a consistent error response structure
         return {
             "success": False,
             "models": [],
@@ -1398,6 +1398,76 @@ async def list_trained_models(
             "error": str(e)
         }
 
+
+@router.post("/models/upload", response_model=Dict[str, Any])
+async def upload_torchscript_model(
+    model: UploadFile = FormFile(...),
+    metadata: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Validate and store a self-contained user TorchScript classifier."""
+    suffix = Path(model.filename or '').suffix.lower()
+    if suffix not in {'.pt', '.pth'}:
+        raise HTTPException(status_code=422, detail='Model filename must end in .pt or .pth')
+    try:
+        parsed_metadata = json.loads(metadata)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f'Invalid metadata JSON: {exc}') from exc
+    raw = await model.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail='Model artifact is empty')
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
+            temporary.write(raw)
+            temporary_path = Path(temporary.name)
+        validated = validate_torchscript(temporary_path, parsed_metadata)
+    except ModelContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        if temporary_path:
+            temporary_path.unlink(missing_ok=True)
+    digest = hashlib.sha256(raw).hexdigest()
+    record = TrainedModel(
+        user_id=current_user.userId,
+        job_id=None,
+        name=validated['name'],
+        architecture='torchscript',
+        accuracy=None,
+        size_bytes=len(raw),
+        model_data=raw,
+        config=json.dumps({'source': 'user-upload', 'model_hash': digest, 'metadata': validated}),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {'success': True, 'model': record.to_dict(), 'validation': {'status': 'valid', 'output_dimension': validated['output_dimension'], 'model_hash': digest}}
+
+
+@router.get("/models/{model_id}/metadata", response_model=Dict[str, Any])
+async def get_model_metadata(
+    model_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Return the validated contract for one model owned by the account."""
+    record = db.query(TrainedModel).filter(
+        TrainedModel.id == model_id,
+        TrainedModel.user_id == current_user.userId,
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Model not found")
+    try:
+        config = json.loads(record.config or "{}")
+    except (TypeError, json.JSONDecodeError):
+        config = {}
+    return {
+        "success": True,
+        "model_id": record.id,
+        "model_hash": config.get("model_hash"),
+        "metadata": config.get("metadata"),
+    }
 
 @router.delete("/models/{model_id}", response_model=StandardResponse)
 async def delete_model(
@@ -1599,8 +1669,6 @@ async def deploy_model_to_device(
     """
     from ..db import Device, DeviceDeployment
     import base64
-    _require_ai_model_plan(current_user)
-
     try:
         # Validate model
         model = db.query(TrainedModel).filter(
@@ -1624,6 +1692,11 @@ async def deploy_model_to_device(
 
         # Build deployment config
         deployment_id = str(uuid.uuid4())
+        stored_config = json.loads(model.config) if model.config else {}
+        metadata = stored_config.get('metadata') if isinstance(stored_config, dict) else None
+        model_hash = stored_config.get('model_hash') if isinstance(stored_config, dict) else None
+        if not isinstance(metadata, dict) or metadata.get('schema') != 'thoth-model/v1':
+            raise HTTPException(status_code=400, detail='Only validated thoth-model/v1 TorchScript models can be deployed')
         deploy_config = request.config or {}
         deploy_config.update({
             "deployment_id": deployment_id,
@@ -1653,6 +1726,8 @@ async def deploy_model_to_device(
             "model_name": model.name,
             "model_type": model.architecture or "unknown",
             "model_data": base64.b64encode(model.model_data).decode("utf-8"),
+            "model_hash": model_hash or hashlib.sha256(model.model_data).hexdigest(),
+            "metadata": metadata,
             "config": deploy_config,
         }
 
@@ -1691,7 +1766,9 @@ async def deploy_pretrained_model_to_device(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Queue a built-in pretrained model for deployment."""
+    """Built-in semantic detectors were removed in favor of user models."""
+    raise HTTPException(status_code=410, detail="Built-in pretrained models are no longer available; upload a TorchScript model")
+    """Legacy implementation retained below for database migration reference."""
     from ..db import Device, DeviceDeployment
     import base64
     _require_ai_model_plan(current_user)
@@ -1816,6 +1893,8 @@ async def list_deployments(
                 "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
                 "delivered_at": deployment.delivered_at.isoformat() if deployment.delivered_at else None,
                 "declined_at": deployment.declined_at.isoformat() if deployment.declined_at else None,
+                "runtime_model_id": payload.get("runtime_model_id"),
+                "activation": payload.get("activation"),
             })
         
         return {
@@ -1826,6 +1905,47 @@ async def list_deployments(
     except Exception as e:
         logger.error(f"Failed to list deployments: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/models/deployments/{deployment_id}/activation", response_model=Dict[str, Any])
+async def set_deployment_activation(
+    deployment_id: str,
+    body: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Queue remote enable/disable for a delivered user model."""
+    deployment = db.query(DeviceDeployment).filter(
+        DeviceDeployment.deployment_id == deployment_id,
+        DeviceDeployment.user_id == current_user.userId,
+    ).first()
+    if not deployment:
+        raise HTTPException(status_code=404, detail='Deployment not found')
+    if deployment.status != 'delivered':
+        raise HTTPException(status_code=409, detail='Model must be delivered before activation can change')
+    try:
+        deployment_payload = json.loads(deployment.payload or '{}')
+    except (TypeError, json.JSONDecodeError):
+        deployment_payload = {}
+    runtime_model_id = deployment_payload.get('runtime_model_id')
+    if not runtime_model_id:
+        raise HTTPException(status_code=409, detail='Device has not reported its local model id')
+    device = db.query(Device).filter(Device.device_uuid == deployment.device_uuid, Device.userId == current_user.userId).first()
+    if not device:
+        raise HTTPException(status_code=404, detail='Device not found')
+    enabled = bool(body.get('enabled'))
+    command = DeviceCommand(
+        device_id=device.deviceId,
+        user_id=current_user.userId,
+        command='enable_model' if enabled else 'disable_model',
+        payload=json.dumps({'model_id': runtime_model_id, 'deployment_id': deployment_id}, separators=(',', ':')),
+    )
+    db.add(command)
+    deployment_payload['activation'] = {'requested': enabled, 'status': 'pending', 'updated_at': datetime.utcnow().isoformat()}
+    deployment.payload = json.dumps(deployment_payload)
+    db.commit()
+    db.refresh(command)
+    return {'success': True, 'deployment_id': deployment_id, 'enabled': enabled, 'command': command.to_dict()}
 
 
 @router.get("/models/pending-deployments")

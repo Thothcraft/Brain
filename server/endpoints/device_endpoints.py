@@ -116,22 +116,47 @@ DEFAULT_CAPTURE_SETTINGS = {
         "esp32_csi": True,
         "sense_hat": True,
     },
-    "radar_detection_threshold_normalized": 0.45,
-    "occupancy_threshold_percent": 50.0,
-    "yellow_threshold_percent": 20.0,
-    "green_threshold_percent": 60.0,
-    "auto_occupancy_label_enabled": True,
     "chunk_seconds": 10.0,
     "system_mode": "balanced",
-    "occupancy_vote_chunks": 1,
-    "prediction_label_style": "occupancy",
-    "people_count_label_enabled": False,
     "sleep_study_enabled": False,
     "csi_device_ids": {},
     "calibrations": {},
     "revision": 0,
     "updated_at": None,
 }
+UPLOAD_STATES = ('queued', 'preparing', 'uploading', 'finalizing', 'completed', 'failed')
+UPLOAD_TRANSITIONS = {
+    'queued': {'preparing', 'failed'},
+    'preparing': {'uploading', 'finalizing', 'failed'},
+    'uploading': {'uploading', 'finalizing', 'failed'},
+    'finalizing': {'completed', 'failed'},
+    'completed': set(),
+    'failed': {'queued', 'preparing'},
+}
+
+
+def _record_upload_state(record: DeviceFile, state: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        metadata = json.loads(record.metadata_json or '{}')
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    now = datetime.now(timezone.utc).isoformat()
+    previous = metadata.get('upload') if isinstance(metadata.get('upload'), dict) else {}
+    upload = {
+        **previous,
+        'state': state,
+        'bytes_total': max(0, int((payload or {}).get('bytes_total', previous.get('bytes_total', record.size or 0)) or 0)),
+        'bytes_uploaded': max(0, int((payload or {}).get('bytes_uploaded', previous.get('bytes_uploaded', 0)) or 0)),
+        'files_total': max(0, int((payload or {}).get('files_total', previous.get('files_total', 0)) or 0)),
+        'files_uploaded': max(0, int((payload or {}).get('files_uploaded', previous.get('files_uploaded', 0)) or 0)),
+        'error': str((payload or {}).get('error') or '') or None,
+        'updated_at': now,
+    }
+    upload.setdefault('queued_at', now)
+    upload[f'{state}_at'] = now
+    metadata['upload'] = upload
+    record.metadata_json = json.dumps(metadata)
+    return upload
 
 # Rate limiting for device registration (new devices only)
 # Existing device updates are not rate limited as strictly
@@ -217,44 +242,13 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
             sensors[key] = bool(raw_sensors.get(key))
 
     try:
-        radar_value = source.get("radar_detection_threshold_normalized")
-        if radar_value is None and "radar_detection_threshold_db" in source:
-            radar_value = float(source["radar_detection_threshold_db"]) / 10.0
-        radar_threshold = min(0.95, max(0.05, float(radar_value if radar_value is not None else 0.45)))
-    except (TypeError, ValueError):
-        radar_threshold = 0.45
-    try:
-        occupancy_threshold = min(100.0, max(0.0, float(source.get("occupancy_threshold_percent", 50.0))))
-    except (TypeError, ValueError):
-        occupancy_threshold = 50.0
-    try:
-        yellow_threshold = min(100.0, max(0.0, float(source.get("yellow_threshold_percent", 20.0))))
-        green_threshold = min(100.0, max(0.0, float(source.get("green_threshold_percent", 60.0))))
-        if yellow_threshold >= green_threshold:
-            raise ValueError("yellow threshold must be below green threshold")
-    except (TypeError, ValueError):
-        yellow_threshold, green_threshold = 20.0, 60.0
-    auto_label = source.get("auto_occupancy_label_enabled", True)
-    if isinstance(auto_label, str):
-        auto_label = auto_label.strip().lower() in {"1", "true", "yes", "on"}
-    try:
         chunk_seconds = min(30.0, max(2.0, float(source.get("chunk_seconds", 10.0))))
     except (TypeError, ValueError):
         chunk_seconds = 10.0
     system_mode = str(source.get("system_mode") or "balanced").strip().lower()
     if system_mode not in {"responsive", "balanced", "precision"}:
         system_mode = "balanced"
-    try:
-        occupancy_vote_chunks = min(60, max(1, int(source.get("occupancy_vote_chunks", 1))))
-    except (TypeError, ValueError):
-        occupancy_vote_chunks = 1
-    prediction_label_style = str(source.get("prediction_label_style") or "occupancy").strip().lower()
-    if prediction_label_style not in {"occupancy", "presence"}:
-        prediction_label_style = "occupancy"
-    people_count_label = source.get("people_count_label_enabled", False)
     sleep_study = source.get("sleep_study_enabled", False)
-    if isinstance(people_count_label, str):
-        people_count_label = people_count_label.strip().lower() in {"1", "true", "yes", "on"}
     if isinstance(sleep_study, str):
         sleep_study = sleep_study.strip().lower() in {"1", "true", "yes", "on"}
     try:
@@ -265,16 +259,8 @@ def _normalize_capture_settings(value: Optional[Dict[str, Any]]) -> Dict[str, An
     return {
         "labels": labels,
         "sensors": sensors,
-        "radar_detection_threshold_normalized": radar_threshold,
-        "occupancy_threshold_percent": occupancy_threshold,
-        "yellow_threshold_percent": yellow_threshold,
-        "green_threshold_percent": green_threshold,
-        "auto_occupancy_label_enabled": bool(auto_label),
         "chunk_seconds": chunk_seconds,
         "system_mode": system_mode,
-        "occupancy_vote_chunks": occupancy_vote_chunks,
-        "prediction_label_style": prediction_label_style,
-        "people_count_label_enabled": bool(people_count_label),
         "sleep_study_enabled": bool(sleep_study),
         "csi_device_ids": {
             str(port): str(device_id).strip()
@@ -658,11 +644,12 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
             record_metadata = {
                 'labels': [str(item).strip() for item in labels if str(item).strip()],
                 'label': label or (str(labels[0]) if labels else None),
-                'occupancy': field('occupancy') if isinstance(field('occupancy'), dict) else None,
                 'progress': field('progress') if isinstance(field('progress'), dict) else None,
                 'manifest_schema': field('manifest_schema'),
                 'collection_unit': field('collection_unit') or 'minute',
                 'assets': field('assets') if isinstance(field('assets'), list) else [],
+                'model_predictions': field('model_predictions') if isinstance(field('model_predictions'), list) else [],
+                'upload': field('upload') if isinstance(field('upload'), dict) else None,
             }
             
             # Handle timelapse folders
@@ -706,6 +693,12 @@ def _store_device_files(device_id: int, user_id: int, device_uuid: str, files: l
             
             if existing:
                 # Update existing record
+                try:
+                    existing_metadata = json.loads(existing.metadata_json or '{}')
+                except (TypeError, json.JSONDecodeError):
+                    existing_metadata = {}
+                if record_metadata.get('upload') is None and isinstance(existing_metadata.get('upload'), dict):
+                    record_metadata['upload'] = existing_metadata['upload']
                 existing.size = size or 0
                 existing.modified_at = modified_at
                 existing.on_device = True
@@ -1269,6 +1262,8 @@ async def ack_deployment(
     device_id: str,
     deployment_id: str,
     status: str = "delivered",
+    payload: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Device calls this after receiving a deployment.
@@ -1276,9 +1271,14 @@ async def ack_deployment(
     No user auth required — the device uses its own device_id as identity.
     Supports 'delivered', 'declined', and 'pending_confirmation' statuses.
     """
+    if not authorization:
+        raise HTTPException(status_code=401, detail='Authentication required')
+    token = authorization[7:] if authorization.lower().startswith('bearer ') else authorization
+    current_user = await get_user_from_token(token)
     record = db.query(DeviceDeployment).filter(
         DeviceDeployment.deployment_id == deployment_id,
-        DeviceDeployment.device_uuid == device_id
+        DeviceDeployment.device_uuid == device_id,
+        DeviceDeployment.user_id == current_user.userId,
     ).first()
     if not record:
         raise HTTPException(status_code=404, detail="Deployment not found")
@@ -1287,15 +1287,25 @@ async def ack_deployment(
         raise HTTPException(status_code=400, detail="Invalid status. Must be 'delivered', 'declined', or 'pending_confirmation'")
     
     record.status = status
+    if payload.get('runtime_model_id'):
+        try:
+            deployment_payload = json.loads(record.payload or '{}')
+        except (TypeError, json.JSONDecodeError):
+            deployment_payload = {}
+        deployment_payload['runtime_model_id'] = str(payload['runtime_model_id'])
+        record.payload = json.dumps(deployment_payload)
     if status == "delivered":
         record.delivered_at = datetime.utcnow()
+        db.commit()
         logger.info(f"Deployment {deployment_id} acknowledged by device {device_id}")
         return {"success": True, "message": "Deployment acknowledged"}
     elif status == "declined":
         record.declined_at = datetime.utcnow()
+        db.commit()
         logger.info(f"Deployment {deployment_id} declined by device {device_id}")
         return {"success": True, "message": "Deployment declined"}
     else:
+        db.commit()
         logger.info(f"Deployment {deployment_id} received and pending confirmation by device {device_id}")
         return {"success": True, "message": "Deployment received, pending confirmation"}
 
@@ -1936,7 +1946,7 @@ async def create_device_command(
     """Queue a collection command for an owned Thoth device."""
     device = _owned_device(device_uuid, current_user, db)
     command_name = str(payload.get("command") or "").strip()
-    if command_name not in {"start_collection", "stop_collection", "label_current_chunk"}:
+    if command_name not in {"start_collection", "stop_collection", "label_current_chunk", "enable_model", "disable_model"}:
         raise HTTPException(status_code=422, detail="Unsupported device command")
     command_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     command = DeviceCommand(
@@ -1979,6 +1989,28 @@ async def acknowledge_device_command(
     command.status = "completed" if payload.get("success") is not False else "failed"
     command.completed_at = datetime.utcnow()
     command.result = json.dumps(payload, separators=(",", ":"))
+    if command.command in {'enable_model', 'disable_model'}:
+        try:
+            command_payload = json.loads(command.payload or '{}')
+        except (TypeError, json.JSONDecodeError):
+            command_payload = {}
+        deployment = db.query(DeviceDeployment).filter(
+            DeviceDeployment.deployment_id == command_payload.get('deployment_id'),
+            DeviceDeployment.user_id == current_user.userId,
+        ).first()
+        if deployment:
+            try:
+                deployment_payload = json.loads(deployment.payload or '{}')
+            except (TypeError, json.JSONDecodeError):
+                deployment_payload = {}
+            deployment_payload['activation'] = {
+                'requested': command.command == 'enable_model',
+                'enabled': command.command == 'enable_model' if payload.get('success') is not False else None,
+                'status': command.status,
+                'message': payload.get('message'),
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            }
+            deployment.payload = json.dumps(deployment_payload)
     db.commit()
     return {"success": True, "command_id": command_id, "status": command.status}
 
@@ -2019,15 +2051,13 @@ async def upsert_live_capture_chunk(
             DeviceCaptureChunk.device_id == device.deviceId
         ).delete(synchronize_session=False)
 
-    occupancy = payload.get("occupancy") if isinstance(payload.get("occupancy"), dict) else {}
-    label = str(occupancy.get("label") or payload.get("status") or "loading")
-    status_value = label if label in {"occupied", "empty"} else "loading"
-    occupied = status_value == "occupied" if status_value != "loading" else None
+    status_value = str(payload.get("status") or "stored")
+    if status_value not in {"waiting", "collecting", "stored", "error"}:
+        status_value = "stored"
     compact = {
         key: payload.get(key)
         for key in (
-            "occupancy", "location", "score", "people_count", "targets",
-            "labels", "activity_labels", "xy_map", "camera_filename", "captured_at",
+            "labels", "model_predictions", "camera_filename", "captured_at", "error",
         )
         if payload.get(key) is not None
     }
@@ -2045,7 +2075,7 @@ async def upsert_live_capture_chunk(
         )
         db.add(row)
     row.status = status_value
-    row.occupied = occupied
+    row.occupied = None
     row.frame_count = frame_count
     row.payload = json.dumps(compact, separators=(",", ":"))
     row.updated_at = datetime.utcnow()
@@ -2448,35 +2478,13 @@ async def get_device_files(
                     for label in (metadata.get('labels') or [])
                     if str(label).strip()
                 ]
-                occupancy = metadata.get('occupancy') if isinstance(metadata.get('occupancy'), dict) else {}
-                occupancy_label = str(occupancy.get('label') or '')
                 progress = metadata.get('progress') if isinstance(metadata.get('progress'), dict) else {}
-                chunks = progress.get('chunks') if isinstance(progress.get('chunks'), list) else []
-                completed = [
-                    chunk for chunk in chunks
-                    if isinstance(chunk, dict) and str(chunk.get('state') or '') in {'occupied', 'empty'}
-                ]
-                if not labels and occupancy_label in {'occupied', 'empty'}:
-                    labels = [occupancy_label, 'present' if occupancy_label == 'occupied' else 'absent']
-                if not labels and completed:
-                    latest = completed[-1]
-                    latest_state = str(latest.get('state'))
-                    labels = [
-                        str(label).strip()
-                        for label in (latest.get('labels') or [])
-                        if str(label).strip()
-                    ] or [latest_state, 'present' if latest_state == 'occupied' else 'absent']
-                if not labels:
-                    has_captured_chunk = any(
-                        isinstance(chunk, dict) and str(chunk.get('state') or '') != 'waiting'
-                        for chunk in chunks
-                    )
-                    labels = ['processing' if has_captured_chunk else 'no-radar-data']
                 item.update({
-                    'label': metadata.get('label') or labels[0],
+                    'label': metadata.get('label') or (labels[0] if labels else None),
                     'labels': labels,
-                    'occupancy': occupancy or None,
                     'progress': progress or None,
+                    'model_predictions': metadata.get('model_predictions') or [],
+                    'upload': metadata.get('upload'),
                 })
             file_list.append(item)
         
@@ -2522,8 +2530,42 @@ async def request_capture_upload(
     if not _portal_upload_allowed_for_device(device):
         raise HTTPException(status_code=403, detail="Portal-initiated uploads are disabled on this device")
     record.upload_requested = True
+    upload = _record_upload_state(record, 'queued', {'bytes_total': record.size or 0})
     db.commit()
-    return {"success": True, "minute": minute, "upload_requested": True}
+    return {"success": True, "minute": minute, "upload_requested": True, "upload": upload}
+
+
+@router.post("/{device_uuid}/captures/{minute}/upload-progress", response_model=Dict[str, Any])
+async def report_capture_upload_progress(
+    device_uuid: str,
+    minute: str,
+    payload: Dict[str, Any] = Body(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Persist device-reported minute transfer progress in capture metadata."""
+    device = db.query(Device).filter(Device.device_uuid == device_uuid, Device.userId == current_user.userId).first()
+    if not device:
+        raise HTTPException(status_code=404, detail='Device not found')
+    record = db.query(DeviceFile).filter(DeviceFile.device_id == device.deviceId, DeviceFile.filename == minute).first()
+    if not record:
+        raise HTTPException(status_code=404, detail='Capture minute not found')
+    state = str(payload.get('state') or '')
+    if state not in UPLOAD_STATES:
+        raise HTTPException(status_code=422, detail=f"state must be one of {', '.join(UPLOAD_STATES)}")
+    try:
+        metadata = json.loads(record.metadata_json or '{}')
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    previous = (metadata.get('upload') or {}).get('state') if isinstance(metadata.get('upload'), dict) else None
+    if previous and state != previous and state not in UPLOAD_TRANSITIONS.get(previous, set()):
+        raise HTTPException(status_code=409, detail=f'Invalid upload transition from {previous} to {state}')
+    upload = _record_upload_state(record, state, payload)
+    if state == 'completed':
+        record.upload_requested = False
+        record.on_cloud = True
+    db.commit()
+    return {'success': True, 'minute': minute, 'upload': upload}
 
 
 @router.post("/file/{device_file_id}/request-upload")
