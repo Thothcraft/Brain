@@ -1892,7 +1892,7 @@ async def list_deployments(
                 "status": deployment.status,
                 "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
                 "delivered_at": deployment.delivered_at.isoformat() if deployment.delivered_at else None,
-                "declined_at": deployment.declined_at.isoformat() if deployment.declined_at else None,
+                "declined_at": getattr(deployment, "declined_at", None).isoformat() if getattr(deployment, "declined_at", None) else None,
                 "runtime_model_id": payload.get("runtime_model_id"),
                 "activation": payload.get("activation"),
             })
