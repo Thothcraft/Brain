@@ -2484,6 +2484,12 @@ async def get_device_files(
                     'labels': labels,
                     'progress': progress or None,
                     'model_predictions': metadata.get('model_predictions') or [],
+                    'radar_frame_count': (
+                        (metadata.get('outputs') or {}).get('radar', {}).get('sample_count')
+                        if isinstance(metadata.get('outputs'), dict)
+                        and isinstance((metadata.get('outputs') or {}).get('radar'), dict)
+                        else metadata.get('radar_frame_count')
+                    ),
                     'upload': metadata.get('upload'),
                 })
             file_list.append(item)
