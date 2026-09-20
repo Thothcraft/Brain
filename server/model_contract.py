@@ -47,7 +47,7 @@ def normalize_metadata(value: object) -> dict[str, Any]:
             raise ModelContractError("v1 accepts radar and/or csi at most once")
         seen.add(sensor)
         representation = str(item.get("representation") or "").lower()
-        allowed = {"raw_adc", "fft_power"} if sensor == "radar" else {"iq", "magnitude_phase"}
+        allowed = {"raw_adc", "fft_power", "e2_maps"} if sensor == "radar" else {"iq", "magnitude_phase", "e2_grid"}
         if representation not in allowed:
             raise ModelContractError(f"unsupported {sensor} representation")
         count_key = "frames" if sensor == "radar" else "samples"
@@ -72,7 +72,13 @@ def normalize_metadata(value: object) -> dict[str, Any]:
     kind, path = str(output.get("kind") or ""), output.get("path") or []
     if kind not in {"logits", "probabilities"} or not isinstance(path, list) or any(not isinstance(selector, (str, int)) for selector in path):
         raise ModelContractError("output must define logits/probabilities and a valid selector path")
-    return {"schema": MODEL_SCHEMA, "name": name, "version": version, "inputs": inputs, "output": {"kind": kind, "path": path}, "class_names": _names(value.get("class_names") or value.get("labels"))}
+    execution = str(value.get("execution") or "chunk").strip().lower()
+    if execution not in {"chunk", "minute"}:
+        raise ModelContractError("execution must be chunk or minute")
+    aggregation = value.get("aggregation")
+    if aggregation is not None and not isinstance(aggregation, dict):
+        raise ModelContractError("aggregation must be an object")
+    return {"schema": MODEL_SCHEMA, "name": name, "version": version, "inputs": inputs, "output": {"kind": kind, "path": path}, "class_names": _names(value.get("class_names") or value.get("labels")), "execution": execution, "aggregation": aggregation}
 
 
 def validate_torchscript(path: Path, metadata: object) -> dict[str, Any]:

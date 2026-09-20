@@ -31,6 +31,20 @@ def test_complete_v1_metadata_and_dry_run(tmp_path):
     assert [item["sensor"] for item in result["inputs"]] == ["radar", "csi"]
 
 
+def test_minute_execution_and_e2_representations():
+    meta = contract()
+    meta["inputs"] = [
+        {"sensor": "radar", "representation": "e2_maps", "frames": 50, "shape": [1, 50, 2, 24, 24], "fit": "left_pad_latest", "normalization": {"kind": "none"}},
+        {"sensor": "csi", "representation": "e2_grid", "samples": 128, "shape": [1, 128, 52], "fit": "left_pad_latest", "normalization": {"kind": "none"}},
+    ]
+    meta["execution"] = "minute"
+    meta["aggregation"] = {"kind": "top2", "threshold": 0.7}
+    result = normalize_metadata(meta)
+    assert result["execution"] == "minute"
+    assert result["aggregation"] == {"kind": "top2", "threshold": 0.7}
+    assert [item["representation"] for item in result["inputs"]] == ["e2_maps", "e2_grid"]
+
+
 def test_rejects_duplicate_inputs_and_wrong_classes(tmp_path):
     duplicate = contract()
     duplicate["inputs"] = [duplicate["inputs"][0], duplicate["inputs"][0]]
