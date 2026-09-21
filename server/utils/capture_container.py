@@ -62,3 +62,31 @@ def csi_payload(content: bytes, second_index: int | None = None, limit: int = 24
                 break
         return {"samples": rows, "count": len(rows)}
 
+
+def sense_payload(content: bytes, second_index: int | None = None, limit: int = 3600) -> dict[str, Any]:
+    """Parse Sense HAT JSON lines from the container into per-sample dicts."""
+    with open_capture(content) as archive:
+        if "sense_sample_bytes" not in archive.files:
+            return {"samples": [], "count": 0}
+        seconds = archive["sense_sample_second_index"]
+        unix_ns = archive["sense_sample_unix_ns"]
+        payload = archive["sense_sample_bytes"]
+        offsets = archive["sense_sample_offsets"]
+        indexes = range(len(seconds)) if second_index is None else np.flatnonzero(seconds == second_index)
+        rows = []
+        for raw_index in indexes:
+            index = int(raw_index)
+            line = _blob_at(payload, offsets, index).decode("utf-8", errors="replace")
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            row["second_index"] = int(seconds[index])
+            row["unix_ns"] = int(unix_ns[index])
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        return {"samples": rows, "count": len(rows)}
+

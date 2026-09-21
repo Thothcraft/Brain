@@ -1144,6 +1144,27 @@ async def get_minute_container_csi(
         raise HTTPException(status_code=422, detail=f"Invalid capture container: {exc}")
 
 
+@router.get("/minute/{minute}/container/sense")
+async def get_minute_container_sense(
+    minute: str,
+    second_index: Optional[int] = Query(None, ge=0, le=3599),
+    limit: int = Query(3600, ge=1, le=20000),
+    device_id: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    record = _minute_container_record(minute, device_id, current_user.userId, db)
+    content = _container_content(record)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Container content not available")
+    try:
+        from server.utils.capture_container import sense_payload
+        payload = sense_payload(content, second_index=second_index, limit=limit)
+        return {"success": True, "minute": minute, **payload}
+    except (ValueError, KeyError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid capture container: {exc}")
+
+
 @router.get("/{file_id}")
 async def download_file_simple(
     file_id: int,
