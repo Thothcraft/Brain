@@ -186,6 +186,26 @@ def _product_plan(user: Union[User, Any]) -> str:
     return plan if plan in PLAN_DEVICE_LIMITS else "free"
 
 
+def _plan_subject(db: Session, user: Union[User, Any]) -> Union[User, Any]:
+    """Return the persisted ``User`` row for plan/limit checks.
+
+    ``get_user_from_token`` yields a JWT-only ``TokenUser`` that carries no
+    ``plan`` claim, so ``_product_plan`` would report every caller as ``free``
+    and cap them at a single device. Re-load the row so the limit reflects the
+    account's actual plan. Falls back to the given object if it cannot resolve.
+    """
+    if isinstance(user, User):
+        return user
+    user_id = getattr(user, "userId", None) or getattr(user, "user_id", None)
+    if user_id is None:
+        return user
+    try:
+        db_user = db.query(User).filter(User.userId == int(user_id)).first()
+    except Exception:
+        db_user = None
+    return db_user or user
+
+
 def _require_feature(user: Union[User, Any], feature: str) -> None:
     if feature not in PLAN_FEATURES[_product_plan(user)]:
         raise HTTPException(status_code=403, detail=f"{feature.replace('_', ' ').title()} requires a paid plan")
@@ -1060,12 +1080,12 @@ async def register_device(
 
                 if not _can_mark_device_online(
                     db,
-                    current_user,
+                    _plan_subject(db, current_user),
                     current_device_id=existing_device.deviceId
                 ):
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
+                        detail=f"{_product_plan(_plan_subject(db, current_user)).title()} plan device limit reached. Disconnect another device or upgrade your plan."
                     )
 
                 # Only the explicit identity endpoint changes the canonical
@@ -1117,10 +1137,10 @@ async def register_device(
                     "data": {"capture_settings": capture_settings}
                 }
             
-            if not _can_mark_device_online(db, current_user):
+            if not _can_mark_device_online(db, _plan_subject(db, current_user)):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
+                    detail=f"{_product_plan(_plan_subject(db, current_user)).title()} plan device limit reached. Disconnect another device or upgrade your plan."
                 )
             # Create new device record — not yet approved; user must confirm in portal
             new_device = Device(
@@ -1834,12 +1854,12 @@ async def device_heartbeat(
         requested_online = request.online if hasattr(request, 'online') and request.online is not None else True
         if requested_online and not _can_mark_device_online(
             db,
-            current_user,
+            _plan_subject(db, current_user),
             current_device_id=device.deviceId
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
+                detail=f"{_product_plan(_plan_subject(db, current_user)).title()} plan device limit reached. Disconnect another device or upgrade your plan."
             )
 
         update_data = {
