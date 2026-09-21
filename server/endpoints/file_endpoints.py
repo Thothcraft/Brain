@@ -20,7 +20,7 @@ from sqlalchemy.orm import defer, Session
 
 from server.db import get_db, SessionLocal
 from server.auth import get_current_user
-from server.db import User, File, DeviceFile, Device, DeviceCommand, DatasetFile, TrainingDataset
+from server.db import User, File, DeviceFile, Device, DeviceCommand, DatasetFile, TrainingDataset, FileDeviceUpdate
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.utils.error_handler import (
     APIError, handle_api_error, file_error, validation_error, 
@@ -983,6 +983,11 @@ async def delete_minute_bundles(
         if deleted_file_ids:
             db.query(DeviceFile).filter(DeviceFile.cloud_file_id.in_(deleted_file_ids)).update(
                 {DeviceFile.on_cloud: False, DeviceFile.cloud_file_id: None},
+                synchronize_session=False,
+            )
+            # FileDeviceUpdate.fileId is a non-nullable FK with no cascade; clear
+            # those rows first or the File delete violates the constraint -> 500.
+            db.query(FileDeviceUpdate).filter(FileDeviceUpdate.fileId.in_(deleted_file_ids)).delete(
                 synchronize_session=False,
             )
         for record in deleted_records:
