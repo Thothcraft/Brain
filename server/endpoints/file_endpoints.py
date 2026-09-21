@@ -1165,6 +1165,52 @@ async def get_minute_container_sense(
         raise HTTPException(status_code=422, detail=f"Invalid capture container: {exc}")
 
 
+@router.get("/minute/{minute}/container/sensor/{sensor}")
+async def get_minute_container_sensor_window(
+    minute: str,
+    sensor: str,
+    t0: Optional[float] = Query(None),
+    t1: Optional[float] = Query(None),
+    device_id: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Slice a sensor's resampled fixed-Hz grid to a time window.
+
+    ``t0``/``t1`` are seconds offset into the minute (preferred) or absolute
+    unix-ns. Powers the per-minute time-scrubber + per-sensor panels.
+    """
+    record = _minute_container_record(minute, device_id, current_user.userId, db)
+    content = _container_content(record)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Container content not available")
+
+    origin_ns = 0
+    if (t0 is not None and t0 < 1e12) or (t1 is not None and t1 < 1e12):
+        try:
+            from server.utils.capture_container import metadata
+            origin_ns = int((metadata(content).get("timebase") or {}).get("capture_started_unix_ns") or 0)
+        except (ValueError, KeyError, OSError):
+            origin_ns = 0
+        if t0 is not None and t0 < 1e12:
+            t0 = origin_ns + t0 * 1e9
+        if t1 is not None and t1 < 1e12:
+            t1 = origin_ns + t1 * 1e9
+    t0_ns = int(t0) if t0 is not None else None
+    t1_ns = int(t1) if t1 is not None else None
+
+    try:
+        from server.utils.capture_container import sensor_window
+        window = sensor_window(content, sensor, t0_ns=t0_ns, t1_ns=t1_ns)
+        return {"success": True, "minute": minute, "window": window}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unsupported sensor: {sensor}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid capture container: {exc}")
+
+
 @router.get("/{file_id}")
 async def download_file_simple(
     file_id: int,

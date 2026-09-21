@@ -2078,6 +2078,7 @@ async def upsert_live_capture_chunk(
         key: payload.get(key)
         for key in (
             "labels", "model_predictions", "camera_filename", "captured_at", "error",
+            "features",
         )
         if payload.get(key) is not None
     }
