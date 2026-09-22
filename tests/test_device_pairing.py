@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from datetime import datetime, timedelta
 from unittest import mock
 
@@ -112,7 +113,7 @@ def test_device_can_start_and_account_can_claim_pairing():
     user = User(userId=7, username="owner", email="owner@example.com", role=0)
 
     claimed = asyncio.run(claim_device_pairing(
-        DevicePairingClaimRequest(code=started["code"]), user, database,
+        DevicePairingClaimRequest(code=started["code"]), current_user=user, db=database,
     ))
 
     assert claimed["status"] == "paired"
@@ -184,7 +185,7 @@ def test_fresh_physical_pairing_moves_an_existing_device_to_the_new_account():
 
     with mock.patch("server.endpoints.device_endpoints._pairing_hash", return_value="code-hash"):
         result = asyncio.run(claim_device_pairing(
-            DevicePairingClaimRequest(code="PAIRCODE"), new_owner, database,
+            DevicePairingClaimRequest(code="PAIRCODE"), current_user=new_owner, db=database,
         ))
 
     assert result["status"] == "paired"
@@ -234,7 +235,7 @@ def test_active_device_can_start_repairing_with_its_current_token():
     database = _Database({Device: [active_device]})
     token_user = mock.Mock(userId=6)
     token_user.get.side_effect = lambda key, default=None: {
-        "scopes": ["device"], "device_id": "device-id",
+        "scopes": ["device"], "device_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "device-id")),
     }.get(key, default)
 
     with mock.patch(

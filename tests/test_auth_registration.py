@@ -53,7 +53,7 @@ def test_service_restriction_falls_back_to_username_registration():
     with mock.patch.dict("os.environ", environment, clear=True), \
          mock.patch("server.endpoints.auth_endpoints.requests.post", return_value=_Response()), \
          mock.patch("server.auth.get_password_hash", return_value="hashed"):
-        result = asyncio.run(register_user(payload, database))
+        result = asyncio.run(register_user(payload, db=database))
 
     assert result["success"] is True
     assert result["verification_required"] is False
@@ -74,7 +74,7 @@ def test_service_restriction_is_503_when_fallback_is_disabled():
     with mock.patch.dict("os.environ", environment, clear=True), \
          mock.patch("server.endpoints.auth_endpoints.requests.post", return_value=_Response()):
         try:
-            asyncio.run(register_user(payload, _Database()))
+            asyncio.run(register_user(payload, db=_Database()))
         except HTTPException as exc:
             assert exc.status_code == 503
         else:
