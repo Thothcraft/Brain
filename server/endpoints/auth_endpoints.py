@@ -63,6 +63,7 @@ def _supabase_error(response: requests.Response) -> tuple[str, str]:
 class LoginRequest(BaseModel):
     username: str
     password: str
+    remember: bool = True  # False → session cookie dies with the browser
     
     @validator('username')
     def validate_username(cls, v):
@@ -257,11 +258,12 @@ async def login_for_access_token(
         expires_in = int(access_token_expires.total_seconds())
 
         # Browser clients also get an HttpOnly session cookie so thothHUB
-        # never needs to handle the bearer token in JavaScript.
+        # never needs to handle the bearer token in JavaScript. "Remember this
+        # device" unchecked → no max_age → cookie dies when the browser closes.
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=create_session_token(user),
-            max_age=SESSION_EXPIRE_DAYS * 24 * 3600,
+            max_age=SESSION_EXPIRE_DAYS * 24 * 3600 if login_data.remember else None,
             httponly=True,
             secure=SESSION_COOKIE_SECURE,
             samesite="lax",
