@@ -23,15 +23,60 @@ from .db import User, SessionLocal
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))  # Default to 24 hours
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
-# Load secret key; fall back to a default (development) key to avoid runtime errors
-# NOTE: In production, ALWAYS set the SECRET_KEY environment variable to a strong, random value.
-# If SECRET_KEY is missing, we log a warning and use a weak default to keep the API online instead of crashing.
-SECRET_KEY = os.getenv("SECRET_KEY") or "__insecure_dev_key_change_me__"
-if SECRET_KEY == "__insecure_dev_key_change_me__":
-    import logging
-    logging.getLogger("lms.server").warning("[Auth] SECRET_KEY env var not set. Using insecure default key. Set SECRET_KEY for production!")
+# ── credential domains ────────────────────────────────────────────────────────
+# Browsers, developer clients and physical devices have different security
+# requirements, so each uses its own signing domain rather than one master
+# secret. SESSION_SECRET signs HttpOnly browser-session tokens, DEVICE_SECRET
+# signs device-scoped credentials, SECRET_KEY signs user access tokens.
+# Each falls back to SECRET_KEY so existing deployments keep working until
+# distinct secrets are configured.
+_ENVIRONMENT = os.getenv("ENVIRONMENT", os.getenv("BRAIN_ENV", "development")).lower()
+_IS_PRODUCTION = _ENVIRONMENT in {"production", "prod"}
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    if _IS_PRODUCTION:
+        raise RuntimeError(
+            "SECRET_KEY environment variable is required in production. "
+            "Refusing to start with an insecure signing key."
+        )
+    SECRET_KEY = "__insecure_dev_key_change_me__"
+    logging.getLogger("lms.server").warning(
+        "[Auth] SECRET_KEY env var not set. Using insecure default key (development only)."
+    )
+
+SESSION_SECRET = os.getenv("SESSION_SECRET") or SECRET_KEY
+DEVICE_SECRET = os.getenv("DEVICE_SECRET") or SECRET_KEY
+
+_DOMAIN_SECRETS = {
+    "user": SECRET_KEY,
+    "session": SESSION_SECRET,
+    "device": DEVICE_SECRET,
+}
+
+SESSION_COOKIE_NAME = "thoth_session"
+SESSION_COOKIE_SECURE = _IS_PRODUCTION
+SESSION_EXPIRE_DAYS = int(os.getenv("SESSION_EXPIRE_DAYS", "14"))
+
+
+def _secret_for_domain(domain: str) -> str:
+    return _DOMAIN_SECRETS.get(domain, SECRET_KEY)
+
+
+def decode_token_any(token: str) -> tuple:
+    """Verify a token against each credential domain.
+
+    Returns ``(payload, domain)``. Raises JWTError if no domain verifies.
+    """
+    last_err: Optional[Exception] = None
+    for domain, secret in _DOMAIN_SECRETS.items():
+        try:
+            return jwt.decode(token, secret, algorithms=[ALGORITHM]), domain
+        except JWTError as e:
+            last_err = e
+    raise last_err or JWTError("token verification failed")
 
 def get_db():
     """Create and yield a database session.
@@ -119,7 +164,21 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         logging.error(f"[Auth] Error type: {type(e).__name__}", exc_info=True)
         return False
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+def create_session_token(user: User) -> str:
+    """Create a browser-session token for the HttpOnly cookie domain."""
+    return create_access_token(
+        data={
+            "sub": str(user.userId),
+            "username": user.username,
+            "role": user.role,
+            "typ": "session",
+        },
+        expires_delta=timedelta(days=SESSION_EXPIRE_DAYS),
+        domain="session",
+    )
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, domain: str = "user") -> str:
     """Create a JWT access token.
     
     Args:
@@ -148,8 +207,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
                 detail="Server configuration error"
             )
             
-        # Encode the JWT token
-        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        # Encode the JWT token under the requested credential domain
+        encoded_jwt = jwt.encode(to_encode, _secret_for_domain(domain), algorithm=ALGORITHM)
         return encoded_jwt
         
     except JWTError as e:
@@ -258,7 +317,7 @@ async def get_user_from_token(token: str) -> TokenUser:
     )
     
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload, domain = decode_token_any(token)
         sub: str = payload.get("sub")
         if sub is None:
             raise credentials_exception
@@ -281,6 +340,7 @@ async def get_user_from_token(token: str) -> TokenUser:
             "email": payload.get("email"),
             "scopes": payload.get("scopes", []),
             "device_id": payload.get("device_id"),
+            "domain": domain,
         })
     except JWTError as e:
         logging.error(f"[Auth] JWT validation error: {str(e)}")
@@ -311,22 +371,28 @@ def get_current_user(
         HTTPException: 401 error if token is invalid or user doesn't exist
     """
     credentials_exception = HTTPException(status_code=401, detail="Invalid credentials")
-    # Log the raw Authorization header for debugging auth failures
-    logging.getLogger("lms.server").debug(
-        "[AUTH] get_current_user Authorization header: %s",
-        request.headers.get("Authorization"),
-    )
-    try:
-        # Log the token value (truncated) for debugging
-        logging.getLogger("lms.server").debug(
-            "[AUTH] Decoding token: %s...",
-            token[:10] + '...' if token else None,
-        )
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
-        # Device-scoped pairing tokens are accepted only by endpoints that
+    # Dual auth: bearer token (CLI/SDK/Flutter) or HttpOnly session cookie
+    # (browser/thothHUB). Bearer takes precedence when both are present.
+    cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token and not cookie_token:
+        raise credentials_exception
+
+    try:
+        if token:
+            payload, domain = decode_token_any(token)
+            if domain == "session":
+                # Session tokens are only valid via the cookie channel
+                raise credentials_exception
+        else:
+            payload = jwt.decode(cookie_token, SESSION_SECRET, algorithms=[ALGORITHM])
+            domain = "session"
+            if payload.get("typ") != "session":
+                raise credentials_exception
+
+        # Device-scoped credentials are accepted only by endpoints that
         # explicitly use get_user_from_token and validate the device claim.
-        if "device" in (payload.get("scopes") or []):
+        if domain == "device" or "device" in (payload.get("scopes") or []):
             logging.warning("[AUTH] Device-scoped token rejected by user endpoint")
             raise credentials_exception
         

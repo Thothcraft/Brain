@@ -161,6 +161,60 @@ def auto_disconnect_stale_devices():
                 pass
 
 
+def enforce_free_minute_retention():
+    """Enforce the Free plan's rolling minute quota.
+
+    Free accounts keep only the most recent ``minute_retention`` minutes
+    of capture chunks server-side. Paid plans are bounded by storage
+    bytes instead and are skipped.
+    """
+    from server.db import DeviceCaptureChunk
+    from server.entitlements import get_entitlements
+
+    db = None
+    try:
+        db = SessionLocal()
+        free_users = db.query(User).filter(User.plan == "free").all()
+        total_deleted = 0
+        for user in free_users:
+            retention = get_entitlements(user).get("minute_retention")
+            if not retention:
+                continue
+            minutes = [
+                r[0] for r in db.query(DeviceCaptureChunk.minute)
+                .filter(DeviceCaptureChunk.user_id == user.userId)
+                .distinct()
+                .order_by(DeviceCaptureChunk.minute.desc())
+                .all()
+            ]
+            excess = minutes[retention:]
+            if not excess:
+                continue
+            deleted = db.query(DeviceCaptureChunk).filter(
+                DeviceCaptureChunk.user_id == user.userId,
+                DeviceCaptureChunk.minute.in_(excess),
+            ).delete(synchronize_session=False)
+            total_deleted += deleted or 0
+        if total_deleted:
+            db.commit()
+            logger.info(f"[SERVICE] Free-tier retention removed {total_deleted} capture chunks")
+        return total_deleted
+    except Exception as e:
+        logger.error(f"[SERVICE] Minute retention job failed: {e}")
+        if db:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return 0
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 def stop_scheduler():
     """Stop the background scheduler gracefully."""
     global scheduler
@@ -215,7 +269,17 @@ def start_scheduler():
             replace_existing=True,
             next_run_time=datetime.now() + timedelta(seconds=60),
         )
-        
+
+        # Free plan rolling quota: keep only the newest N minutes.
+        scheduler.add_job(
+            enforce_free_minute_retention,
+            trigger=IntervalTrigger(seconds=int(os.getenv("RETENTION_JOB_SECONDS", "600"))),
+            id='free_retention_job',
+            name='Enforce Free plan minute retention',
+            replace_existing=True,
+            next_run_time=datetime.now() + timedelta(seconds=120),
+        )
+
         scheduler.start()
         logger.info("Scheduler started successfully with jobs: %s", 
                    [job.name for job in scheduler.get_jobs()])

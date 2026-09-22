@@ -44,7 +44,7 @@ def _user_dict(u: User) -> Dict[str, Any]:
 
 class UpdateUserRequest(BaseModel):
     role: Optional[int] = None       # 0=user, 1=admin, 2=organization
-    plan: Optional[str] = None       # free | home | pro | research
+    plan: Optional[str] = None       # free | home | research
     org_name: Optional[str] = None
     stripe_customer_id: Optional[str] = None
     stripe_subscription_id: Optional[str] = None
@@ -80,7 +80,7 @@ async def admin_stats(
     ).scalar() or 0
 
     plan_counts = {}
-    for plan in ("free", "home", "pro", "research"):
+    for plan in ("free", "home", "research"):
         cnt = db.query(func.count(User.userId)).filter(User.plan == plan).scalar() or 0
         plan_counts[plan] = cnt
 
@@ -189,7 +189,7 @@ async def update_user(
             raise HTTPException(status_code=400, detail="role must be 0, 1, or 2")
         u.role = data.role
     if data.plan is not None:
-        if data.plan not in ("free", "home", "pro", "research"):
+        if data.plan not in ("free", "home", "research"):
             raise HTTPException(status_code=400, detail="Invalid plan")
         u.plan = data.plan
     if data.org_name is not None:

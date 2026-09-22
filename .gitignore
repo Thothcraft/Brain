@@ -21,3 +21,6 @@ data/cifar-100-python/
 data/cifar-10-batches-py/
 data/MNIST/
 *.tar.gz
+
+__pycache__/
+*.pyc

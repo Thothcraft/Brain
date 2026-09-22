@@ -20,6 +20,8 @@ from sqlalchemy.orm import defer, Session
 
 from server.db import get_db, SessionLocal
 from server.auth import get_current_user
+from server.entitlements import check_download_allowed
+from server.storage import check_upload_allowed
 from server.db import User, File, DeviceFile, Device, DeviceCommand, DatasetFile, TrainingDataset, FileDeviceUpdate
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.utils.error_handler import (
@@ -366,6 +368,8 @@ async def upload_file_simple(
             max_mb = SIMPLE_UPLOAD_MAX_BYTES // (1024 * 1024)
             raise HTTPException(status_code=413, detail=f"File too large (max {max_mb}MB)")
 
+        check_upload_allowed(db, current_user, len(content_bytes))
+
         owned_device = None
         if request.device_id:
             owned_device = db.query(Device).filter(
@@ -610,6 +614,10 @@ async def upload_file_multipart(
         
         raw_filename = file.filename or "unnamed_file"
         logger.info(f"Starting multipart upload: {raw_filename}")
+
+        # Quota check uses the declared size when available; the stream
+        # is still bounded by SIMPLE_UPLOAD_MAX_BYTES downstream.
+        check_upload_allowed(db, current_user, getattr(file, "size", None) or 0)
         
         # Extract base filename from path (frontend may send relative paths like "train/drink.csv")
         # Use the last component as the actual filename
@@ -814,6 +822,7 @@ async def download_minute_bundle(
     db: Session = Depends(get_db)
 ):
     """Download all cloud files for a minute as one zip archive."""
+    check_download_allowed(current_user)
     try:
         query = db.query(File).options(defer(File.content)).filter(
             File.userId == current_user.userId,
@@ -863,6 +872,7 @@ async def download_minute_bundles(
     db: Session = Depends(get_db),
 ):
     """Download multiple selected cloud minutes in one ZIP archive."""
+    check_download_allowed(current_user)
     raw_minutes = payload.get("minutes")
     if not isinstance(raw_minutes, list):
         raise HTTPException(status_code=422, detail="minutes must be a list")
@@ -1229,6 +1239,9 @@ async def download_file_simple(
     Returns:
         File content with appropriate headers
     """
+    # Inline viewing is allowed on all plans; attachment download is not.
+    if download:
+        check_download_allowed(current_user)
     try:
         log_request_start("GET", f"/file/{file_id}", current_user.userId)
         
@@ -1592,7 +1605,9 @@ async def upload_file_from_device(
                 "message": "File already on cloud",
                 "cloud_file_id": device_file.cloud_file_id
             }
-        
+
+        check_upload_allowed(db, current_user, device_file.size or 0)
+
         # Get the device
         device = db.query(Device).filter(Device.deviceId == device_file.device_id).first()
         if not device:

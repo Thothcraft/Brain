@@ -608,6 +608,7 @@ class DeviceCaptureChunk(Base):
         return {
             **payload,
             "minute": self.minute,
+            "second_index": self.chunk_index,
             "chunk_index": self.chunk_index,
             "status": self.status,
             "occupied": self.occupied,
@@ -891,17 +892,27 @@ class InviteCode(Base):
 
 
 class Lab(Base):
-    """Practice labs created by admins, visible to approved org members."""
+    """A reproducible computational experiment in a research track.
+
+    Labs are gated by the ``labs`` plan entitlement (Research), not by
+    organization membership. Each lab ships a notebook template that the
+    researcher completes with thothcraft-sdk and submits as ``.ipynb``.
+    """
     __tablename__ = "lab"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    slug = Column(String(120), nullable=False, unique=True, index=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    sensor_type = Column(String(50), nullable=False)  # camera | wifi_sensing | cwmf
-    difficulty = Column(String(20), default="beginner")  # beginner | intermediate | advanced
-    questions = Column(Text, nullable=False)  # JSON: [{id, type, prompt, options?, correct_answer}]
+    track = Column(String(80), nullable=False, index=True)  # e.g. "dataset_engineering"
+    level = Column(String(20), default="beginner")  # beginner | intermediate | advanced
+    order_in_track = Column(Integer, default=0)
+    objectives = Column(Text, nullable=True)  # JSON: [str]
+    template_path = Column(String(500), nullable=True)  # notebook template in lab-templates/
+    required_artifacts = Column(Text, nullable=True)  # JSON: ["notebook","metrics","figures",...]
+    rubric = Column(Text, nullable=True)  # JSON: grading rubric for LabGrader
     max_score = Column(Integer, default=100)
-    created_by = Column(Integer, ForeignKey("user_account.user_id"), nullable=False)
+    created_by = Column(Integer, ForeignKey("user_account.user_id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     is_published = Column(Boolean, default=True)
@@ -911,24 +922,51 @@ class Lab(Base):
 
 
 class LabSubmission(Base):
-    """A member's submission for a lab."""
+    """A researcher's notebook submission for a lab.
+
+    ``status`` lifecycle: pending -> queued -> graded | failed.
+    Notebook execution is deferred behind the LabGrader abstraction; no
+    untrusted notebook code is executed by Brain.
+    """
     __tablename__ = "lab_submission"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     lab_id = Column(Integer, ForeignKey("lab.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
-    org_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
-    answers = Column(Text, nullable=False)  # JSON: {question_id: answer}
+    notebook_path = Column(String(500), nullable=False)  # stored .ipynb path
+    notebook_metadata = Column(Text, nullable=True)  # JSON: extracted nb metadata
+    status = Column(String(20), default="pending", index=True)  # pending|queued|graded|failed
+    execution_status = Column(String(20), default="not_run")  # not_run|success|error
     score = Column(Float, nullable=True)
     max_score = Column(Integer, nullable=True)
+    passed = Column(Boolean, nullable=True)
+    feedback = Column(Text, nullable=True)  # JSON: [str] grader feedback
+    artifacts = Column(Text, nullable=True)  # JSON: extracted artifact manifest
     submitted_at = Column(DateTime, default=datetime.utcnow)
     graded_at = Column(DateTime, nullable=True)
-    feedback = Column(Text, nullable=True)
 
     lab = relationship("Lab", back_populates="submissions")
     user = relationship("User", foreign_keys=[user_id])
 
     __table_args__ = (UniqueConstraint("lab_id", "user_id", name="uq_lab_user"),)
+
+
+class AuditEvent(Base):
+    """Security-relevant audit trail.
+
+    Recorded for pairing, unpairing, data deletion, downloads, model
+    deployment and other sensitive actions. Append-only; never exposed
+    to end users.
+    """
+    __tablename__ = "audit_event"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=True, index=True)
+    device_id = Column(Integer, ForeignKey("device.device_id"), nullable=True, index=True)
+    action = Column(String(80), nullable=False, index=True)  # e.g. "device.paired"
+    detail = Column(Text, nullable=True)  # JSON context
+    ip_address = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class Payment(Base):

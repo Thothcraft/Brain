@@ -8,13 +8,20 @@ import requests
 import asyncio
 from fastapi import Request
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, validator
 
 from server.db import get_db, User
-from server.auth import get_current_user
+from server.auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_SECURE,
+    SESSION_EXPIRE_DAYS,
+    create_session_token,
+    get_current_user,
+)
 from server.utils.logging_utils import log_request_start, log_response, log_error
+from server.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="", tags=["auth"])
 
@@ -171,7 +178,9 @@ async def registration_status() -> Dict[str, Any]:
 )
 async def login_for_access_token(
     login_data: LoginRequest,
-    db: Session = Depends(get_db)
+    response: Response,
+    db: Session = Depends(get_db),
+    _rate=Depends(rate_limit("auth", 10, 60)),
 ) -> Dict[str, Any]:
     """
     Authenticate user and return JWT access token.
@@ -246,7 +255,19 @@ async def login_for_access_token(
             expires_delta=access_token_expires,
         )
         expires_in = int(access_token_expires.total_seconds())
-        
+
+        # Browser clients also get an HttpOnly session cookie so thothHUB
+        # never needs to handle the bearer token in JavaScript.
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=create_session_token(user),
+            max_age=SESSION_EXPIRE_DAYS * 24 * 3600,
+            httponly=True,
+            secure=SESSION_COOKIE_SECURE,
+            samesite="lax",
+            path="/",
+        )
+
         response_data = {
             "access_token": access_token,
             "token_type": "bearer",
@@ -286,6 +307,7 @@ async def login_for_access_token(
 )
 async def register_user(
     register_data: RegisterRequest,
+    _rate=Depends(rate_limit("auth", 5, 60)),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -441,14 +463,15 @@ async def register_user(
 )
 async def logout(
     request: Request,
+    response: Response,
     current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
-    Logout endpoint - primarily for client-side token invalidation.
-    The actual token invalidation happens client-side by removing the stored token.
-    This endpoint confirms the logout action was received.
+    Logout endpoint - clears the HttpOnly session cookie. Bearer-token
+    clients additionally discard their token client-side.
     """
     log_request_start("POST", "/logout", dict(request.headers) if hasattr(request, "headers") else {})
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     log_response(200, "Logout successful", "/logout")
     return {
         "success": True,

@@ -27,6 +27,7 @@ from sqlalchemy.orm import selectinload, load_only
 
 from ..db import get_db, TrainingDataset, DatasetFile, TrainingJob, TrainedModel, File, PreprocessingPipeline, Device, DeviceDeployment, DeviceCommand
 from ..auth import get_current_user
+from ..entitlements import check_download_allowed, has_entitlement
 from .models import StandardResponse
 from ..model_contract import validate_torchscript, ModelContractError
 
@@ -68,12 +69,11 @@ def _deployment_requests_allowed_for_device(device) -> bool:
 
 
 def _require_ai_model_plan(user) -> None:
-    aliases = {"researcher": "research", "organization": "pro"}
-    plan = str(getattr(user, "plan", "free") or "free").lower()
-    if aliases.get(plan, plan) not in {"pro", "research"}:
+    """Private model deployment is a Research-tier capability."""
+    if not has_entitlement(user, "custom_models"):
         raise HTTPException(
             status_code=403,
-            detail="Private AI model deployment requires the Pro plan",
+            detail="Private AI model deployment requires the Research plan",
         )
 
 
@@ -1606,6 +1606,7 @@ async def download_model(
 ):
     """Download a trained model."""
     from fastapi.responses import Response
+    check_download_allowed(current_user)
     try:
         model = db.query(TrainedModel).filter(
             TrainedModel.id == model_id,
@@ -2022,6 +2023,7 @@ async def download_dataset(
     current_user = Depends(get_current_user)
 ):
     """Download a full dataset as one zip archive grouped by label."""
+    check_download_allowed(current_user)
     try:
         dataset = db.query(TrainingDataset).options(
             selectinload(TrainingDataset.files).selectinload(DatasetFile.file)

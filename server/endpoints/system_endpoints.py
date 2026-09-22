@@ -5,11 +5,15 @@ import asyncio
 from datetime import datetime
 from typing import Dict, Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from server.utils.logging_utils import log_request_start, log_response, log_error, logger
-from server.db import test_database_connection
+from server.db import User, get_db, test_database_connection
+from server.auth import get_current_user
+from server.entitlements import get_entitlements
+from server.storage import storage_status
 try:
     from server.db_health_monitor import get_database_health_status, force_database_health_check
 except ImportError:
@@ -202,3 +206,33 @@ async def database_health_check(force_refresh: bool = False) -> Dict[str, Any]:
             "monitor": monitor_status,
             "timestamp": datetime.utcnow().isoformat()
         }
+
+
+@router.get(
+    "/account/entitlements",
+    summary="Current plan entitlements",
+    description="Returns the caller's plan and its full entitlement set",
+    tags=["account"],
+)
+async def account_entitlements(
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Single endpoint the Hub/CLI/app use to render plan-gated UI."""
+    return {
+        "plan": current_user.plan or "free",
+        "entitlements": get_entitlements(current_user),
+    }
+
+
+@router.get(
+    "/storage/usage",
+    summary="Cloud storage usage",
+    description="Server-computed storage usage vs. plan quota",
+    tags=["account"],
+)
+async def storage_usage(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Usage is computed from owned objects, never client-reported."""
+    return storage_status(db, current_user)

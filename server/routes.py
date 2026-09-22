@@ -26,7 +26,6 @@ from server.endpoints.file_endpoints import router as file_router
 from server.endpoints.webhook_endpoints import router as webhook_router
 from server.endpoints.sensor_endpoints import router as sensor_router
 from server.endpoints.network_endpoints import router as network_router
-from server.endpoints.curriculum_endpoints import router as curriculum_router
 from server.endpoints.processing_endpoints import router as processing_router
 from server.endpoints.activity_endpoints import router as activity_router
 from server.endpoints.figure_endpoints import router as figure_router
@@ -34,7 +33,6 @@ from server.endpoints.validation_endpoints import router as validation_router
 from server.endpoints.plotting_api import router as plotting_router
 from server.endpoints.folders import router as folders_router
 from server.endpoints.admin_endpoints import router as admin_router
-from server.endpoints.org_endpoints import router as org_router
 from server.endpoints.labs_endpoints import router as labs_router
 from server.endpoints.stripe_endpoints import router as stripe_router
 from server.endpoints.dataset_endpoints import router as dataset_router
@@ -52,7 +50,6 @@ router.include_router(file_router)        # /file/*
 router.include_router(webhook_router)     # /phone/* (Twilio webhooks)
 router.include_router(sensor_router)      # /sensors/* (Sense HAT sensors)
 router.include_router(network_router)     # /network/* (WiFi configuration)
-router.include_router(curriculum_router)  # /curriculum/* (Education content)
 router.include_router(processing_router)  # /processing/* (Data processing pipelines)
 router.include_router(activity_router)    # /activity/* (Activity feed and stats)
 router.include_router(figure_router)             # /figures/* (Publication-ready figure export)
@@ -60,7 +57,6 @@ router.include_router(validation_router)         # /validation/* (Data validatio
 router.include_router(plotting_router)           # /plotting/* (Plot generation and export)
 router.include_router(folders_router)            # /folders/* (Folder management)
 router.include_router(admin_router)              # /admin/* (Admin dashboard)
-router.include_router(org_router)                # /org/* (Organization management)
 router.include_router(labs_router)               # /labs/* (Labs & submissions)
 router.include_router(stripe_router)              # /stripe/* (Stripe payments)
 router.include_router(dataset_router)             # /datasets/* (datasets and user models)

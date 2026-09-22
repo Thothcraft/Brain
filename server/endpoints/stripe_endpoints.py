@@ -18,6 +18,7 @@ except ImportError:
 
 from server.db import get_db, User, Payment
 from server.auth import get_current_user
+from server.entitlements import PLANS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stripe", tags=["stripe"])
@@ -30,7 +31,7 @@ WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 # Price IDs (update these after running setup_stripe.py)
 PRICE_IDS = {
     f"{plan}_{period}": os.getenv(f"STRIPE_PRICE_ID_{plan.upper()}_{period.upper()}")
-    for plan in ("home", "pro", "research")
+    for plan in ("home", "research")
     for period in ("monthly", "annual")
 }
 _CATALOG_CACHE = {"expires": 0.0, "payload": None}
@@ -59,10 +60,8 @@ async def get_catalog():
         return {
             "prices": prices,
             "plans": {
-                "free": {"device_limit": 1},
-                "home": {"device_limit": 5},
-                "pro": {"device_limit": 10},
-                "research": {"device_limit": 10},
+                name: {"device_limit": spec["device_limit"]}
+                for name, spec in PLANS.items()
             },
         }
 
@@ -317,10 +316,10 @@ async def create_checkout_session(
         logger.error("Stripe package not installed")
         raise HTTPException(status_code=503, detail="Payment service not available")
     
-    aliases = {"researcher": "research", "organization": "pro"}
+    aliases = {"researcher": "research"}
     plan = aliases.get(plan, plan)
     price_id = PRICE_IDS.get(f"{plan}_{billing_period}")
-    if plan not in {"home", "pro", "research"} or billing_period not in {"monthly", "annual"} or not price_id:
+    if plan not in {"home", "research"} or billing_period not in {"monthly", "annual"} or not price_id:
         raise HTTPException(status_code=400, detail="Invalid plan")
     if current_user.stripe_subscription_id:
         raise HTTPException(

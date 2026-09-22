@@ -28,6 +28,9 @@ from server.db import (
     DeviceDeployment, DeviceCaptureChunk, DeviceCommand,
 )
 from server.auth import get_current_user, get_user_from_token
+from server.entitlements import PLANS, has_entitlement, normalize_plan
+from server.utils.rate_limit import rate_limit
+from server.audit import audit
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.calibration import REGIONS as CALIBRATION_REGIONS, derive_thresholds
 from server.inventory import is_newer_snapshot
@@ -170,20 +173,23 @@ class DeviceRegistrationError(Exception):
     pass
 
 
-PLAN_DEVICE_LIMITS = {"free": 1, "home": 5, "pro": 10, "research": 10}
-PLAN_FEATURES = {
-    "free": {"basic_occupancy", "maps", "home_assistant", "labels", "data_export", "calibration"},
-    "home": {"basic_occupancy", "presence", "maps", "home_assistant", "labels", "data_export", "calibration", "predictions", "zones", "spaces", "multi_device"},
-    "pro": {"basic_occupancy", "presence", "maps", "home_assistant", "labels", "data_export", "calibration", "predictions", "zones", "spaces", "multi_device", "har", "people_count", "ai_models", "federated_learning"},
-    "research": {"basic_occupancy", "presence", "maps", "home_assistant", "labels", "data_export", "calibration", "predictions", "zones", "spaces", "multi_device", "har", "people_count", "ai_models", "federated_learning", "detailed_labels", "academy", "assistant"},
+PLAN_DEVICE_LIMITS = {name: spec["device_limit"] for name, spec in PLANS.items()}
+
+# Legacy feature names mapped onto the centralized entitlement model.
+# Free is functionally capable: every sensing feature is available on all
+# plans. Only export/research capabilities remain gated.
+_FEATURE_ENTITLEMENTS = {
+    "data_export": "download_data",
+    "academy": "labs",
+    "assistant": "labs",
+    "ai_models": "custom_models",
+    "federated_learning": "custom_models",
 }
 
 
 def _product_plan(user: Union[User, Any]) -> str:
     """Resolve product access from verified billing state, never admin role."""
-    aliases = {"researcher": "research", "organization": "pro"}
-    plan = aliases.get(str(getattr(user, "plan", "free") or "free").lower(), str(getattr(user, "plan", "free") or "free").lower())
-    return plan if plan in PLAN_DEVICE_LIMITS else "free"
+    return normalize_plan(str(getattr(user, "plan", "free") or "free").lower())
 
 
 def _plan_subject(db: Session, user: Union[User, Any]) -> Union[User, Any]:
@@ -207,7 +213,15 @@ def _plan_subject(db: Session, user: Union[User, Any]) -> Union[User, Any]:
 
 
 def _require_feature(user: Union[User, Any], feature: str) -> None:
-    if feature not in PLAN_FEATURES[_product_plan(user)]:
+    """Gate a legacy feature flag through the centralized entitlements.
+
+    Features not present in ``_FEATURE_ENTITLEMENTS`` are core sensing
+    capabilities available on every plan, including Free.
+    """
+    entitlement = _FEATURE_ENTITLEMENTS.get(feature)
+    if entitlement is None:
+        return
+    if not has_entitlement(user, entitlement):
         raise HTTPException(status_code=403, detail=f"{feature.replace('_', ' ').title()} requires a paid plan")
 
 
@@ -788,6 +802,7 @@ async def start_device_pairing(
     request: DevicePairingStartRequest,
     db: Session = Depends(get_db),
     authorization: Optional[str] = Header(None),
+    _rate=Depends(rate_limit("pairing", 20, 60)),
 ) -> Dict[str, Any]:
     """Create a short-lived code that can be claimed from thothHUB."""
     now = datetime.utcnow()
@@ -896,6 +911,7 @@ async def device_pairing_status(
             "device_id": pairing.device_uuid,
         },
         expires_delta=timedelta(days=int(os.getenv("DEVICE_TOKEN_EXPIRE_DAYS", "3650"))),
+        domain="device",
     )
     return {
         "success": True,
@@ -911,6 +927,7 @@ async def device_pairing_status(
 @router.post("/pairing/claim", response_model=Dict[str, Any])
 async def claim_device_pairing(
     request: DevicePairingClaimRequest,
+    _rate=Depends(rate_limit("pairing", 20, 60)),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -952,6 +969,12 @@ async def claim_device_pairing(
     pairing.status = "claimed"
     pairing.claimed_at = now
     db.commit()
+    audit(
+        db, "device.paired",
+        user_id=current_user.userId,
+        device_id=device.deviceId,
+        detail={"device_uuid": pairing.device_uuid, "device_name": device.device_name},
+    )
     return {
         "success": True,
         "status": "paired",
@@ -1650,6 +1673,11 @@ async def delete_device(
             db.query(File).filter(File.fileId.in_(cloud_file_ids), File.userId == current_user.userId).delete(synchronize_session=False)
         db.delete(device)
         db.commit()
+        audit(
+            db, "device.unpaired" if mode == "detach" else "device.erased",
+            user_id=current_user.userId,
+            detail={"device_uuid": device_id, "mode": mode},
+        )
         return {
             "success": True,
             "message": "Device and cloud captures permanently erased" if mode == "erase" else "Device detached; uploaded cloud files retained",
@@ -2054,11 +2082,11 @@ async def upsert_live_capture_chunk(
     if not MINUTE_DIR_RE.fullmatch(minute):
         raise HTTPException(status_code=422, detail="minute must use YYYYMMDD_HHMM")
     try:
-        chunk_index = int(payload.get("chunk_index"))
+        second_index = int(payload.get("second_index", payload.get("chunk_index")))
         frame_count = int(payload.get("chunk_frames") or payload.get("frame_count") or 10)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="chunk_index and frame_count must be integers")
-    if chunk_index < 0 or not 1 <= frame_count <= 10000:
+        raise HTTPException(status_code=422, detail="second_index and frame_count must be integers")
+    if second_index < 0 or not 1 <= frame_count <= 10000:
         raise HTTPException(status_code=422, detail="live chunks require a positive bounded sample count")
 
     current_minute = db.query(DeviceCaptureChunk.minute).filter(
@@ -2085,14 +2113,14 @@ async def upsert_live_capture_chunk(
     row = db.query(DeviceCaptureChunk).filter(
         DeviceCaptureChunk.device_id == device.deviceId,
         DeviceCaptureChunk.minute == minute,
-        DeviceCaptureChunk.chunk_index == chunk_index,
+        DeviceCaptureChunk.chunk_index == second_index,
     ).first()
     if row is None:
         row = DeviceCaptureChunk(
             device_id=device.deviceId,
             user_id=current_user.userId,
             minute=minute,
-            chunk_index=chunk_index,
+            chunk_index=second_index,
         )
         db.add(row)
     row.status = status_value
@@ -2103,9 +2131,10 @@ async def upsert_live_capture_chunk(
     device.last_seen = datetime.utcnow()
     device.online = True
     db.commit()
-    return {"success": True, "minute": minute, "chunk_index": chunk_index}
+    return {"success": True, "minute": minute, "second_index": second_index}
 
 
+@router.get("/live-seconds", response_model=Dict[str, Any])
 @router.get("/live-chunks", response_model=Dict[str, Any])
 async def get_account_live_capture_chunks(
     after: Optional[str] = Query(None),
@@ -2128,12 +2157,14 @@ async def get_account_live_capture_chunks(
     ).all()
     devices: Dict[str, Dict[str, Any]] = {}
     for row, device_uuid in rows:
-        bucket = devices.setdefault(str(device_uuid), {"minute": row.minute, "chunks": []})
+        bucket = devices.setdefault(str(device_uuid), {"minute": row.minute, "seconds": [], "chunks": []})
         if row.minute > str(bucket["minute"]):
             bucket["minute"] = row.minute
+            bucket["seconds"] = []
             bucket["chunks"] = []
         if row.minute == bucket["minute"]:
-            bucket["chunks"].append(row.to_dict())
+            bucket["seconds"].append(row.to_dict())
+            bucket["chunks"] = bucket["seconds"]
     newest = db.query(DeviceCaptureChunk.updated_at).filter(
         DeviceCaptureChunk.user_id == current_user.userId
     ).order_by(DeviceCaptureChunk.updated_at.desc()).limit(1).scalar()
@@ -2144,6 +2175,7 @@ async def get_account_live_capture_chunks(
     }
 
 
+@router.get("/{device_uuid}/live-seconds", response_model=Dict[str, Any])
 @router.get("/{device_uuid}/live-chunks", response_model=Dict[str, Any])
 async def get_live_capture_chunks(
     device_uuid: str,
@@ -2162,7 +2194,7 @@ async def get_live_capture_chunks(
         DeviceCaptureChunk.device_id == device.deviceId
     ).order_by(DeviceCaptureChunk.minute.desc()).limit(1).scalar()
     if not latest_minute:
-        return {"success": True, "minute": None, "chunks": [], "cursor": None}
+        return {"success": True, "minute": None, "seconds": [], "chunks": [], "cursor": None}
     query = db.query(DeviceCaptureChunk).filter(
         DeviceCaptureChunk.device_id == device.deviceId,
         DeviceCaptureChunk.minute == latest_minute,
@@ -2178,10 +2210,12 @@ async def get_live_capture_chunks(
         DeviceCaptureChunk.device_id == device.deviceId,
         DeviceCaptureChunk.minute == latest_minute,
     ).order_by(DeviceCaptureChunk.updated_at.desc()).limit(1).scalar()
+    seconds = [row.to_dict() for row in rows]
     return {
         "success": True,
         "minute": latest_minute,
-        "chunks": [row.to_dict() for row in rows],
+        "seconds": seconds,
+        "chunks": seconds,
         "cursor": newest.isoformat() + "Z" if newest else None,
     }
 

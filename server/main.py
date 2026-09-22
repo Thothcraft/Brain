@@ -366,6 +366,13 @@ async def global_logging_middleware(request: Request, call_next):
 
         # Add request ID to response headers
         response.headers["X-Request-ID"] = request_id
+
+        # Never allow shared/browser caches to store authenticated API
+        # responses — device data and predictions are private per-account.
+        if request.headers.get("Authorization") or request.cookies.get("thoth_session"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+
         return response
 
     except Exception as exc:
