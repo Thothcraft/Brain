@@ -100,6 +100,48 @@ def run_migrations():
     CREATE INDEX IF NOT EXISTS idx_lab_submission_user_id ON lab_submission(user_id);
     CREATE INDEX IF NOT EXISTS idx_payment_user_id ON payment(user_id);
     CREATE INDEX IF NOT EXISTS idx_payment_status ON payment(status);
+
+    -- Spatial layer: named areas, zones, device placement
+    CREATE TABLE IF NOT EXISTS space (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        parent_id INTEGER REFERENCES space(id),
+        name VARCHAR(255) NOT NULL,
+        floor_plan_file_id INTEGER REFERENCES file(file_id),
+        width_m DOUBLE PRECISION,
+        height_m DOUBLE PRECISION,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS zone (
+        id SERIAL PRIMARY KEY,
+        space_id INTEGER NOT NULL REFERENCES space(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        polygon_json TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS device_placement (
+        id SERIAL PRIMARY KEY,
+        device_id INTEGER NOT NULL UNIQUE REFERENCES device(device_id) ON DELETE CASCADE,
+        space_id INTEGER NOT NULL REFERENCES space(id) ON DELETE CASCADE,
+        x DOUBLE PRECISION NOT NULL DEFAULT 0,
+        y DOUBLE PRECISION NOT NULL DEFAULT 0,
+        rotation_deg DOUBLE PRECISION NOT NULL DEFAULT 0,
+        fov_deg DOUBLE PRECISION NOT NULL DEFAULT 90,
+        range_m DOUBLE PRECISION NOT NULL DEFAULT 8,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_space_user_id ON space(user_id);
+    CREATE INDEX IF NOT EXISTS idx_zone_space_id ON zone(space_id);
+    CREATE INDEX IF NOT EXISTS idx_device_placement_space ON device_placement(space_id);
+
+    -- Processor-ecosystem metadata on trained_model
+    ALTER TABLE trained_model
+    ADD COLUMN IF NOT EXISTS processor_type VARCHAR(20) DEFAULT 'torchscript',
+    ADD COLUMN IF NOT EXISTS sensor VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS task VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) DEFAULT 'private',
+    ADD COLUMN IF NOT EXISTS registry_name VARCHAR(255);
+    CREATE INDEX IF NOT EXISTS idx_trained_model_registry_name ON trained_model(registry_name);
     """
     
     try:

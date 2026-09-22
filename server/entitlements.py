@@ -30,6 +30,7 @@ GB = 1024 ** 3
 PLANS: Dict[str, Dict[str, Any]] = {
     "free": {
         "device_limit": 1,
+        "space_limit": 1,
         # Free keeps only the most recent N minutes server-side.
         "minute_retention": 400,
         "storage_bytes": None,          # bounded by minute_retention, not bytes
@@ -42,6 +43,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "home": {
         "device_limit": 5,
+        "space_limit": 5,
         "minute_retention": None,       # bounded by storage_bytes
         "storage_bytes": 10 * GB,
         "download_data": True,
@@ -53,6 +55,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
     },
     "research": {
         "device_limit": 10,
+        "space_limit": None,          # unlimited
         "minute_retention": None,
         "storage_bytes": 100 * GB,
         "download_data": True,
@@ -119,6 +122,16 @@ def check_device_limit(user: User, current_device_count: int) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Device limit reached ({limit}). Upgrade your plan to add more devices.",
+        )
+
+
+def check_space_limit(user: User, current_space_count: int) -> None:
+    """Raise 403 if creating another space would exceed the plan."""
+    limit = get_entitlements(user).get("space_limit")
+    if limit is not None and current_space_count >= limit:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Space limit reached ({limit}). Upgrade your plan to add more spaces.",
         )
 
 

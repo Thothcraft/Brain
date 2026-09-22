@@ -1375,6 +1375,11 @@ async def list_trained_models(
                 "size_mb": m.size_bytes / (1024 * 1024) if m.size_bytes else None,
                 "config": json.loads(m.config) if m.config else {},
                 "is_pinned": m.is_pinned,
+                "processor_type": m.processor_type,
+                "sensor": m.sensor,
+                "task": m.task,
+                "visibility": m.visibility,
+                "registry_name": m.registry_name,
                 "created_at": m.created_at.isoformat() if m.created_at else None
             })
         
@@ -1443,6 +1448,132 @@ async def upload_torchscript_model(
     db.commit()
     db.refresh(record)
     return {'success': True, 'model': record.to_dict(), 'validation': {'status': 'valid', 'output_dimension': validated['output_dimension'], 'model_hash': digest}}
+
+
+# ── model registry (processor ecosystem) ────────────────────────────────────
+
+PROCESSOR_TYPES = {"rule", "classical", "torchscript", "fusion"}
+VISIBILITIES = {"private", "community", "official"}
+
+
+@router.get("/models/registry", response_model=Dict[str, Any])
+async def list_model_registry(
+    sensor: Optional[str] = None,
+    task: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Public processor catalog: official + community models, plus the
+    caller's own private models. Filterable by sensor modality and task."""
+    query = db.query(TrainedModel).filter(
+        (TrainedModel.visibility.in_(["official", "community"]))
+        | (TrainedModel.user_id == current_user.userId)
+    )
+    if sensor:
+        query = query.filter(
+            (TrainedModel.sensor == sensor) | (TrainedModel.sensor == "any"))
+    if task:
+        query = query.filter(TrainedModel.task == task)
+    models = query.order_by(TrainedModel.created_at.desc()).limit(200).all()
+    return {"success": True, "models": [m.to_dict() for m in models],
+            "total": len(models)}
+
+
+@router.get("/models/registry/{registry_name:path}", response_model=Dict[str, Any])
+async def resolve_registry_model(
+    registry_name: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Resolve a registry name ('thothcraft/radar-occupancy-v2') to a model."""
+    model = db.query(TrainedModel).filter(
+        TrainedModel.registry_name == registry_name,
+        (TrainedModel.visibility.in_(["official", "community"]))
+        | (TrainedModel.user_id == current_user.userId),
+    ).order_by(TrainedModel.created_at.desc()).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Registry model not found")
+    return {"success": True, "model": model.to_dict()}
+
+
+@router.post("/models/rule", response_model=Dict[str, Any], status_code=201)
+async def create_rule_model(
+    body: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Register a config-only rule processor — no artifact upload.
+
+    Body: {name, rules: [{when, label, confidence?}], else?, params?,
+           sensor?, task?, registry_name?, config_schema?}
+    """
+    name = str(body.get("name") or "").strip()
+    rules = body.get("rules")
+    if not name or not isinstance(rules, list) or not rules:
+        raise HTTPException(
+            status_code=422,
+            detail="rule models require a name and a non-empty rules list")
+    for rule in rules:
+        if not isinstance(rule, dict) or not rule.get("when") or not rule.get("label"):
+            raise HTTPException(
+                status_code=422,
+                detail="each rule needs 'when' (expression) and 'label'")
+    config = {
+        "processor": "rule",
+        "rules": rules,
+        "else": body.get("else", "unknown"),
+        "params": body.get("params") or {},
+        "config_schema": body.get("config_schema") or {},
+    }
+    record = TrainedModel(
+        user_id=current_user.userId,
+        name=name,
+        architecture="rule",
+        processor_type="rule",
+        sensor=body.get("sensor"),
+        task=body.get("task"),
+        visibility="private",
+        registry_name=body.get("registry_name"),
+        size_bytes=0,
+        model_data=None,
+        config=json.dumps(config),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"success": True, "model": record.to_dict()}
+
+
+@router.post("/models/{model_id}/publish", response_model=Dict[str, Any])
+async def publish_model(
+    model_id: int,
+    visibility: str = "community",
+    registry_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Publish a model to the community registry (or set official — admin only)."""
+    model = db.query(TrainedModel).filter(
+        TrainedModel.id == model_id,
+        TrainedModel.user_id == current_user.userId,
+    ).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    if visibility not in VISIBILITIES:
+        raise HTTPException(status_code=422, detail=f"visibility must be one of {sorted(VISIBILITIES)}")
+    if visibility == "official" and getattr(current_user, "role", None) != 1:
+        raise HTTPException(status_code=403, detail="Only admins can publish official models")
+    if registry_name:
+        clash = db.query(TrainedModel).filter(
+            TrainedModel.registry_name == registry_name,
+            TrainedModel.id != model_id,
+        ).first()
+        if clash:
+            raise HTTPException(status_code=409, detail="registry_name already taken")
+        model.registry_name = registry_name
+    model.visibility = visibility
+    db.commit()
+    return {"success": True, "model": model.to_dict()}
 
 
 @router.get("/models/{model_id}/metadata", response_model=Dict[str, Any])

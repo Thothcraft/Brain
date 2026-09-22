@@ -822,8 +822,14 @@ class TrainedModel(Base):
     """Path in Supabase Storage (e.g., 'models/user_123/model_456/name.pt')"""
     config = Column(Text, nullable=True)  # JSON string
     is_pinned = Column(Boolean, default=False)  # Pinned models won't be auto-deleted
+    # Processor-ecosystem metadata (rule | classical | torchscript | fusion)
+    processor_type = Column(String(20), nullable=False, default="torchscript")
+    sensor = Column(String(50), nullable=True)        # radar | csi | camera | fusion | any
+    task = Column(String(50), nullable=True)          # occupancy | har | localization | environmental
+    visibility = Column(String(20), nullable=False, default="private")  # private | community | official
+    registry_name = Column(String(255), nullable=True, index=True)  # e.g. "thothcraft/radar-occupancy-v2"
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     user = relationship("User")
     
@@ -838,6 +844,11 @@ class TrainedModel(Base):
             "size_mb": self.size_bytes / (1024 * 1024) if self.size_bytes else None,
             "config": json.loads(self.config) if self.config else {},
             "is_pinned": self.is_pinned,
+            "processor_type": self.processor_type,
+            "sensor": self.sensor,
+            "task": self.task,
+            "visibility": self.visibility,
+            "registry_name": self.registry_name,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -855,6 +866,89 @@ class DeviceDeployment(Base):
     status = Column(String(50), default="pending", index=True)  # pending | delivered | failed
     created_at = Column(DateTime, default=datetime.utcnow)
     delivered_at = Column(DateTime, nullable=True)
+
+
+class Space(Base):
+    """A named physical area (room, floor, building) with an optional
+    floor plan. Devices are placed inside spaces; zones subdivide them."""
+    __tablename__ = "space"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    parent_id = Column(Integer, ForeignKey("space.id"), nullable=True, index=True)  # building→floor→room
+    name = Column(String(255), nullable=False)
+    floor_plan_file_id = Column(Integer, ForeignKey("file.file_id"), nullable=True)
+    width_m = Column(Float, nullable=True)   # plan extents in meters
+    height_m = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    zones = relationship("Zone", back_populates="space", cascade="all, delete-orphan")
+    placements = relationship("DevicePlacement", back_populates="space", cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "parent_id": self.parent_id,
+            "floor_plan_file_id": self.floor_plan_file_id,
+            "width_m": self.width_m,
+            "height_m": self.height_m,
+            "zones": [z.to_dict() for z in self.zones],
+            "devices": [p.to_dict() for p in self.placements],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Zone(Base):
+    """A polygonal region inside a Space ('desk', 'bed')."""
+    __tablename__ = "zone"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    space_id = Column(Integer, ForeignKey("space.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    polygon_json = Column(Text, nullable=False)  # JSON [[x,y],...] in meters
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    space = relationship("Space", back_populates="zones")
+
+    def to_dict(self):
+        import json as _json
+        try:
+            polygon = _json.loads(self.polygon_json)
+        except (TypeError, ValueError):
+            polygon = []
+        return {"id": self.id, "space_id": self.space_id, "name": self.name,
+                "polygon": polygon}
+
+
+class DevicePlacement(Base):
+    """Where a device sits in a Space and what its sensors cover."""
+    __tablename__ = "device_placement"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey("device.device_id", ondelete="CASCADE"),
+                       unique=True, nullable=False, index=True)
+    space_id = Column(Integer, ForeignKey("space.id", ondelete="CASCADE"), nullable=False, index=True)
+    x = Column(Float, nullable=False, default=0.0)        # meters, plan coords
+    y = Column(Float, nullable=False, default=0.0)
+    rotation_deg = Column(Float, nullable=False, default=0.0)  # facing direction
+    fov_deg = Column(Float, nullable=False, default=90.0)      # sensor cone
+    range_m = Column(Float, nullable=False, default=8.0)       # sensor reach
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    space = relationship("Space", back_populates="placements")
+    device = relationship("Device")
+
+    def to_dict(self):
+        return {
+            "device_id": self.device.device_uuid if self.device else None,
+            "device_name": self.device.device_name if self.device else None,
+            "space_id": self.space_id,
+            "x": self.x, "y": self.y,
+            "rotation_deg": self.rotation_deg,
+            "fov_deg": self.fov_deg,
+            "range_m": self.range_m,
+        }
 
 
 class OrgMembership(Base):
