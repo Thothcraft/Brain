@@ -1007,7 +1007,7 @@ Example manifest:
 
 ```json
 {
-  "format": "thoth-model/v1",
+  "format": "whispy-model/v1",
   "name": "radar-occupancy-v2",
   "processor": "torchscript",
   "inputs": [
@@ -1524,7 +1524,7 @@ both nodes are independently accessible through Brain.
 
 Actions:
 
-1. Enforce `thoth-model/v1` manifest.
+1. Enforce `whispy-model/v1` manifest.
 2. Make portal/model upload binary-safe.
 3. Validate hashes.
 4. Make Brain queue deployments.
@@ -1637,7 +1637,7 @@ Actions:
 
 1. implement a real supported training worker;
 2. make every job persist status transitions;
-3. emit valid `thoth-model/v1` artifacts;
+3. emit valid `whispy-model/v1` artifacts;
 4. validate deployability before marking a job successful;
 5. fix capture/blob retention as one lifecycle;
 6. hash uploaded data/model objects;

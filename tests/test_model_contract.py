@@ -10,9 +10,9 @@ class Classifier(torch.nn.Module):
         return (torch.stack((radar.sum(), csi.sum())),)
 
 
-def contract():
+def contract(schema="whispy-model/v1"):
     return {
-        "schema": "thoth-model/v1",
+        "schema": schema,
         "name": "portable",
         "version": "2",
         "inputs": [
@@ -44,6 +44,13 @@ def test_minute_execution_and_e2_representations():
     assert result["execution"] == "minute"
     assert result["aggregation"] == {"kind": "top2", "threshold": 0.7}
     assert [item["representation"] for item in result["inputs"]] == ["e2_maps", "e2_grid"]
+
+
+def test_legacy_thoth_model_schema_accepted():
+    """Pre-rename ``thoth-model/v1`` metadata validates and normalizes to
+    the canonical ``whispy-model/v1`` schema."""
+    result = normalize_metadata(contract(schema="thoth-model/v1"))
+    assert result["schema"] == "whispy-model/v1"
 
 
 def test_rejects_duplicate_inputs_and_wrong_classes(tmp_path):

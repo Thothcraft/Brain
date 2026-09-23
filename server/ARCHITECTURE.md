@@ -13,7 +13,7 @@ Brain/server/
 ├── services.py            # Background scheduler
 ├── entitlements.py        # Plan/feature gating
 ├── storage.py             # Upload quota checks
-├── model_contract.py      # thoth-model/v1 artifact validation (TorchScript)
+├── model_contract.py      # whispy-model/v1 artifact validation (TorchScript)
 ├── data_validation.py     # File-type validation (structural checks)
 ├── file_type_detector.py  # Content-based file type detection
 ├── db_health_monitor.py   # Database health monitoring
@@ -54,7 +54,7 @@ Brain/server/
 ## Key Modules
 
 ### Model registry (`endpoints/dataset_endpoints.py` + `model_contract.py`)
-- Models are **uploaded artifacts** (`model.pt` + `thoth-model/v1` manifest),
+- Models are **uploaded artifacts** (`model.pt` + `whispy-model/v1` manifest),
   not produced by the server. `validate_torchscript` verifies the artifact
   loads on CPU and matches the declared input shapes.
 - Deployments queue `DeviceDeployment` payloads that edge devices pull on

@@ -747,7 +747,7 @@ Brain/
 │   ├── db.py                # SQLAlchemy models
 │   ├── auth.py              # JWT authentication
 │   ├── config.py            # Environment configuration
-│   ├── model_contract.py    # thoth-model/v1 artifact validation
+│   ├── model_contract.py    # whispy-model/v1 artifact validation
 │   ├── endpoints/
 │   │   ├── auth_endpoints.py      # Login, register, logout
 │   │   ├── device_endpoints.py    # Device registration & status

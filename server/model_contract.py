@@ -1,4 +1,8 @@
-"""Validation for portable user-provided thoth-model/v1 TorchScript classifiers."""
+"""Validation for portable user-provided whispy-model/v1 TorchScript classifiers.
+
+``thoth-model/v1`` is the pre-rename name for the same metadata schema;
+it is accepted on ingest and normalized to ``whispy-model/v1``.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-MODEL_SCHEMA = "thoth-model/v1"
+MODEL_SCHEMA = "whispy-model/v1"
+LEGACY_MODEL_SCHEMA = "thoth-model/v1"
+SUPPORTED_MODEL_SCHEMAS = frozenset({MODEL_SCHEMA, LEGACY_MODEL_SCHEMA})
 
 
 class ModelContractError(ValueError):
@@ -30,8 +36,9 @@ def _names(value: object) -> list[str]:
 
 
 def normalize_metadata(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("schema") != MODEL_SCHEMA:
-        raise ModelContractError(f"metadata.schema must be {MODEL_SCHEMA}")
+    if not isinstance(value, dict) or value.get("schema") not in SUPPORTED_MODEL_SCHEMAS:
+        raise ModelContractError(
+            f"metadata.schema must be one of {sorted(SUPPORTED_MODEL_SCHEMAS)}")
     name, version = str(value.get("name") or "").strip(), str(value.get("version") or "").strip()
     if not name or not version:
         raise ModelContractError("model name and version are required")
