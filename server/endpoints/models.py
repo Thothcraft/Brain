@@ -40,6 +40,8 @@ class DeviceHeartbeatRequest(BaseModel):
     device_id: str
     device_name: Optional[str] = None
     device_type: Optional[str] = None
+    device_hostname: Optional[str] = None  # mDNS name, e.g. thoth-denver.local
+    capabilities: Optional[Dict[str, Any]] = None  # probed sensor availability map
     hardware_info: Optional[Dict[str, Any]] = None
     files: Optional[List[DeviceFileInfo]] = None
     inventory_revision: Optional[int] = Field(default=None, ge=0)

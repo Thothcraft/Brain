@@ -1901,6 +1901,13 @@ async def device_heartbeat(
             hardware_info_updates["wifi_connected"] = request.wifi_connected
         if hasattr(request, 'collection_active') and request.collection_active is not None:
             hardware_info_updates["collection_active"] = request.collection_active
+        # Persist the node's mDNS hostname (thoth-<name>.local) and probed
+        # sensor capabilities so the portal/CLI can link to the local
+        # dashboard and show real hardware state.
+        if getattr(request, 'device_hostname', None):
+            hardware_info_updates["hostname"] = str(request.device_hostname).strip().lower()
+        if getattr(request, 'capabilities', None):
+            hardware_info_updates["capabilities"] = dict(request.capabilities)
 
         # Update optional fields if provided
         if hasattr(request, 'battery_level') and request.battery_level is not None:
@@ -1944,6 +1951,7 @@ async def device_heartbeat(
         db.refresh(device)
         capture_settings = _capture_settings_for_device(device)
         pending_uploads = _get_pending_uploads(device.deviceId, db)
+        pending_deployments = _get_pending_deployments(str(request.device_id), db)
         pending_commands = db.query(DeviceCommand).filter(
             DeviceCommand.device_id == device.deviceId,
             or_(
@@ -1964,12 +1972,15 @@ async def device_heartbeat(
         return {
             "success": True,
             "message": "Heartbeat received",
+            # Top-level for thothcraftd; mirrored under data for older clients.
+            "pending_deployments": pending_deployments,
             "data": {
                 "device_id": str(request.device_id),
                 "device_name": device.device_name,
                 "timestamp": now.isoformat(),
                 "capture_settings": capture_settings,
                 "pending_uploads": pending_uploads,
+                "pending_deployments": pending_deployments,
                 "pending_commands": [command.to_dict() for command in pending_commands],
             }
         }

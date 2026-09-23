@@ -1,4 +1,5 @@
 import logging
+import re
 import sys
 import traceback
 from time import perf_counter
@@ -255,19 +256,61 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",  # thothHUB local
     "http://localhost:3001",  # Education Portal
     "http://localhost:3002",  # Website
+    "http://localhost:5000",  # Edge node local dashboard
+    "http://127.0.0.1:5000",
+    "https://thothcraft.com",
+    "https://www.thothcraft.com",
+    "https://thothcraft.org",
+    "https://www.thothcraft.org",
+    "https://api.thothcraft.com",
+    "https://hub.thothcraft.com",
+    "https://portal.thothcraft.com",
+    "https://research.thothcraft.com",
     "https://thoth-frontend-sable.vercel.app",
     "https://portal-three-rho.vercel.app",  # thothHUB on Vercel
     "https://web-production-d7d37.up.railway.app",  # Backend domain
 ]
+
+# Extra origins can be injected at deploy time without a code change, e.g.
+# CORS_EXTRA_ORIGINS="https://staging.thothcraft.com,https://preview.vercel.app"
+ALLOWED_ORIGINS += [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("CORS_EXTRA_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+# Origin patterns trusted in addition to the explicit list:
+#   - any *.thothcraft.com / *.thothcraft.org host (api, hub, portal, research)
+#   - any *.vercel.app preview deployment
+#   - any *.local mDNS edge node (thoth-<name>.local dashboards)
+#   - localhost / 127.0.0.1 on any port (local dev + edge dashboard)
+ALLOWED_ORIGIN_REGEX = (
+    r"^https?:\/\/"
+    r"(([a-zA-Z0-9-]+\.)*(thothcraft\.com|thothcraft\.org|vercel\.app|local)"
+    r"|localhost|127\.0\.0\.1)"
+    r"(:\d+)?$"
+)
+
+_ORIGIN_REGEX = re.compile(ALLOWED_ORIGIN_REGEX)
+
+
+def _origin_allowed(origin: Optional[str]) -> bool:
+    """Single source of truth for CORS origin checks (middleware + OPTIONS)."""
+    if not origin:
+        return False
+    normalized = origin.rstrip("/")
+    return normalized in ALLOWED_ORIGINS or bool(_ORIGIN_REGEX.match(normalized))
+
 
 # --------------------------------------------------
 # Enhanced CORS middleware - MUST BE ADDED FIRST
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,  # Use specific origins instead of "*"
+    allow_origins=ALLOWED_ORIGINS,  # Specific origins
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,  # Allow credentials for specific origins
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicitly list methods
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],  # Explicitly list methods
     allow_headers=[
         "Authorization",
         "Content-Type",
@@ -276,6 +319,7 @@ app.add_middleware(
         "X-Requested-With",
         "X-CSRF-Token",
         "X-Request-ID",
+        "X-Api-Version",
     ],
     expose_headers=[
         "Content-Range",
@@ -409,18 +453,21 @@ async def health():
         "version": APP_VERSION
     }
 
-# Global OPTIONS handler for CORS preflight requests
+# Global OPTIONS handler for CORS preflight requests.
+# Uses the same origin policy as CORSMiddleware so regex-matched origins
+# (*.thothcraft.com, *.thothcraft.org, *.local, localhost:any-port) are not
+# rejected here after passing the middleware.
 @app.options("/{path:path}")
 async def options_handler(path: str, request: Request):
     """Handle CORS preflight requests for all paths."""
     origin = request.headers.get("Origin")
-    if origin in ALLOWED_ORIGINS:
+    if _origin_allowed(origin):
         return Response(
             status_code=200,
             headers={
                 "Access-Control-Allow-Origin": origin,
-                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Origin, X-Requested-With, X-CSRF-Token, X-Request-ID",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Origin, X-Requested-With, X-CSRF-Token, X-Request-ID, X-Api-Version",
                 "Access-Control-Allow-Credentials": "true",
                 "Access-Control-Max-Age": "600",
             }

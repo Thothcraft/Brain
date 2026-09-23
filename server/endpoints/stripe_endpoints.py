@@ -18,7 +18,8 @@ except ImportError:
 
 from server.db import get_db, User, Payment
 from server.auth import get_current_user
-from server.entitlements import PLANS
+from server.entitlements import PLANS, normalize_plan
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stripe", tags=["stripe"])
@@ -405,3 +406,100 @@ async def create_billing_portal(current_user: User = Depends(get_current_user)):
         return_url=os.getenv("STRIPE_PORTAL_RETURN_URL", os.getenv("NEXTAUTH_URL", "http://localhost:3000") + "/settings"),
     )
     return {"url": session.url}
+
+
+def _plan_for_price(price_id: str) -> str | None:
+    """Map a Stripe price id back to a canonical plan name."""
+    return next(
+        (name.rsplit("_", 1)[0] for name, value in PRICE_IDS.items() if value and value == price_id),
+        None,
+    )
+
+
+@router.post("/sync-subscription")
+async def sync_subscription(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Reconcile this account's plan with live Stripe subscription state.
+
+    Self-heals plans stuck on ``free`` when a webhook delivery was missed
+    (e.g. the webhook endpoint moved to api.thothcraft.com). Safe to call
+    repeatedly — it only upgrades when Stripe reports an active/trialing
+    subscription, and downgrades only when the stored subscription is gone.
+    """
+    if not STRIPE_AVAILABLE or not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(status_code=503, detail="Payment service not available")
+
+    customer_id = current_user.stripe_customer_id
+
+    # Recover the customer link when checkout completed but the webhook never
+    # arrived (customer carries metadata.user_id from create_checkout_session).
+    if not customer_id and current_user.email:
+        try:
+            customers = stripe.Customer.list(email=current_user.email, limit=10)
+            for cust in customers.data:
+                if str((cust.metadata or {}).get("user_id")) == str(current_user.userId):
+                    customer_id = cust.id
+                    current_user.stripe_customer_id = cust.id
+                    db.commit()
+                    break
+        except Exception as exc:
+            logger.warning("Stripe customer lookup failed for user %s: %s", current_user.userId, exc)
+
+    if not customer_id:
+        return {
+            "success": True,
+            "synced": False,
+            "plan": normalize_plan(current_user.plan),
+            "detail": "No Stripe customer linked to this account",
+        }
+
+    try:
+        subs = stripe.Subscription.list(customer=customer_id, status="all", limit=20)
+    except Exception as exc:
+        logger.error("Stripe subscription list failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Unable to reach Stripe")
+
+    active = [s for s in subs.data if str(s.status) in {"active", "trialing"}]
+    if not active:
+        # Only downgrade if our stored subscription is confirmed gone/canceled.
+        if current_user.stripe_subscription_id:
+            current_user.plan = "free"
+            current_user.stripe_subscription_id = None
+            current_user.plan_expires_at = None
+            db.commit()
+        return {
+            "success": True,
+            "synced": True,
+            "plan": normalize_plan(current_user.plan),
+            "detail": "No active subscription on file",
+        }
+
+    sub = sorted(active, key=lambda s: s.created)[-1]
+    price_id = sub.items.data[0].price.id if sub.items and sub.items.data else None
+    plan = _plan_for_price(price_id) if price_id else None
+    if not plan:
+        return {
+            "success": True,
+            "synced": False,
+            "plan": normalize_plan(current_user.plan),
+            "detail": f"Active subscription {sub.id} uses unrecognized price {price_id}",
+        }
+
+    current_user.stripe_customer_id = customer_id
+    current_user.stripe_subscription_id = sub.id
+    current_user.plan = plan
+    try:
+        current_user.plan_expires_at = datetime.utcfromtimestamp(sub.current_period_end)
+    except Exception:
+        pass
+    db.commit()
+    logger.info("sync-subscription: user %s → plan %s (sub %s)", current_user.userId, plan, sub.id)
+    return {
+        "success": True,
+        "synced": True,
+        "plan": plan,
+        "subscription_id": sub.id,
+        "status": str(sub.status),
+    }
