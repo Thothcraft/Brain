@@ -1518,12 +1518,19 @@ async def create_rule_model(
             raise HTTPException(
                 status_code=422,
                 detail="each rule needs 'when' (expression) and 'label'")
+    else_label = body.get("else", "unknown")
+    class_names = [r.get("label") for r in rules if r.get("label")]
+    if else_label and else_label not in class_names:
+        class_names.append(else_label)
     config = {
         "processor": "rule",
         "rules": rules,
-        "else": body.get("else", "unknown"),
+        "rule_type": body.get("rule_type") or ("face_detection" if body.get("sensor") == "camera" else "threshold"),
+        "else": else_label,
         "params": body.get("params") or {},
         "config_schema": body.get("config_schema") or {},
+        "actuator": body.get("actuator"),
+        "class_names": class_names,
     }
     record = TrainedModel(
         user_id=current_user.userId,
@@ -1809,7 +1816,9 @@ async def deploy_model_to_device(
         ).first()
         if not model:
             raise HTTPException(status_code=404, detail="Model not found")
-        if not model.model_data:
+
+        is_rule = (model.architecture == "rule" or getattr(model, "processor_type", None) == "rule")
+        if not is_rule and not model.model_data:
             raise HTTPException(status_code=400, detail="Model has no weights to deploy")
 
         # Validate device
@@ -1827,41 +1836,66 @@ async def deploy_model_to_device(
         stored_config = json.loads(model.config) if model.config else {}
         metadata = stored_config.get('metadata') if isinstance(stored_config, dict) else None
         model_hash = stored_config.get('model_hash') if isinstance(stored_config, dict) else None
-        if not isinstance(metadata, dict) or metadata.get('schema') != 'thoth-model/v1':
+        if not is_rule and (not isinstance(metadata, dict) or metadata.get('schema') != 'thoth-model/v1'):
             raise HTTPException(status_code=400, detail='Only validated thoth-model/v1 TorchScript models can be deployed')
         deploy_config = request.config or {}
         deploy_config.update({
             "deployment_id": deployment_id,
             "model_name": model.name,
             "model_type": model.architecture or "unknown",
+            "processor_type": "rule" if is_rule else "torchscript",
+            "sensor": getattr(model, "sensor", None) or "any",
             "deployed_at": datetime.utcnow().isoformat(),
         })
 
-        # Enrich with training job preprocessing info
-        if model.job_id:
-            job = db.query(TrainingJob).filter(TrainingJob.job_id == model.job_id).first()
-            if job and job.config:
-                try:
-                    job_config = json.loads(job.config) if isinstance(job.config, str) else job.config
-                    deploy_config["preprocessing"] = {
-                        "data_type": job_config.get("data_type"),
-                        "window_size": job_config.get("window_size"),
-                        "output_shape": job_config.get("output_shape"),
-                    }
-                    deploy_config["class_names"] = job_config.get("class_names", [])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        if is_rule:
+            class_names = stored_config.get("class_names") or [
+                r.get("label") for r in stored_config.get("rules", []) if r.get("label")
+            ]
+            rule_metadata = {
+                "schema": "thoth-rule/v1",
+                "name": model.name,
+                "version": "1.0.0",
+                "processor_type": "rule",
+                "sensor": getattr(model, "sensor", None) or "any",
+                "class_names": class_names,
+            }
+            full_payload = {
+                "deployment_id": deployment_id,
+                "model_name": model.name,
+                "model_type": "rule",
+                "processor_type": "rule",
+                "sensor": getattr(model, "sensor", None) or "any",
+                "metadata": rule_metadata,
+                "rule_config": stored_config,
+                "config": deploy_config,
+            }
+        else:
+            # Enrich with training job preprocessing info
+            if model.job_id:
+                job = db.query(TrainingJob).filter(TrainingJob.job_id == model.job_id).first()
+                if job and job.config:
+                    try:
+                        job_config = json.loads(job.config) if isinstance(job.config, str) else job.config
+                        deploy_config["preprocessing"] = {
+                            "data_type": job_config.get("data_type"),
+                            "window_size": job_config.get("window_size"),
+                            "output_shape": job_config.get("output_shape"),
+                        }
+                        deploy_config["class_names"] = job_config.get("class_names", [])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
-        # Build full payload (model weights encoded as base64)
-        full_payload = {
-            "deployment_id": deployment_id,
-            "model_name": model.name,
-            "model_type": model.architecture or "unknown",
-            "model_data": base64.b64encode(model.model_data).decode("utf-8"),
-            "model_hash": model_hash or hashlib.sha256(model.model_data).hexdigest(),
-            "metadata": metadata,
-            "config": deploy_config,
-        }
+            # Build full payload (model weights encoded as base64)
+            full_payload = {
+                "deployment_id": deployment_id,
+                "model_name": model.name,
+                "model_type": model.architecture or "unknown",
+                "model_data": base64.b64encode(model.model_data).decode("utf-8"),
+                "model_hash": model_hash or hashlib.sha256(model.model_data).hexdigest(),
+                "metadata": metadata,
+                "config": deploy_config,
+            }
 
         # Store in DB — device will pick it up on next register/heartbeat
         record = DeviceDeployment(

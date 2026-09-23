@@ -2004,6 +2004,13 @@ async def create_device_command(
         payload=json.dumps(command_payload, separators=(",", ":")),
     )
     db.add(command)
+    if command_name in {"start_collection", "stop_collection"}:
+        try:
+            hw_info = json.loads(device.hardware_info or "{}") if device.hardware_info else {}
+        except Exception:
+            hw_info = {}
+        hw_info["collection_active"] = (command_name == "start_collection")
+        device.hardware_info = json.dumps(hw_info)
     db.commit()
     db.refresh(command)
     return {"success": True, "command": command.to_dict()}
@@ -2037,6 +2044,16 @@ async def acknowledge_device_command(
     command.status = "completed" if payload.get("success") is not False else "failed"
     command.completed_at = datetime.utcnow()
     command.result = json.dumps(payload, separators=(",", ":"))
+    if command.command in {'start_collection', 'stop_collection'}:
+        try:
+            hw_info = json.loads(device.hardware_info or "{}") if device.hardware_info else {}
+        except Exception:
+            hw_info = {}
+        if payload.get("success") is not False:
+            hw_info["collection_active"] = (command.command == "start_collection")
+        else:
+            hw_info["collection_active"] = (command.command != "start_collection")
+        device.hardware_info = json.dumps(hw_info)
     if command.command in {'enable_model', 'disable_model'}:
         try:
             command_payload = json.loads(command.payload or '{}')
