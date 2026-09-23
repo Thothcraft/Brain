@@ -4,131 +4,75 @@
 
 ```
 Brain/server/
-├── fl/                      # Federated Learning (Flower-based)
-│   ├── core/                # Config, models, client
-│   ├── algorithms/          # FL strategies + knowledge distillation
-│   ├── datasets/            # Data loading with flwr-datasets
-│   ├── experiments/         # Multi-model experiments, pipelines
-│   ├── visualization/       # FL-specific plots
-│   └── session.py           # Session manager
+├── main.py                # FastAPI app entry point
+├── routes.py              # Central router (imports endpoint modules)
+├── db.py                  # SQLAlchemy models
+├── auth.py                # JWT authentication
+├── config.py              # Environment configuration
+├── startup.py             # Lifespan / startup tasks
+├── services.py            # Background scheduler
+├── entitlements.py        # Plan/feature gating
+├── storage.py             # Upload quota checks
+├── model_contract.py      # thoth-model/v1 artifact validation (TorchScript)
+├── data_validation.py     # File-type validation (structural checks)
+├── file_type_detector.py  # Content-based file type detection
+├── db_health_monitor.py   # Database health monitoring
+├── init_db.py             # Schema bootstrap
+├── run_migrations.py      # Lightweight migrations
+├── optimize_db.py         # Index/statistics maintenance
 │
-├── ml/                      # Unified ML interface
-│   ├── __init__.py          # Re-exports from ml_models/ and dl_models/
-│   └── training.py          # Training utilities
+├── endpoints/             # FastAPI endpoint modules
+│   ├── system_endpoints.py    # Health and info
+│   ├── auth_endpoints.py      # Login, register, profile
+│   ├── ai_endpoints.py        # AI assistant queries
+│   ├── device_endpoints.py    # Device registry, pairing, commands
+│   ├── data_endpoints.py      # Data operations
+│   ├── file_endpoints.py      # File upload & management
+│   ├── dataset_endpoints.py   # Datasets + model registry/deployments
+│   ├── sensor_endpoints.py    # Sensor data
+│   ├── network_endpoints.py   # WiFi configuration
+│   ├── activity_endpoints.py  # Activity feed and stats
+│   ├── validation_endpoints.py# File validation
+│   ├── folders.py             # Folder management
+│   ├── admin_endpoints.py     # Admin dashboard
+│   ├── labs_endpoints.py      # Labs & submissions
+│   ├── stripe_endpoints.py    # Stripe payments
+│   ├── spatial_endpoints.py   # Spaces, zones, placement
+│   ├── webhook_endpoints.py   # Twilio webhooks
+│   ├── resumable_upload.py    # Resumable uploads
+│   └── models.py              # Shared request/response models
 │
-├── ml_models/               # Classical ML models
-│   ├── base.py              # BaseMLModel, MLModelRegistry
-│   ├── model_svm.py
-│   ├── model_random_forest.py
-│   ├── model_knn.py
-│   └── ...
-│
-│   ├── base.py              # BaseDLModel, DLModelRegistry
-│   ├── model_lstm_3d.py
-│   ├── model_cnn1d_3d.py
-│   ├── model_transformer_3d.py
-│   └── ...
-│
-├── preprocessing/           # Data preprocessing pipeline
-│   ├── base.py              # BaseBlock, BlockRegistry
-│   ├── pipeline.py          # PreprocessingPipeline
-│   ├── block_*.py           # Individual blocks
-│   └── ...
-│
-├── reporting/               # Training reports
-│   └── __init__.py          # Re-exports from training_report.py
-│
-├── visualization/           # Visualization utilities
-│   └── __init__.py          # Re-exports from figure_export.py
-│
-├── metrics/                 # Metrics tracking
-│   ├── tracker.py
-│   ├── visualizer.py
-│   └── exporter.py
-│
-├── endpoints/               # FastAPI endpoints
-│   ├── fl_endpoints.py      # Federated Learning API
-│   ├── training_endpoints.py
-│   └── ...
-│
-├── utils/                   # Utilities
-│   ├── logging_utils.py
-│   ├── error_handler.py
-│   └── ...
-│
-└── aiagent/                 # AI Agent (in parent directory)
-    ├── handler/             # Query handlers
-    ├── memory/              # Memory management
-    ├── context/             # Context extraction
-    └── functions/           # Function registry
+├── sensors/               # Sensor helpers
+├── utils/                 # Utilities (logging, storage, capture containers)
+└── aiagent/               # AI agent (in parent directory)
+    ├── handler/           # Query handlers
+    ├── memory/            # Memory management
+    ├── context/           # Context extraction
+    └── functions/         # Function registry
 ```
 
 ## Key Modules
 
-### Federated Learning (`fl/`)
-- Uses **Flower (flwr)** framework exclusively
-- Supports 14+ FL algorithms (FedAvg, FedProx, FedAdam, etc.)
-- Knowledge distillation (FedDF, FedMD) for heterogeneous models
-- Multi-run experiments with statistical analysis
+### Model registry (`endpoints/dataset_endpoints.py` + `model_contract.py`)
+- Models are **uploaded artifacts** (`model.pt` + `thoth-model/v1` manifest),
+  not produced by the server. `validate_torchscript` verifies the artifact
+  loads on CPU and matches the declared input shapes.
+- Deployments queue `DeviceDeployment` payloads that edge devices pull on
+  heartbeat and acknowledge.
 
-### Machine Learning (`ml/`, `ml_models/`, `dl_models/`)
-- Unified interface via `ml/` module
-- Classical ML: SVM, Random Forest, KNN, etc.
-- Deep Learning: LSTM, GRU, CNN, Transformer, ResNet
-- Model sizes: nano, mini, max
+### Datasets
+- `TrainingDataset`/`DatasetFile` tables group uploaded files with labels.
+- Server-side window parsing/training was removed; parsing and windowing
+  live in the Whispy edge SDK.
 
-### Preprocessing (`preprocessing/`)
-- Block-based pipeline architecture
-- Blocks: normalization, windowing, filtering, FFT, PCA
-- Composable and extensible
-
-### Reporting & Visualization
-- `reporting/`: Training metrics and reports
-- `visualization/`: Publication-ready figures (IEEE style)
-- `metrics/`: Real-time tracking and export
-
-## Removed Files (Cleanup)
-- `fl_algorithms/` - Duplicate FL implementations (now in `fl/`)
-- `flower_fl.py` - Monolithic FL file (now modular in `fl/`)
-- `modular_ml.py` - Duplicate code (consolidated)
-
-## Usage Examples
-
-### Federated Learning
-```python
-from server.fl import (
-    create_experiment,
-    FLExperimentRunner,
-    list_pipelines,
-)
-
-# Run an experiment
-experiment = create_experiment(
-    name="CIFAR10-FedAvg",
-    algorithm="fedavg",
-    model="resnet18",
-    num_runs=3,
-)
-runner = FLExperimentRunner()
-result = await runner.run(experiment)
-```
-
-### Machine Learning
-```python
-from server.ml import create_model, list_all_models
-
-# Create models
-rf = create_model("random_forest", {"n_estimators": 100})
-lstm = create_model("lstm_mini", {"input_size": 64, "num_classes": 4})
-```
-
-### Preprocessing
-```python
-from server.preprocessing import PreprocessingPipeline
-
-pipeline = PreprocessingPipeline([
-    {"type": "zscore_normalize"},
-    {"type": "sliding_window", "window_size": 128},
-])
-X_processed = pipeline.transform(X_raw)
-```
+## Removed (training & federated learning cleanup)
+- `fl/` — Flower-based federated learning package
+- `ml/`, `ml_models/`, `dl_models/` — server-side model training
+- `preprocessing/` — training preprocessing pipelines
+- `metrics/`, `plotting/`, `reporting/`, `visualization/` — training metrics/figures
+- `training_report.py`, `model_selector.py`, `figure_export.py`,
+  `publication_plots.py`, `dataset_manager.py`
+- `endpoints/figure_endpoints.py`, `plotting_api.py`, `report_endpoints.py`,
+  `processing_endpoints.py`
+- `TrainingJob` and `PreprocessingPipeline` ORM models and `/datasets/train/*`
+  endpoints

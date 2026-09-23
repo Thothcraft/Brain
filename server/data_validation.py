@@ -356,31 +356,14 @@ class CSIDataLoader(BaseDataLoader):
             return ValidationResult(False, self.file_type, None, errors, warnings, statistics)
     
     def load(self, content: bytes, config: Optional[Dict] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Load CSI data and return numpy array with statistics."""
-        config = config or {}
-        window_size = config.get("window_size", 1000)
-        include_phase = config.get("include_phase", True)
-        filter_subcarriers = config.get("filter_subcarriers", True)
-        subcarrier_start = config.get("subcarrier_start", 5)
-        subcarrier_end = config.get("subcarrier_end", 32)
-        
-        # Use existing parse_csi_file function
-        from server.ml_training import parse_csi_file
-        windows, metadata = parse_csi_file(
-            content,
-            window_size=window_size,
-            include_phase=include_phase,
-            filter_subcarriers=filter_subcarriers,
-            subcarrier_start=subcarrier_start,
-            subcarrier_end=subcarrier_end,
+        """Server-side CSI window parsing was removed with the training stack.
+
+        Windowing/parsing now lives in the Whispy edge SDK. Structural
+        validation via ``validate()`` remains available.
+        """
+        raise NotImplementedError(
+            "CSI window parsing moved to the Whispy SDK; server-side training was removed"
         )
-        
-        if windows:
-            data = np.stack(windows, axis=0)
-        else:
-            data = np.array([])
-        
-        return data, metadata
     
     def extract_metadata(self, content: bytes, filename: str) -> Dict[str, Any]:
         """Extract metadata from CSI file."""
@@ -877,25 +860,14 @@ class IMUDataLoader(BaseDataLoader):
             return ValidationResult(False, self.file_type, None, errors, warnings, statistics)
     
     def load(self, content: bytes, config: Optional[Dict] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Load IMU data as numpy array."""
-        from server.ml_training import parse_imu_file
-        
-        config = config or {}
-        window_size = config.get("window_size", 128)
-        
-        windows = parse_imu_file(content, window_size)
-        
-        if windows:
-            data = np.stack(windows, axis=0)
-        else:
-            data = np.array([])
-        
-        metadata = {
-            "num_windows": len(windows),
-            "window_size": window_size,
-        }
-        
-        return data, metadata
+        """Server-side IMU window parsing was removed with the training stack.
+
+        Windowing/parsing now lives in the Whispy edge SDK. Structural
+        validation via ``validate()`` remains available.
+        """
+        raise NotImplementedError(
+            "IMU window parsing moved to the Whispy SDK; server-side training was removed"
+        )
     
     def extract_metadata(self, content: bytes, filename: str) -> Dict[str, Any]:
         result = self.validate(content, filename)

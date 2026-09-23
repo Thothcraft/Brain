@@ -95,11 +95,10 @@ def query_openai(
 
 You help users with:
 - Managing IoT devices and sensor data
-- Training machine learning models on collected data
 - Analyzing data and providing insights
 - Understanding their system status and metrics
 
-When users ask about their devices, data, training jobs, or models, use the system_stats context provided to give accurate answers.
+When users ask about their devices, data, or models, use the system_stats context provided to give accurate answers.
 Be helpful, concise, and accurate. If you don't have specific information, say so."""
 
     messages.append({"role": "system", "content": system_prompt})
@@ -114,13 +113,11 @@ Be helpful, concise, and accurate. If you don't have specific information, say s
         stats_context = """Current System Status:
 - Devices: {devices}
 - Files: {files}
-- Training: {training}
 - Models: {models}
 
-Use this information to answer questions about the user's devices, data, training jobs, and models.""".format(
+Use this information to answer questions about the user's devices, data, and models.""".format(
             devices=stats.get("devices", {}).get("description", "No device data"),
             files=stats.get("files", {}).get("description", "No file data"),
-            training=stats.get("training", {}).get("description", "No training data"),
             models=stats.get("models", {}).get("description", "No model data")
         )
         messages.append({"role": "system", "content": stats_context})

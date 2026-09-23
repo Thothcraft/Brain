@@ -96,26 +96,3 @@ class AIConfig(BaseModel):
                                    description="Penalize new tokens based on presence")
     stop: Optional[List[str]] = Field(None, 
                                      description="Sequences where the API will stop generating")
-
-
-class AITrainingExample(BaseModel):
-    """A single training example for fine-tuning the AI model."""
-    prompt: str = Field(..., description="The input prompt")
-    completion: str = Field(..., description="The desired completion")
-    metadata: Optional[Dict[str, Any]] = Field(None, 
-                                             description="Additional metadata for the example")
-
-
-class AITrainingRequest(BaseModel):
-    """Request model for submitting training data to fine-tune the AI."""
-    examples: List[AITrainingExample] = Field(..., 
-                                            description="List of training examples")
-    model_name: Optional[str] = Field("gpt-3.5-turbo",
-                                     description="Base model to fine-tune")
-    validation_split: float = Field(0.1, ge=0.0, le=0.5,
-                                   description="Fraction of data to use for validation")
-    epochs: int = Field(3, ge=1, description="Number of training epochs")
-    batch_size: Optional[int] = Field(None, 
-                                     description="Batch size for training")
-    learning_rate: float = Field(1e-5, ge=0, 
-                                description="Learning rate for training")

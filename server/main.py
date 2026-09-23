@@ -13,6 +13,7 @@ from pathlib import Path
 import os
 import json
 from server.routes import router
+from server.v1 import router as v1_router
 from server.services import start_scheduler
 from server.logging_config import setup_logging, get_logger, log_performance, log_request_details
 from server.utils.logging_utils import (
@@ -476,6 +477,9 @@ async def options_handler(path: str, request: Request):
 
 # Include API router with /api prefix
 app.include_router(router, prefix=API_PREFIX)
+# Versioned public API (Architecture v3.0, section 9.2) - the contract
+# Whispy, Thoth, thothHUB, and mobile converge on.
+app.include_router(v1_router, prefix="/v1")
 
 # Start the scheduler when the application starts
 start_scheduler()

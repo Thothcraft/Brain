@@ -17,16 +17,80 @@ from server.endpoints.device_endpoints import (
 )
 from server.endpoints.models import DevicePairingClaimRequest, DevicePairingStartRequest
 
+# start_device_pairing normalizes request.device_id via uuid5 before
+# querying — fixtures must store the normalized form to be found.
+NORMALIZED_DEVICE_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "device-id"))
+
+
+def _expr_value(side):
+    """Extract a Python value from a SQLAlchemy expression side."""
+    return getattr(side, "value", side)
+
+
+def _attr_for(record, name):
+    """Map a column name (``user_id``) to the ORM attribute (``userId``)."""
+    if hasattr(record, name):
+        return name
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        for attr in sa_inspect(type(record)).mapper.attrs:
+            cols = getattr(attr, "columns", None)
+            if cols and cols[0].name == name:
+                return attr.key
+    except Exception:
+        pass
+    return name
+
+
+def _matches(record, expr) -> bool:
+    """Evaluate a simple SQLAlchemy binary expression against a record."""
+    import operator as _op
+    left = getattr(expr, "left", None)
+    right = getattr(expr, "right", None)
+    op = getattr(expr, "operator", None)
+    if left is None or op is None:
+        return True
+    name = getattr(left, "key", None) or getattr(left, "name", None)
+    actual = getattr(record, _attr_for(record, name), None)
+    expected = _expr_value(right)
+    try:
+        if op == _op.eq:
+            return actual == expected
+        if op == _op.ne:
+            return actual != expected
+        if op == _op.gt:
+            return actual is not None and expected is not None and actual > expected
+        if op == _op.ge:
+            return actual is not None and expected is not None and actual >= expected
+        if op == _op.lt:
+            return actual is not None and expected is not None and actual < expected
+        if op == _op.le:
+            return actual is not None and expected is not None and actual <= expected
+        if op == _op.in_op:
+            return actual in expected
+    except TypeError:
+        return False
+    return True
+
 
 class _Query:
-    def __init__(self, records):
-        self.records = records
+    def __init__(self, source, records=None):
+        self._source = source                       # the real store list
+        self.records = list(source) if records is None else records
 
     def filter(self, *args, **kwargs):
+        for expr in args:
+            self.records = [r for r in self.records if _matches(r, expr)]
         return self
 
     def first(self):
         return self.records[0] if self.records else None
+
+    def count(self):
+        return len(self.records)
+
+    def all(self):
+        return list(self.records)
 
     def update(self, values, synchronize_session=False):
         for record in self.records:
@@ -35,8 +99,12 @@ class _Query:
         return len(self.records)
 
     def delete(self, synchronize_session=False):
-        count = len(self.records)
-        self.records.clear()
+        count = 0
+        for record in list(self.records):
+            if record in self._source:
+                self._source.remove(record)
+                count += 1
+        self.records = []
         return count
 
 
@@ -204,7 +272,7 @@ def test_fresh_physical_pairing_moves_an_existing_device_to_the_new_account():
 def test_active_device_requires_its_current_token_to_start_repairing():
     active_device = Device(
         userId=6,
-        device_uuid="device-id",
+        device_uuid=NORMALIZED_DEVICE_ID,
         device_name="Old Thoth",
         device_type="thoth",
         online=True,
@@ -226,7 +294,7 @@ def test_active_device_requires_its_current_token_to_start_repairing():
 def test_active_device_can_start_repairing_with_its_current_token():
     active_device = Device(
         userId=6,
-        device_uuid="device-id",
+        device_uuid=NORMALIZED_DEVICE_ID,
         device_name="Old Thoth",
         device_type="thoth",
         online=True,
@@ -254,7 +322,7 @@ def test_active_device_can_start_repairing_with_its_current_token():
 def test_stale_device_can_recover_when_its_previous_token_expired():
     stale_device = Device(
         userId=6,
-        device_uuid="device-id",
+        device_uuid=NORMALIZED_DEVICE_ID,
         device_name="Old Thoth",
         device_type="thoth",
         online=True,
@@ -274,7 +342,7 @@ def test_stale_device_can_recover_when_its_previous_token_expired():
 def test_stale_device_can_recover_with_the_intended_new_account_token():
     stale_device = Device(
         userId=6,
-        device_uuid="device-id",
+        device_uuid=NORMALIZED_DEVICE_ID,
         device_name="Old Thoth",
         device_type="thoth",
         online=True,

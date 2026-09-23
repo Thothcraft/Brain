@@ -30,8 +30,6 @@ from .ai import (
     ChatMessage,
     ChatHistory,
     AIConfig,
-    AITrainingExample,
-    AITrainingRequest
 )
 
 from .files import (
@@ -83,8 +81,6 @@ __all__ = [
     'ChatMessage',
     'ChatHistory',
     'AIConfig',
-    'AITrainingExample',
-    'AITrainingRequest',
     
     # Files & Devices
     'FileType',

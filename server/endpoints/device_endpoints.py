@@ -183,7 +183,6 @@ _FEATURE_ENTITLEMENTS = {
     "academy": "labs",
     "assistant": "labs",
     "ai_models": "custom_models",
-    "federated_learning": "custom_models",
 }
 
 

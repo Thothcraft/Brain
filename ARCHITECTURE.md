@@ -52,7 +52,7 @@
 - **Sensors (Input Layer)**: Discovers and captures multi-modal telemetry across commodity nodes (Windows laptops, macOS workstations, Linux servers) and dedicated hardware (Raspberry Pi, Jetson, ESP32, mmWave radar, IMU, cameras).
 - **Models (Intelligence Layer)**: Executes real-time edge intelligence using deterministic rule processors, CV heuristics, and compiled PyTorch TorchScript deep learning models directly on CPU and edge accelerators.
 - **Actuators (Action Layer)**: Closes the control loop without cloud latency by driving downstream actions via Home Assistant entities, local device hardware (GPIO, relays, sound), and secure HTTP webhooks.
-- **Cloud & Fleet Management**: Synchronizes telemetry and captures with **Brain** and **ResearchPortal**, enabling centralized dataset curation, cloud model training, and one-click fleet deployment back to edge devices.
+- **Cloud & Fleet Management**: Synchronizes telemetry and captures with **Brain** and **ResearchPortal**, enabling centralized dataset curation, model-artifact storage, and one-click fleet deployment back to edge devices.
 
 ### Key Value Proposition
 
@@ -63,7 +63,7 @@
 | Isolated home automation / industrial silos | Native actuator plugins (Home Assistant, GPIO/Device, Webhook) |
 | Complex, platform-specific edge deployments | Single-command cross-platform installer (`install.ps1`, `install.sh`) |
 | High cloud inference latency & privacy leakage | Real-time on-device inference with offline-first local dashboard |
-| Siloed research data | Collaborative dataset sharing, labeling, and cloud training |
+| Siloed research data | Collaborative dataset sharing and labeling |
 
 ---
 
@@ -157,7 +157,7 @@ node.deploy_rule_model({
 - **SDK / CLI direct** → `node.deploy("model.pt")` or `thothcraft models install model.pt`
 - **Remote portal push** → Research Portal `/models` → *Deploy to device*; Brain queues it and the node's heartbeat pulls + activates it, confirmed end-to-end.
 
-Every prediction lands on the local dashboard instantly and syncs to the portal for labeling, dataset curation, and retraining.
+Every prediction lands on the local dashboard instantly and syncs to the portal for labeling and dataset curation.
 
 ---
 
@@ -176,7 +176,7 @@ ThothCraft operates in a hybrid, edge-first architecture connecting local physic
 │  ├───────────────────────┤       ├───────────────────────┤     ├─────────────────────┤  │
 │  │ • Sensor Layer:       │       │ • Device Registry     │     │ • Fleet Management  │  │
 │  │   Camera, Wi-Fi CSI,  │       │ • Model Hub & Storage │     │ • Models & Rules UI │  │
-│  │   Radar, IMU, CPU/RAM │       │ • PyTorch ML Training │     │ • Capture Lab & Plot│  │
+│  │   Radar, IMU, CPU/RAM │       │ • Model Registry      │     │ • Capture Lab & Plot│  │
 │  │ • Model Layer:        │       │ • Heartbeat & Sync    │     │ • Minute Labeling   │  │
 │  │   RuleProcessor,      │       │ • AI Research Agent   │     │ • Actuator Config   │  │
 │  │   TorchScript ML/DL   │       └───────────────────────┘     └─────────────────────┘  │
@@ -196,7 +196,7 @@ ThothCraft operates in a hybrid, edge-first architecture connecting local physic
 |-----------|------------|---------|
 | **Thoth Node (`thothcraft`)** | Python 3.10+, Click, OpenCV, PyTorch | Multi-platform edge runtime, local API, SMA pipeline, dashboard |
 | **Thoth Device (Dedicated)** | Raspberry Pi OS, Flask, Hardware HATs | Dedicated hardware sensor appliance (Radar, IMU, WiFi CSI) |
-| **Brain** | FastAPI, PostgreSQL, PyTorch, OpenAI | Fleet registry, dataset storage, cloud model training, AI agent |
+| **Brain** | FastAPI, PostgreSQL, PyTorch, OpenAI | Fleet registry, dataset storage, model artifact registry, AI agent |
 | **Research Portal** | Next.js 15, React 19, TailwindCSS | Cloud web UI for fleet telemetry, model deployment, labeling |
 | **Mobile App** | React Native (Planned) | Real-time push alerts, actuator override, and telemetry |
 
@@ -224,7 +224,6 @@ flowchart TB
         B[Brain Backend API]
         DB[(PostgreSQL)]
         S3[(Cloud Storage)]
-        TR[PyTorch Training Worker]
     end
 
     subgraph Client[User Interfaces]
@@ -240,7 +239,6 @@ flowchart TB
 
     B --> DB
     B --> S3
-    B --> TR
     RP -->|Fleet REST API| B
     LD -->|Direct Local API| Nodes
     ACT -.->|Smart Home REST| HA
@@ -510,7 +508,7 @@ ThothCraft provides two complementary dashboards designed for different operatio
 │  │ • Hardware sensor inventory & state│         │ • Minute capture Start/Stop sync   │ │
 │  │ • Real-time prediction event stream│         │ • Multi-modal plot visualizers     │ │
 │  │ • Local one-click model evaluation │         │ • Interactive dataset labeling     │ │
-│  │ • Direct OpenSSH port 22 access    │         │ • Cloud PyTorch model training     │ │
+│  │ • Direct OpenSSH port 22 access    │         │ • Model artifact registry & upload │ │
 │  │ • Styled in Thoth design system    │         │ • One-click fleet model deployment │ │
 │  └────────────────────────────────────┘         └────────────────────────────────────┘ │
 │                                                                                        │
@@ -727,7 +725,7 @@ Examples:
 
 ### Brain Backend
 
-The Brain is the central backend service handling authentication, device management, data storage, ML training, and AI assistance.
+The Brain is the central backend service handling authentication, device management, data storage, model artifact registry, and AI assistance.
 
 #### Technology Stack
 
@@ -735,7 +733,7 @@ The Brain is the central backend service handling authentication, device managem
 |-------|------------|
 | **Framework** | FastAPI (Python 3.11+) |
 | **Database** | PostgreSQL with SQLAlchemy ORM |
-| **ML Training** | PyTorch |
+| **Model Validation** | PyTorch (TorchScript artifact checks) |
 | **AI Agent** | OpenAI GPT-4 with function calling |
 | **Authentication** | JWT tokens |
 | **Task Queue** | APScheduler (background jobs) |
@@ -749,14 +747,12 @@ Brain/
 │   ├── db.py                # SQLAlchemy models
 │   ├── auth.py              # JWT authentication
 │   ├── config.py            # Environment configuration
-│   ├── ml_training.py       # PyTorch training logic
+│   ├── model_contract.py    # thoth-model/v1 artifact validation
 │   ├── endpoints/
 │   │   ├── auth_endpoints.py      # Login, register, logout
 │   │   ├── device_endpoints.py    # Device registration & status
 │   │   ├── file_endpoints.py      # File upload & management
-│   │   ├── dataset_endpoints.py   # Dataset CRUD & labeling
-│   │   ├── training_endpoints.py  # Training job management
-│   │   ├── processing_endpoints.py # Data pipeline config
+│   │   ├── dataset_endpoints.py   # Dataset CRUD, model registry & deployments
 │   │   ├── sensor_endpoints.py    # Real-time sensor data
 │   │   ├── ai_endpoints.py        # AI chatbot queries
 │   │   └── webhook_endpoints.py   # Twilio SMS integration
@@ -780,7 +776,6 @@ erDiagram
     User ||--o{ Query : makes
     User ||--o{ Session : has
     User ||--o{ TrainingDataset : creates
-    User ||--o{ TrainingJob : runs
     User ||--o{ TrainedModel : owns
     
     Device ||--o{ DeviceFile : contains
@@ -790,7 +785,6 @@ erDiagram
     File ||--o{ FileDeviceUpdate : synced_via
     
     TrainingDataset ||--o{ DatasetFile : contains
-    TrainingDataset ||--o{ TrainingJob : trains
     
     User {
         int userId PK
@@ -850,20 +844,6 @@ erDiagram
         int dataset_id FK
         int file_id FK
         string label
-    }
-    
-    TrainingJob {
-        int id PK
-        string job_id
-        int user_id FK
-        int dataset_id FK
-        string model_type
-        string training_mode
-        string status
-        int current_epoch
-        int total_epochs
-        text metrics
-        string model_path
     }
     
     TrainedModel {

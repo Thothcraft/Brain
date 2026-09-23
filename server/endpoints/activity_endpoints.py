@@ -1,7 +1,7 @@
 """Activity Feed Endpoints.
 
 This module provides endpoints for tracking and retrieving user activity,
-including device events, training jobs, file uploads, and system events.
+including device events, file uploads, and system events.
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_, func
 
-from ..db import get_db, Device, File, TrainingJob, TrainedModel, Query as QueryModel
+from ..db import get_db, Device, File, TrainedModel, Query as QueryModel
 from ..auth import get_current_user
 
 router = APIRouter(prefix="/activity", tags=["activity"])
@@ -28,7 +28,7 @@ async def get_recent_activity(
     Returns a chronologically sorted list of recent events including:
     - Device connections/disconnections
     - File uploads
-    - Training job status changes
+    - Model registrations
     - AI queries
     """
     activities = []
@@ -77,73 +77,7 @@ async def get_recent_activity(
                 }
             })
         
-        # Get recent training jobs
-        jobs = db.query(TrainingJob).filter(
-            TrainingJob.user_id == current_user.userId,
-            or_(
-                TrainingJob.created_at > cutoff_time,
-                TrainingJob.completed_at > cutoff_time
-            )
-        ).order_by(desc(TrainingJob.created_at)).limit(limit).all()
-        
-        for job in jobs:
-            if job.status == "completed" and job.completed_at:
-                activities.append({
-                    "type": "training",
-                    "action": "completed",
-                    "title": "Training completed",
-                    "description": f"{job.model_type} model trained successfully",
-                    "timestamp": job.completed_at.isoformat(),
-                    "icon": "check-circle",
-                    "color": "green",
-                    "metadata": {
-                        "job_id": job.job_id,
-                        "model_type": job.model_type
-                    }
-                })
-            elif job.status == "failed" and job.completed_at:
-                activities.append({
-                    "type": "training",
-                    "action": "failed",
-                    "title": "Training failed",
-                    "description": f"{job.model_type} training encountered an error",
-                    "timestamp": job.completed_at.isoformat(),
-                    "icon": "x-circle",
-                    "color": "red",
-                    "metadata": {
-                        "job_id": job.job_id,
-                        "error": job.error_message
-                    }
-                })
-            elif job.status == "running":
-                activities.append({
-                    "type": "training",
-                    "action": "running",
-                    "title": "Training in progress",
-                    "description": f"{job.model_type} - Epoch {job.current_epoch}/{job.total_epochs}",
-                    "timestamp": (job.started_at or job.created_at).isoformat(),
-                    "icon": "loader",
-                    "color": "blue",
-                    "metadata": {
-                        "job_id": job.job_id,
-                        "progress": (job.current_epoch / job.total_epochs * 100) if job.total_epochs else 0
-                    }
-                })
-            elif job.created_at > cutoff_time:
-                activities.append({
-                    "type": "training",
-                    "action": "started",
-                    "title": "Training job created",
-                    "description": f"{job.model_type} model training queued",
-                    "timestamp": job.created_at.isoformat(),
-                    "icon": "brain",
-                    "color": "purple",
-                    "metadata": {
-                        "job_id": job.job_id
-                    }
-                })
-        
-        # Get recent trained models
+        # Get recent registered models
         models = db.query(TrainedModel).filter(
             TrainedModel.user_id == current_user.userId,
             TrainedModel.created_at > cutoff_time
@@ -212,7 +146,7 @@ async def get_activity_stats(
 ) -> Dict[str, Any]:
     """Get activity statistics for dashboard display.
     
-    Returns counts and stats for devices, files, training jobs, and models.
+    Returns counts and stats for devices, files, and models.
     """
     try:
         # Device stats
@@ -224,21 +158,6 @@ async def get_activity_stats(
         total_files = db.query(File).filter(
             File.userId == current_user.userId,
             File.filename.like("file_%")
-        ).count()
-        
-        # Training stats
-        total_jobs = db.query(TrainingJob).filter(
-            TrainingJob.user_id == current_user.userId
-        ).count()
-        
-        active_jobs = db.query(TrainingJob).filter(
-            TrainingJob.user_id == current_user.userId,
-            TrainingJob.status.in_(["pending", "running", "optimizing"])
-        ).count()
-        
-        completed_jobs = db.query(TrainingJob).filter(
-            TrainingJob.user_id == current_user.userId,
-            TrainingJob.status == "completed"
         ).count()
         
         # Model stats
@@ -263,11 +182,6 @@ async def get_activity_stats(
                 },
                 "files": {
                     "total": total_files
-                },
-                "training": {
-                    "total_jobs": total_jobs,
-                    "active_jobs": active_jobs,
-                    "completed_jobs": completed_jobs
                 },
                 "models": {
                     "total": total_models,

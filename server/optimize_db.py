@@ -24,24 +24,6 @@ def create_performance_indexes():
             except Exception as e:
                 logger.warning(f"[OPTIMIZE] Could not create training_datasets_user_id index: {e}")
             
-            # Index for user_id queries on training jobs
-            try:
-                db.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_training_jobs_user_id 
-                    ON training_job(user_id DESC, created_at DESC)
-                """))
-            except Exception as e:
-                logger.warning(f"[OPTIMIZE] Could not create training_jobs_user_id index: {e}")
-            
-            # Index for status queries on training jobs
-            try:
-                db.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_training_jobs_status 
-                    ON training_job(status, created_at DESC)
-                """))
-            except Exception as e:
-                logger.warning(f"[OPTIMIZE] Could not create training_jobs_status index: {e}")
-            
             # Index for user_id queries on trained models
             try:
                 db.execute(text("""
@@ -60,15 +42,6 @@ def create_performance_indexes():
             except Exception as e:
                 logger.warning(f"[OPTIMIZE] Could not create files_user_id index: {e}")
             
-            # Composite index for training jobs (user_id + status)
-            try:
-                db.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_training_jobs_user_status 
-                    ON training_job(user_id, status, created_at DESC)
-                """))
-            except Exception as e:
-                logger.warning(f"[OPTIMIZE] Could not create training_jobs_user_status index: {e}")
-            
             db.commit()
             logger.info("[OPTIMIZE] Performance indexes created successfully")
             return True
@@ -86,7 +59,6 @@ def analyze_table_statistics():
             # Update statistics for all relevant tables (using proper table names)
             tables = [
                 'training_dataset',
-                'training_job', 
                 'trained_model',
                 'file',
                 'user_account'  # Correct table name from db.py

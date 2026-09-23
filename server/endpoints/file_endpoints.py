@@ -44,6 +44,43 @@ def _original_filename(stored_filename: str) -> str:
     return parts[-1] if len(parts) >= 4 else stored_filename
 
 
+def _generate_file_sample(content: bytes, filename: str, max_lines: int = 64):
+    """Return (sample_text, data_type): the first lines of a text file.
+
+    Replaces the removed server.ml_training preview helper. Binary files
+    return (None, detected_type).
+    """
+    lower = (filename or "").lower()
+    data_type = "unknown"
+    if "csi" in lower:
+        data_type = "csi"
+    elif "imu" in lower:
+        data_type = "imu"
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return None, data_type
+    lines = text.splitlines()
+    if data_type == "unknown" and lines:
+        header = lines[0].lower()
+        if header.startswith("type,seq") or "sig_len" in header or "subcarrier" in header:
+            data_type = "csi"
+        elif "accel" in header or "gyro" in header:
+            data_type = "imu"
+        elif "," in header:
+            data_type = "csv"
+    return "\n".join(lines[:max_lines]), data_type
+
+
+def _get_file_sample_info(content: bytes, filename: str) -> Dict[str, Any]:
+    """Minimal sample metadata (line/byte counts) for preview responses."""
+    return {
+        "total_lines": content.count(b"\n") + (0 if content.endswith(b"\n") or not content else 1),
+        "file_size": len(content),
+        "filename": filename,
+    }
+
+
 def _file_content(file_record: File, storage_client=None) -> Optional[bytes]:
     if file_record.storage_path:
         try:
@@ -487,8 +524,7 @@ async def upload_file_simple(
         # Generate sample content for quick preview
         sample_content = None
         try:
-            from server.ml_training import generate_file_sample
-            sample_content, _ = generate_file_sample(content_bytes, request.filename)
+            sample_content, _ = _generate_file_sample(content_bytes, request.filename)
             log_response(200, f"Generated sample for {request.filename}: sample_len={len(sample_content) if sample_content else 0}", "/file/upload")
         except Exception as sample_err:
             log_error(f"Failed to generate file sample: {sample_err}")
@@ -750,8 +786,7 @@ async def upload_file_multipart(
         # Generate sample content for quick preview
         sample_content = None
         try:
-            from server.ml_training import generate_file_sample
-            sample_content, _ = generate_file_sample(content_bytes, filename)
+            sample_content, _ = _generate_file_sample(content_bytes, filename)
             # Ensure no NUL characters in sample_content (PostgreSQL text fields can't contain NUL)
             if sample_content:
                 sample_content = sample_content.replace('\x00', '')
@@ -1346,10 +1381,8 @@ async def get_file_sample(
             raise HTTPException(status_code=404, detail="File content not available for preview")
         
         # Generate sample
-        from server.ml_training import generate_file_sample, get_file_sample_info
-        
-        sample_content, data_type = generate_file_sample(file_content, file_record.filename)
-        sample_info = get_file_sample_info(file_content, file_record.filename)
+        sample_content, data_type = _generate_file_sample(file_content, file_record.filename)
+        sample_info = _get_file_sample_info(file_content, file_record.filename)
         
         # Cache the sample in DB for future requests
         try:
