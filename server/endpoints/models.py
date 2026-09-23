@@ -41,6 +41,7 @@ class DeviceHeartbeatRequest(BaseModel):
     device_name: Optional[str] = None
     device_type: Optional[str] = None
     device_hostname: Optional[str] = None  # mDNS name, e.g. thoth-denver.local
+    ip_address: Optional[str] = None       # LAN IPv4 fallback when .local fails
     capabilities: Optional[Dict[str, Any]] = None  # probed sensor availability map
     hardware_info: Optional[Dict[str, Any]] = None
     files: Optional[List[DeviceFileInfo]] = None

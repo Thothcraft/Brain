@@ -28,7 +28,7 @@ from server.db import (
     DeviceDeployment, DeviceCaptureChunk, DeviceCommand,
 )
 from server.auth import get_current_user, get_user_from_token
-from server.entitlements import PLANS, has_entitlement, normalize_plan
+from server.entitlements import PLANS, has_entitlement, normalize_plan, check_device_limit
 from server.utils.rate_limit import rate_limit
 from server.audit import audit
 from server.utils.logging_utils import log_request_start, log_response, log_error
@@ -942,6 +942,11 @@ async def claim_device_pairing(
         raise HTTPException(status_code=404, detail="Pairing code is invalid or expired")
 
     device = db.query(Device).filter(Device.device_uuid == pairing.device_uuid).first()
+    # Enforce the plan device limit when this claim would add a NEW device to
+    # the account. Re-claiming a device the user already owns is a no-op.
+    if not device or device.userId != current_user.userId:
+        owned = db.query(Device).filter(Device.userId == current_user.userId).count()
+        check_device_limit(current_user, owned)
     if device and device.userId != current_user.userId:
         # The short-lived code came directly from the physical device. Claiming
         # it is the explicit authorization to move an existing UUID to the new
@@ -1160,11 +1165,9 @@ async def register_device(
                     "data": {"capture_settings": capture_settings}
                 }
             
-            if not _can_mark_device_online(db, _plan_subject(db, current_user)):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"{_product_plan(_plan_subject(db, current_user)).title()} plan device limit reached. Disconnect another device or upgrade your plan."
-                )
+            # Enforce the plan's total device limit (not just online count).
+            owned_count = db.query(Device).filter(Device.userId == user_id).count()
+            check_device_limit(_plan_subject(db, current_user), owned_count)
             # Create new device record — not yet approved; user must confirm in portal
             new_device = Device(
                 userId=user_id,
@@ -1906,6 +1909,9 @@ async def device_heartbeat(
         # dashboard and show real hardware state.
         if getattr(request, 'device_hostname', None):
             hardware_info_updates["hostname"] = str(request.device_hostname).strip().lower()
+        if getattr(request, 'ip_address', None):
+            hardware_info_updates["lan_ip"] = str(request.ip_address).strip()
+            update_data["ip_address"] = str(request.ip_address).strip()
         if getattr(request, 'capabilities', None):
             hardware_info_updates["capabilities"] = dict(request.capabilities)
 

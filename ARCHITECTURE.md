@@ -94,7 +94,7 @@ pip install "thothcraft-cli[sensors]"  # + OpenCV, pyserial, psutil hardware dri
 
 ```bash
 thothcraft login                    # account credentials → JWT stored in ~/.thothcraft
-thothcraft pair                     # prints a claim code → approve in the portal
+thothcraft pair                     # self-claims this node on your account (no web step)
 thothcraft daemon                   # starts the node: local API + dashboard on :5000
 ```
 
