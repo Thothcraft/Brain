@@ -647,6 +647,85 @@ class DeviceCommand(Base):
         }
 
 
+class DeviceCapture(Base):
+    """A durable logical capture session owned by exactly one device.
+
+    Unlike ``DeviceCaptureChunk`` (per-minute live analysis), this row is the
+    authoritative record of a capture request: it pins the capture to the
+    device that must run it and tracks a real lifecycle state
+    (requested → running → stopping → stopped/failed). This lets stop target
+    the correct device and prevents reporting unconfirmed work as done.
+    """
+    __tablename__ = "device_capture"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    capture_id = Column(String(64), unique=True, nullable=False, index=True)
+    device_id = Column(Integer, ForeignKey("device.device_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    state = Column(String(20), nullable=False, default="requested", index=True)
+    sensors = Column(Text, nullable=False, default="[]")
+    sample_counts = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    stopped_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        try:
+            sensors = json.loads(self.sensors or "[]")
+        except (TypeError, json.JSONDecodeError):
+            sensors = []
+        try:
+            counts = json.loads(self.sample_counts or "{}")
+        except (TypeError, json.JSONDecodeError):
+            counts = {}
+        return {
+            "id": self.capture_id,
+            "device_id": self.device_id,
+            "state": self.state,
+            "sensors": sensors,
+            "sample_counts": counts,
+            "started_at": self.started_at.isoformat() + "Z" if self.started_at else None,
+            "stopped_at": self.stopped_at.isoformat() + "Z" if self.stopped_at else None,
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+        }
+
+
+class AutomationKey(Base):
+    """A scoped automation credential for programmatic v1 access.
+
+    The raw key is shown once at creation; only its SHA-256 hash is stored.
+    ``scopes`` is a JSON list such as ``["sensor:stream", "model:deploy"]``
+    that gates which operations the key may perform (§9.4 / §17).
+    """
+    __tablename__ = "automation_key"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key_hash = Column(String(64), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(120), nullable=False, default="")
+    scopes = Column(Text, nullable=False, default="[]")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked = Column(Boolean, nullable=False, default=False, index=True)
+
+    def scope_list(self):
+        try:
+            return list(json.loads(self.scopes or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "scopes": self.scope_list(),
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+            "last_used_at": self.last_used_at.isoformat() + "Z" if self.last_used_at else None,
+            "revoked": bool(self.revoked),
+        }
+
+
 class TrainingDataset(Base):
     """Dataset for training - groups files with labels."""
     __tablename__ = "training_dataset"

@@ -1330,15 +1330,35 @@ async def ack_deployment(
     
     if status not in ["delivered", "declined", "pending_confirmation"]:
         raise HTTPException(status_code=400, detail="Invalid status. Must be 'delivered', 'declined', or 'pending_confirmation'")
-    
+
     record.status = status
+
+    # One authoritative v1 state transition path (§19): persist the node's
+    # reported state into payload.v1_state so deployment_to_v1 reflects it
+    # instead of staying 'queued' forever. The node's DeploymentManager
+    # reports its real state (received/validated/installed/acknowledged/
+    # active/failed); fall back to mapping the legacy status when absent.
+    _V1_STATES = {"queued", "received", "validated", "installed",
+                  "acknowledged", "active", "failed", "declined"}
+    _LEGACY_TO_V1 = {
+        "delivered": "acknowledged",
+        "declined": "declined",
+        "pending_confirmation": "received",
+    }
+    try:
+        deployment_payload = json.loads(record.payload or '{}')
+    except (TypeError, json.JSONDecodeError):
+        deployment_payload = {}
+    reported = payload.get('state')
+    deployment_payload['v1_state'] = (
+        reported if reported in _V1_STATES
+        else _LEGACY_TO_V1.get(status, "received"))
     if payload.get('runtime_model_id'):
-        try:
-            deployment_payload = json.loads(record.payload or '{}')
-        except (TypeError, json.JSONDecodeError):
-            deployment_payload = {}
         deployment_payload['runtime_model_id'] = str(payload['runtime_model_id'])
-        record.payload = json.dumps(deployment_payload)
+    if payload.get('failure'):
+        deployment_payload['failure'] = payload['failure']
+    record.payload = json.dumps(deployment_payload)
+
     if status == "delivered":
         record.delivered_at = datetime.utcnow()
         db.commit()

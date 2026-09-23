@@ -135,9 +135,13 @@ class ModelInputV1(BaseModel):
 
 
 class ModelManifestV1(BaseModel):
-    """``thoth-model/v1`` artifact manifest (section 18)."""
+    """``whispy-model/v1`` artifact manifest (section 18).
 
-    format: str = "thoth-model/v1"
+    Legacy ``thoth-model/v1`` is still accepted by the registration
+    endpoint during the rename transition.
+    """
+
+    format: str = "whispy-model/v1"
     name: str
     processor: str
     inputs: List[ModelInputV1] = Field(default_factory=list)

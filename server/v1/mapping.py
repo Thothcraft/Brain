@@ -13,13 +13,17 @@ from typing import Any, Dict, List, Optional
 _DEPLOYMENT_STATE_MAP = {
     "pending": "queued",
     "queued": "queued",
-    "delivered": "received",
+    "delivered": "acknowledged",
     "received": "received",
     "validated": "validated",
     "installed": "installed",
     "acknowledged": "acknowledged",
     "active": "active",
+    "activated": "active",
+    "restarted": "active",
     "failed": "failed",
+    "declined": "declined",
+    "rejected": "declined",
 }
 
 
@@ -121,6 +125,29 @@ def deployment_to_v1(dep: Any) -> Dict[str, Any]:
     }
 
 
+def capture_to_v1(capture: Any, device_uuid: str) -> Dict[str, Any]:
+    """DeviceCapture ORM -> CaptureV1 contract dict."""
+    try:
+        sensors = json.loads(capture.sensors or "[]")
+    except (TypeError, json.JSONDecodeError):
+        sensors = []
+    try:
+        counts = json.loads(capture.sample_counts or "{}")
+    except (TypeError, json.JSONDecodeError):
+        counts = {}
+    return {
+        "id": str(capture.capture_id),
+        "device_id": str(device_uuid),
+        "state": str(capture.state or "requested"),
+        "sensors": sensors,
+        "sample_counts": counts,
+        "started_at": capture.started_at.timestamp() if getattr(capture, "started_at", None) else None,
+        "stopped_at": capture.stopped_at.timestamp() if getattr(capture, "stopped_at", None) else None,
+        "metadata": {"created_at": capture.created_at.isoformat() + "Z"
+                     if getattr(capture, "created_at", None) else None},
+    }
+
+
 def chunk_to_samples(chunk: Any, device_uuid: str,
                      sensor_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Flatten a live capture chunk into SensorSampleV1-shaped dicts.
@@ -135,6 +162,36 @@ def chunk_to_samples(chunk: Any, device_uuid: str,
         payload = {}
     ts = chunk.updated_at.timestamp() if getattr(chunk, "updated_at", None) else 0.0
     samples: List[Dict[str, Any]] = []
+
+    # Preferred path: the node uploaded real SensorSamples. Relay them with
+    # their original identity, source timestamp, sequence, payload type,
+    # units and sample rate intact — never re-derived from the chunk row.
+    raw_samples = payload.get("samples")
+    if isinstance(raw_samples, list):
+        for s in raw_samples:
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("sensor_id") or "")
+            if sensor_id and sid != sensor_id:
+                continue
+            samples.append({
+                "device_id": str(s.get("device_id") or device_uuid),
+                "sensor_id": sid,
+                "sensor_type": str(s.get("sensor_type")
+                                   or sid.rsplit("-", 1)[0]),
+                "timestamp": float(s.get("timestamp") or ts),
+                "sequence": int(s.get("sequence") or 0),
+                "payload_type": str(s.get("payload_type") or "json"),
+                "payload": s.get("payload"),
+                "sample_rate": s.get("sample_rate"),
+                "units": dict(s.get("units") or {}),
+                "metadata": {"minute": getattr(chunk, "minute", None),
+                             **dict(s.get("metadata") or {})},
+            })
+        return samples
+
+    # Legacy fallback: flatten a feature map into samples (loses the
+    # original timing/sequence/units — retained only for old chunks).
     features = payload.get("features") or {}
     seq = int(getattr(chunk, "chunk_index", 0) or 0)
     for key, value in features.items():

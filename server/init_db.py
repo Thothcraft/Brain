@@ -152,6 +152,36 @@ def ensure_product_core_schema():
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_command_pending ON device_command (device_id, status, created_at)"))
             conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS device_capture (
+                    id SERIAL PRIMARY KEY,
+                    capture_id VARCHAR(64) UNIQUE NOT NULL,
+                    device_id INTEGER NOT NULL REFERENCES device(device_id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    state VARCHAR(20) NOT NULL DEFAULT 'requested',
+                    sensors TEXT NOT NULL DEFAULT '[]',
+                    sample_counts TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    stopped_at TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_capture_device ON device_capture (device_id, state)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_capture_user ON device_capture (user_id, created_at DESC)"))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS automation_key (
+                    id SERIAL PRIMARY KEY,
+                    key_hash VARCHAR(64) UNIQUE NOT NULL,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    name VARCHAR(120) NOT NULL DEFAULT '',
+                    scopes TEXT NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_used_at TIMESTAMP,
+                    revoked BOOLEAN NOT NULL DEFAULT FALSE
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_automation_key_user ON automation_key (user_id, revoked)"))
+            conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS device_pairing (
                     id SERIAL PRIMARY KEY,
                     device_uuid VARCHAR(255) NOT NULL,

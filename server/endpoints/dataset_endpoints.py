@@ -28,7 +28,8 @@ from ..db import get_db, TrainingDataset, DatasetFile, TrainedModel, File, Devic
 from ..auth import get_current_user
 from ..entitlements import check_download_allowed, has_entitlement
 from .models import StandardResponse
-from ..model_contract import validate_torchscript, ModelContractError
+from ..model_contract import (
+    SUPPORTED_MODEL_SCHEMAS, validate_torchscript, ModelContractError)
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -793,8 +794,8 @@ async def deploy_model_to_device(
         stored_config = json.loads(model.config) if model.config else {}
         metadata = stored_config.get('metadata') if isinstance(stored_config, dict) else None
         model_hash = stored_config.get('model_hash') if isinstance(stored_config, dict) else None
-        if not is_rule and (not isinstance(metadata, dict) or metadata.get('schema') != 'thoth-model/v1'):
-            raise HTTPException(status_code=400, detail='Only validated thoth-model/v1 TorchScript models can be deployed')
+        if not is_rule and (not isinstance(metadata, dict) or metadata.get('schema') not in SUPPORTED_MODEL_SCHEMAS):
+            raise HTTPException(status_code=400, detail='Only validated whispy-model/v1 TorchScript models can be deployed')
         deploy_config = request.config or {}
         deploy_config.update({
             "deployment_id": deployment_id,
@@ -828,7 +829,7 @@ async def deploy_model_to_device(
                 "config": deploy_config,
             }
         else:
-            # Preprocessing/window info travels inside the thoth-model/v1
+            # Preprocessing/window info travels inside the whispy-model/v1
             # manifest stored with the artifact, not a server-side training job.
             if isinstance(stored_config, dict):
                 if stored_config.get("preprocessing"):

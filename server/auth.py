@@ -8,6 +8,9 @@ This module handles all aspects of user authentication including:
 """
 
 import logging
+import hashlib
+import json
+import secrets
 import bcrypt
 from jose import jwt, JWTError
 from fastapi import status
@@ -18,7 +21,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 from typing import Optional
 import os
-from .db import User, SessionLocal
+from .db import User, SessionLocal, AutomationKey, get_db
 
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))  # Default to 24 hours
@@ -372,6 +375,24 @@ def get_current_user(
     """
     credentials_exception = HTTPException(status_code=401, detail="Invalid credentials")
 
+    # Scoped automation credential: an opaque X-Api-Key resolves to an
+    # AutomationPrincipal carrying the key's scopes. Checked first so a key
+    # never needs a JWT.
+    api_key = request.headers.get("x-api-key")
+    if api_key:
+        key = db.query(AutomationKey).filter(
+            AutomationKey.key_hash == hash_automation_key(api_key),
+            AutomationKey.revoked == False,  # noqa: E712
+        ).first()
+        if not key:
+            raise credentials_exception
+        user = db.query(User).filter(User.userId == key.user_id).first()
+        if not user:
+            raise credentials_exception
+        key.last_used_at = datetime.utcnow()
+        db.commit()
+        return AutomationPrincipal(user, key)
+
     # Dual auth: bearer token (CLI/SDK/Flutter) or HttpOnly session cookie
     # (browser/thothHUB). Bearer takes precedence when both are present.
     cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
@@ -418,12 +439,80 @@ def get_current_user(
         if user is None:
             logging.error(f"[AUTH] User not found in database. Username: {username}, User ID: {user_id}")
             raise credentials_exception
-            
+
+        # Carry the token's scope claim so scoped endpoints can enforce it.
+        # None = unconstrained user token (full access, backwards compatible).
+        try:
+            user.auth_scopes = payload.get("scopes")
+        except Exception:
+            pass
         return user
-        
+
     except JWTError as e:
         logging.error(f"[AUTH] JWT decoding error: {str(e)}")
         raise credentials_exception
     except Exception as e:
         logging.error(f"[AUTH] Unexpected error in get_current_user: {str(e)}")
         raise credentials_exception
+
+
+# ── scoped automation credentials (§9.4 / §17) ──────────────────────────────
+# Operation scopes advertised by the SDK. An automation key carries a subset
+# and may only perform the matching operations.
+AUTOMATION_SCOPES = {"sensor:stream", "model:deploy", "capture",
+                     "device:read", "predictions:read"}
+
+
+def hash_automation_key(raw_key: str) -> str:
+    """SHA-256 the raw key — the plaintext is never stored."""
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def generate_automation_key() -> str:
+    """Return a new opaque automation key (shown to the user once)."""
+    return "tc_" + secrets.token_urlsafe(32)
+
+
+class AutomationPrincipal:
+    """A `User`-shaped principal backed by a scoped automation key.
+
+    Delegates attribute access to the owning ``User`` so existing handlers
+    that read ``.userId``/``.username`` keep working, while ``scopes`` and
+    ``is_automation`` expose the credential's restrictions.
+    """
+
+    def __init__(self, user: User, key: AutomationKey):
+        self._user = user
+        self._key = key
+        self.userId = user.userId
+        self.scopes = key.scope_list()
+        self.is_automation = True
+
+    def __getattr__(self, name):
+        return getattr(self._user, name)
+
+
+def get_scoped_principal(required_scope: Optional[str] = None):
+    """Dependency factory: authenticate then enforce an operation scope.
+
+    ``get_current_user`` resolves the caller to a ``User`` (JWT/session) or an
+    ``AutomationPrincipal`` (X-Api-Key). The resolved principal's scopes —
+    ``AutomationPrincipal.scopes`` or the JWT's ``auth_scopes`` claim — must
+    include ``required_scope``. A principal with no scope claim (``None``)
+    is an unconstrained user token and retains full access.
+    """
+    def dependency(
+        principal=Depends(get_current_user),
+    ):
+        if required_scope is None:
+            return principal
+        scopes = getattr(principal, "scopes", None)
+        if scopes is None:
+            scopes = getattr(principal, "auth_scopes", None)
+        if scopes is not None and required_scope not in scopes:
+            raise HTTPException(
+                status_code=403,
+                detail=f"credential missing scope '{required_scope}'")
+        return principal
+
+    return dependency

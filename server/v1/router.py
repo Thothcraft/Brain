@@ -15,14 +15,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from server.auth import get_current_user
+from server.auth import get_current_user, get_scoped_principal
 from server.db import (
-    Device, DeviceCaptureChunk, DeviceCommand, DeviceDeployment,
-    TrainedModel, User, get_db,
+    AutomationKey, Device, DeviceCapture, DeviceCaptureChunk, DeviceCommand,
+    DeviceDeployment, TrainedModel, User, get_db,
 )
 from .mapping import (
-    chunk_to_samples, deployment_to_v1, device_to_v1, model_to_v1,
-    sensors_from_hardware,
+    capture_to_v1, chunk_to_samples, deployment_to_v1, device_to_v1,
+    model_to_v1, sensors_from_hardware,
 )
 from .schemas import (
     AccountV1, CaptureListV1, CaptureStartRequestV1, CaptureV1,
@@ -96,7 +96,7 @@ async def get_device(
 @router.get("/devices/{device_id}/sensors", response_model=SensorListV1)
 async def get_device_sensors(
     device_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("device:read")),
     db: Session = Depends(get_db),
 ) -> SensorListV1:
     device = _owned_device(device_id, current_user, db)
@@ -112,7 +112,7 @@ async def get_device_sensors(
 async def get_device_predictions(
     device_id: str,
     limit: int = Query(50, ge=1, le=500),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("predictions:read")),
     db: Session = Depends(get_db),
 ) -> PredictionListV1:
     """Recent predictions extracted from the device's live chunks."""
@@ -149,22 +149,25 @@ async def get_device_predictions(
 # Captures
 # ---------------------------------------------------------------------------
 
+def _capture_to_schema(capture: DeviceCapture, db: Session) -> CaptureV1:
+    device = db.query(Device).filter(Device.deviceId == capture.device_id).first()
+    dev_uuid = device.device_uuid if device else ""
+    return CaptureV1(**capture_to_v1(capture, dev_uuid))
+
+
 @router.get("/devices/{device_id}/captures", response_model=CaptureListV1)
 async def list_device_captures(
     device_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("capture")),
     db: Session = Depends(get_db),
 ) -> CaptureListV1:
     device = _owned_device(device_id, current_user, db)
-    rows = db.query(DeviceCaptureChunk.minute).filter(
-        DeviceCaptureChunk.device_id == device.deviceId,
-    ).distinct().order_by(DeviceCaptureChunk.minute.desc()).all()
-    captures = [
-        CaptureV1(id=f"{device_id}:{r.minute}", device_id=device_id,
-                  state="stored", metadata={"minute": r.minute})
-        for r in rows
-    ]
-    return CaptureListV1(captures=captures)
+    rows = db.query(DeviceCapture).filter(
+        DeviceCapture.device_id == device.deviceId,
+        DeviceCapture.user_id == current_user.userId,
+    ).order_by(DeviceCapture.created_at.desc()).all()
+    return CaptureListV1(
+        captures=[_capture_to_schema(c, db) for c in rows])
 
 
 @router.post("/devices/{device_id}/captures", response_model=CaptureV1,
@@ -172,12 +175,25 @@ async def list_device_captures(
 async def start_device_capture(
     device_id: str,
     request: CaptureStartRequestV1,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("capture")),
     db: Session = Depends(get_db),
 ) -> CaptureV1:
-    """Queue a capture-start command on the device channel."""
+    """Create a durable capture and queue capture-start on its device.
+
+    The capture enters the ``requested`` state — it is *not* reported active
+    until the node acknowledges it. The same ``capture_id`` is used by the
+    client, the node command, and storage so it reconciles end to end.
+    """
     device = _owned_device(device_id, current_user, db)
     capture_id = uuid.uuid4().hex[:12]
+    capture = DeviceCapture(
+        capture_id=capture_id,
+        device_id=device.deviceId,
+        user_id=current_user.userId,
+        state="requested",
+        sensors=json.dumps(request.sensors or []),
+    )
+    db.add(capture)
     command = DeviceCommand(
         device_id=device.deviceId,
         user_id=current_user.userId,
@@ -188,47 +204,54 @@ async def start_device_capture(
     )
     db.add(command)
     db.commit()
-    return CaptureV1(id=capture_id, device_id=device_id, state="active",
-                     sensors=request.sensors)
+    db.refresh(capture)
+    return _capture_to_schema(capture, db)
 
 
 @router.get("/captures", response_model=CaptureListV1)
 async def list_captures(
     device_id: Optional[str] = Query(None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("capture")),
     db: Session = Depends(get_db),
 ) -> CaptureListV1:
-    query = db.query(DeviceCaptureChunk, Device.device_uuid).join(
-        Device, Device.deviceId == DeviceCaptureChunk.device_id
-    ).filter(DeviceCaptureChunk.user_id == current_user.userId)
+    query = db.query(DeviceCapture).filter(
+        DeviceCapture.user_id == current_user.userId)
     if device_id:
-        query = query.filter(Device.device_uuid == device_id)
-    minutes: Dict[str, str] = {}
-    for row, dev_uuid in query.all():
-        key = f"{dev_uuid}:{row.minute}"
-        minutes[key] = dev_uuid
-    captures = [
-        CaptureV1(id=key, device_id=dev, state="stored",
-                  metadata={"minute": key.rsplit(":", 1)[1]})
-        for key, dev in sorted(minutes.items(), reverse=True)
-    ]
-    return CaptureListV1(captures=captures)
+        device = db.query(Device).filter(
+            Device.device_uuid == device_id,
+            Device.userId == current_user.userId).first()
+        if not device:
+            return CaptureListV1(captures=[])
+        query = query.filter(DeviceCapture.device_id == device.deviceId)
+    rows = query.order_by(DeviceCapture.created_at.desc()).all()
+    return CaptureListV1(
+        captures=[_capture_to_schema(c, db) for c in rows])
 
 
 @router.post("/captures/{capture_id}/stop")
 async def stop_capture(
     capture_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("capture")),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Queue a capture-stop command for the owning device."""
-    device_id = capture_id.split(":", 1)[0] if ":" in capture_id else None
-    query = db.query(Device).filter(Device.userId == current_user.userId)
-    if device_id:
-        query = query.filter(Device.device_uuid == device_id)
-    device = query.first()
+    """Queue a capture-stop for the device that owns this exact capture.
+
+    The capture→device binding is looked up from the durable record, so a
+    stop always targets the right device and unknown IDs return 404. The
+    state becomes ``stopping`` — it is not reported stopped until the node
+    confirms.
+    """
+    capture = db.query(DeviceCapture).filter(
+        DeviceCapture.capture_id == capture_id,
+        DeviceCapture.user_id == current_user.userId,
+    ).first()
+    if not capture:
+        raise HTTPException(status_code=404, detail="Capture not found")
+    device = db.query(Device).filter(
+        Device.deviceId == capture.device_id).first()
     if not device:
         raise HTTPException(status_code=404, detail="Capture not found")
+    capture.state = "stopping"
     command = DeviceCommand(
         device_id=device.deviceId,
         user_id=current_user.userId,
@@ -238,7 +261,8 @@ async def stop_capture(
     )
     db.add(command)
     db.commit()
-    return {"id": capture_id, "state": "stopped"}
+    return {"id": capture_id, "device_id": device.device_uuid,
+            "state": "stopping"}
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +275,7 @@ async def stream_device_sensor(
     device_id: str,
     sensor_id: str,
     cursor: Optional[str] = Query(None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("sensor:stream")),
     db: Session = Depends(get_db),
 ) -> StreamPageV1:
     """Cursor-paged real samples for one sensor.
@@ -261,33 +285,42 @@ async def stream_device_sensor(
     clients poll with it for incremental delivery.
     """
     device = _owned_device(device_id, current_user, db)
-    latest_minute = db.query(DeviceCaptureChunk.minute).filter(
-        DeviceCaptureChunk.device_id == device.deviceId
-    ).order_by(DeviceCaptureChunk.minute.desc()).limit(1).scalar()
-    if not latest_minute:
-        state = "ok" if device.online else "disconnected"
-        return StreamPageV1(device_id=device_id, sensor_id=sensor_id,
-                            samples=[], cursor=cursor, state=state)
 
     query = db.query(DeviceCaptureChunk).filter(
-        DeviceCaptureChunk.device_id == device.deviceId,
-        DeviceCaptureChunk.minute == latest_minute,
-    )
+        DeviceCaptureChunk.device_id == device.deviceId)
     if cursor:
+        # Resume strictly after the last delivered row across ALL minutes —
+        # not just the latest — so a poll spanning a minute boundary never
+        # discards unread older-minute data.
         try:
-            after = datetime.fromisoformat(cursor.replace("Z", "+00:00")).replace(tzinfo=None)
-            query = query.filter(DeviceCaptureChunk.updated_at > after)
+            after = datetime.fromisoformat(
+                cursor.replace("Z", "+00:00")).replace(tzinfo=None)
         except ValueError:
             raise HTTPException(status_code=422,
                                 detail="cursor must be an ISO timestamp")
-    rows = query.order_by(DeviceCaptureChunk.chunk_index.asc()).all()
+        query = query.filter(DeviceCaptureChunk.updated_at > after)
+    else:
+        # No cursor → start from the latest minute only.
+        latest_minute = db.query(DeviceCaptureChunk.minute).filter(
+            DeviceCaptureChunk.device_id == device.deviceId
+        ).order_by(DeviceCaptureChunk.minute.desc()).limit(1).scalar()
+        if not latest_minute:
+            state = "ok" if device.online else "disconnected"
+            return StreamPageV1(device_id=device_id, sensor_id=sensor_id,
+                                samples=[], cursor=cursor, state=state)
+        query = query.filter(DeviceCaptureChunk.minute == latest_minute)
+
+    rows = query.order_by(
+        DeviceCaptureChunk.updated_at.asc(),
+        DeviceCaptureChunk.chunk_index.asc()).limit(500).all()
+
     samples: List[Dict[str, Any]] = []
     for row in rows:
         samples.extend(chunk_to_samples(row, device_id, sensor_id))
-    newest = db.query(DeviceCaptureChunk.updated_at).filter(
-        DeviceCaptureChunk.device_id == device.deviceId,
-        DeviceCaptureChunk.minute == latest_minute,
-    ).order_by(DeviceCaptureChunk.updated_at.desc()).limit(1).scalar()
+
+    # The cursor is the newest timestamp among the rows actually returned —
+    # never a separate "latest" query that could leap past unreturned rows.
+    newest = max((r.updated_at for r in rows), default=None)
     return StreamPageV1(
         device_id=device_id, sensor_id=sensor_id, samples=samples,
         cursor=newest.isoformat() + "Z" if newest else cursor,
@@ -300,7 +333,7 @@ async def stream_device_sensor(
 
 @router.get("/models", response_model=ModelListV1)
 async def list_models(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("model:deploy")),
     db: Session = Depends(get_db),
 ) -> ModelListV1:
     models = db.query(TrainedModel).filter(
@@ -311,13 +344,19 @@ async def list_models(
 @router.post("/models", response_model=Dict[str, Any], status_code=201)
 async def register_model(
     manifest: Dict[str, Any] = Body(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("model:deploy")),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Register a model with a validated ``thoth-model/v1`` manifest."""
+    """Register a model with a validated ``whispy-model/v1`` manifest.
+
+    Legacy ``thoth-model/v1`` manifests are accepted during the rename
+    transition.
+    """
     errors: List[str] = []
-    if manifest.get("format") != "thoth-model/v1":
-        errors.append("format must be 'thoth-model/v1'")
+    if manifest.get("format") not in ("whispy-model/v1", "thoth-model/v1"):
+        errors.append(
+            "format must be 'whispy-model/v1' (legacy 'thoth-model/v1' "
+            "accepted)")
     if not manifest.get("name"):
         errors.append("name is required")
     processor = manifest.get("processor")
@@ -355,7 +394,7 @@ async def register_model(
 @router.get("/deployments", response_model=DeploymentListV1)
 async def list_deployments_v1(
     device_id: Optional[str] = Query(None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("model:deploy")),
     db: Session = Depends(get_db),
 ) -> DeploymentListV1:
     query = db.query(DeviceDeployment).filter(
@@ -370,7 +409,7 @@ async def list_deployments_v1(
 @router.post("/deployments", response_model=DeploymentV1, status_code=201)
 async def create_deployment(
     request: DeploymentCreateV1,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("model:deploy")),
     db: Session = Depends(get_db),
 ) -> DeploymentV1:
     """Queue a model deployment - enters the v1 state machine at ``queued``."""
@@ -401,3 +440,63 @@ async def create_deployment(
     db.commit()
     db.refresh(dep)
     return DeploymentV1(**deployment_to_v1(dep))
+
+
+# ---------------------------------------------------------------------------
+# Automation keys (scoped programmatic credentials, §9.4 / §17)
+# ---------------------------------------------------------------------------
+
+@router.post("/automation/keys", status_code=201)
+async def create_automation_key(
+    request: Dict[str, Any] = Body(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Mint a scoped automation key. The raw key is returned ONCE."""
+    from server.auth import (AUTOMATION_SCOPES, generate_automation_key,
+                             hash_automation_key)
+    name = str(request.get("name") or "")
+    scopes = [s for s in (request.get("scopes") or []) if s in AUTOMATION_SCOPES]
+    if not scopes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"scopes must be a non-empty subset of {sorted(AUTOMATION_SCOPES)}")
+    raw = generate_automation_key()
+    key = AutomationKey(
+        key_hash=hash_automation_key(raw),
+        user_id=current_user.userId,
+        name=name,
+        scopes=json.dumps(scopes),
+    )
+    db.add(key)
+    db.commit()
+    db.refresh(key)
+    out = key.to_dict()
+    out["key"] = raw  # shown once — never stored or returned again
+    return out
+
+
+@router.get("/automation/keys")
+async def list_automation_keys(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    keys = db.query(AutomationKey).filter(
+        AutomationKey.user_id == current_user.userId).all()
+    return {"keys": [k.to_dict() for k in keys]}
+
+
+@router.delete("/automation/keys/{key_id}")
+async def revoke_automation_key(
+    key_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    key = db.query(AutomationKey).filter(
+        AutomationKey.id == key_id,
+        AutomationKey.user_id == current_user.userId).first()
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+    key.revoked = True
+    db.commit()
+    return {"ok": True, "id": key_id, "revoked": True}
