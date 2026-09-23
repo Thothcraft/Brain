@@ -1,5 +1,6 @@
-import torch
 import pytest
+
+torch = pytest.importorskip("torch", reason="CPU PyTorch not installed (optional dependency)")
 
 from server.model_contract import ModelContractError, normalize_metadata, validate_torchscript
 
