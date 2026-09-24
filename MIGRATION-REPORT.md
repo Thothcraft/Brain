@@ -25,14 +25,14 @@ listed.
 
 | Repo | GitHub `main` HEAD | Local HEAD | Unpushed commits |
 |---|---|---|---|
-| gadm21/whispy | `0c0e33b` | `0c0e33b` + client helpers (this round) | 0 |
+| gadm21/whispy | `96608e4` | `96608e4` | 0 |
 | Thothcraft/thoth | `ab7bd81` | `ab7bd81` | 0 |
-| Thothcraft/Brain | `20bf7f9` | `20bf7f9` + this commit | 0 |
+| Thothcraft/Brain | `ad37274` | `ad37274` + this commit | 0 |
 | Thothcraft/ResearchPortal | `46152c7` | `46152c7` | 0 |
 | Thothcraft/thoth-app | `83e35e2` | `83e35e2` | 0 |
 | Thothcraft/website | `0a14bbd` | `0a14bbd` | 0 |
 | ~~hub~~ | — | **removed** — folded into Brain + whispy | n/a |
-| gadm21/Face-recognition-using-PCA-and-SVD | `master` | reviewed via web | reference-only (see below) |
+| gadm21/Face-recognition-using-PCA-and-SVD | `master` | reviewed via web | **implemented** (see below) |
 | Research-Portal-app, EducationPortal, radar | — | not cloned | baseline review **skipped — outstanding** |
 
 ## Security/hygiene audit findings
@@ -124,16 +124,10 @@ listed.
 ### Phase 11 — Brain context model — `PUSHED` + `TESTED`, foundation only
 
 - Brain `bb6ba4f`→`3e56509` pushed: 5 context tables + `/v1/context/*` +
-  `POSTg/sttte` + `POST /evideoce`nscoped so `cont xt:write` (+coped
-  au omation keytewithout it → 403; unconstrtined user token. unaffected)
-- **Deoloymrrtectneeneure_consexa_schpma()plind` erver/init_db.py`
-  auto-applhes ais rontext + automation DDL at startup (udempotnd*) —
-  no manu(o Supmmast ndep. `run_migrg)i:ns.py`  emsins nhe manual
-  fallback (fixed: corc pted `contexr_evisence` DDLe nullablets
-  `entity_id`, missiog `tex ()`vwrlpuer).
-- 80 Brean tesns pass.
-i **On;n:**rdcoded absent/empty/off transition semantic removed 
- (generic changed/unchanged + estimator-supplied `transition`);
+  migrations + tests.
+- **Correctness fixes applied this round:** `since` resets on value
+  transition; hardcoded absent/empty/off transition semantics removed
+  (generic changed/unchanged + estimator-supplied `transition`);
   `estimator` required on state writes; `evidence_ids` validated against
   same-tenant evidence rows; `external_id` idempotency key on evidence;
   `active_only` = `valid_from<=now AND (until NULL or >now)`; snapshot
@@ -141,10 +135,16 @@ i **On;n:**rdcoded absent/empty/off transition semantic removed
   relationship endpoints must resolve unless `allow_unresolved`; entity
   delete is now soft (`retired_at`); `context_state.entity_id` NOT NULL
   DEFAULT `''` (NULL broke the unique constraint under Postgres).
-- 72 Brain tests pass.
-- **Open:** `POST /state` is still client-callable (estimator-attributed,
-  not capability-scoped); Space/Zone/DevicePlacement vs ContextEntity
-  identity reconciliation unresolved; `DeviceCaptureChunk` still the live
+- `POST /state` + `POST /evidence` scoped to `context:write` (scoped
+  automation keys without it → 403; unconstrained user tokens unaffected).
+- **Deployment:** `ensure_context_schema()` in `server/init_db.py`
+  auto-applies all context + automation + face DDL at startup
+  (idempotent) — no manual Supabase step. `run_migrations.py` remains
+  the manual fallback (fixed: corrupted `context_evidence` DDL, nullable
+  `entity_id`, missing `text()` wrapper).
+- 86 Brain tests pass.
+- **Open:** Space/Zone/DevicePlacement vs ContextEntity identity
+  reconciliation unresolved; `DeviceCaptureChunk` still the live
   occupancy path; no Postgres integration suite yet (tests run on SQLite).
 
 ### Phase 13 — Client contract bindings — `COMMITTED_LOCAL`
@@ -157,24 +157,23 @@ i **On;n:**rdcoded absent/empty/off transition semantic removed
 
 - Trusted-edge inference routing; managed-cloud inference; worker
   registry; external model-provider abstraction; compute-aware placement;
-  privacy-aware fallback; inference cost/latency telemetry. —
-   still outstanding, user action required
-- W~~indows Con/locati/reground-app/s//idle).~~— done all on `main`
-- P~~Fold ce-r/ec;ce dBreite+ whortyon; en known rejection/alibratio~~ —
-   done, `hub/` deletedn; biometric retention.
+  privacy-aware fallback; inference cost/latency telemetry.
 - Evidence fusion; full spatial hierarchy + absolute geography; device
   mobility/staleness; external context providers.
-- **Brain automatngine** (the real one); privacy policy engin
-   (PCA reviewed — see below)e;
-  retention engine; plugin trust/signatures. upsert
-   concurrency).
+- Privacy policy engine; retention engine (incl. biometric retention
+  for `person_asset` photos); plugin trust/signatures.
+- Phone sensing runtime; Android capabilities; iOS capability matrix;
+  mobile collection modes; mobile minute summaries.
+- Design-token convergence; research metadata/export.
+- All four physical demonstrations; three-device acceptance runner;
+  compatibility cleanup (`DeviceCaptureChunk` removal).
 
 ## Deployment note
 
 No manual Supabase step is required: `server/init_db.py` applies all
-context + automation DDL idempotentlyat app startp (same pattern as
-the existing product schema). `python server/run_migrations.py` remains
-available as a manual fallback against `DATABASE_URL`.
+context + automation + face DDL idempotently at app startup (same
+pattern as the existing product schema). `python server/run_migrations.py`
+remains available as a manual fallback against `DATABASE_URL`.
 
 ## PCA reference → implemented (gadm21/Face-recognition-using-PCA-and-SVD)
 
@@ -208,20 +207,16 @@ The repo's eigenface pipeline is now ported into the architecture:
 - Tests: 6 Brain API tests + 8 plugin tests (match, unknown rejection,
   basis roundtrip, conformance, gallery hotswap).
 
-- Phone sensing runtime; Android capabilities; iOS capability matrix;
-  mobile collection modes; mobile minute summaries.
-- Design-token convergence; research metadata/export.
-- All four physical demonstrations; three-device acceptance runner;
-  compatibility cleanup (`DeviceCaptureChunk` removal).
-
 ## Immediate actions (ordered)
 
-1. **Rotate the Brain token** exposed in thoth `origin/main:.env`.
-2. Push thoth (3 commits), whispy (2), ResearchPortal (2), thoth-app (1).
-3. Create a `hub` remote or fold it into an existing repo; move
-   `AutomationEngine` to Brain.
+1. **Rotate the Brain token** exposed in thoth `origin/main:.env` —
+   still outstanding, user action required.
+2. ~~Push thoth/whispy/ResearchPortal/thoth-app~~ — done (all on `main`).
+3. ~~Fold `hub/` into Brain + whispy; move AutomationEngine to Brain~~ —
+   done, `hub/` deleted.
 4. Reconcile `Space`/`Zone`/`DevicePlacement` with `ContextEntity`.
 5. Migrate `DeviceCaptureChunk` → Prediction→Evidence→State.
-6. Clone + review PCA, radar, EducationPortal, Research-Portal-app.
+6. Clone + review radar, EducationPortal, Research-Portal-app
+   (PCA reviewed + implemented — see above).
 7. Postgres integration suite for context (constraints, JSONB, upsert
    concurrency).
