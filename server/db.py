@@ -1278,6 +1278,76 @@ class AutomationRule(Base):
         }
 
 
+class FaceBasis(Base):
+    """A PCA eigenface basis — mean face + eigenvectors as .npz bytes.
+
+    User-scoped: each user owns their basis (fitted from their enrolled
+    photos and/or a public face dataset for stability) and their gallery.
+    ``max_distance`` is the calibrated "very close" cutoff used by the
+    edge recognizer for unknown rejection.
+    """
+    __tablename__ = "face_basis"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False, default="default")
+    image_size = Column(Integer, nullable=False, default=64)
+    n_components = Column(Integer, nullable=False, default=0)
+    max_distance = Column(Float, default=0.0)
+    data = Column(LargeBinary, nullable=False)                # .npz payload
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_face_basis_name"),
+    )
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "name": self.name,
+            "image_size": self.image_size,
+            "n_components": self.n_components,
+            "max_distance": self.max_distance or 0.0,
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+        }
+
+
+class PersonAsset(Base):
+    """One enrolled photo of a known person + its PCA projection.
+
+    The assets DB for face recognition: ``photo`` keeps the enrolled
+    image (audit/re-enrollment), ``projection`` is the eigenface weight
+    vector the edge recognizer matches against. Multiple rows per
+    (user, name) = multiple photos of the same person.
+    """
+    __tablename__ = "person_asset"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)                # person label
+    basis_id = Column(Integer, ForeignKey("face_basis.id"), nullable=False)
+    projection = Column(Text, nullable=False)                 # JSON weight vector
+    photo = Column(LargeBinary, nullable=True)                # enrolled image
+    photo_mime = Column(String(64), default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self, include_projection: bool = True):
+        out = {
+            "id": str(self.id),
+            "name": self.name,
+            "basis_id": str(self.basis_id),
+            "photo_mime": self.photo_mime or "",
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+        }
+        if include_projection:
+            try:
+                out["projection"] = json.loads(self.projection) \
+                    if self.projection else []
+            except Exception:
+                out["projection"] = []
+        return out
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)

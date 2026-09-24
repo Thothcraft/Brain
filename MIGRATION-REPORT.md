@@ -176,21 +176,38 @@ context + automation DDL idempotentlyat app startp (same pattern as
 the existing product schema). `python server/run_migrations.py` remains
 available as a manual fallback against `DATABASE_URL`.
 
-## PCA reference review (gadm21/Face-recognition-using-PCA-and-SVD)
+## PCA reference → implemented (gadm21/Face-recognition-using-PCA-and-SVD)
 
-- **What it is:** Python 2.7 course project — eigenfaces pipeline:
-  Haar-cascade detection → cro → PCA/SVD projection → nearet-nighbo
-  match against a flat `images/` datase. Two modes: live match and
-  keypress enrollment.
-- **Verdict:** reference-only. Not portable as-is (Py2.7, cv2 haar,
-  no API, no unknown-rejection threshold, no packaging).
-- **What to take into the face-recognition plugin:** the pipeline shape
-  (detect → crop-→ projectT→ distanhe-match) and the enrollmett flow.
-- **What's missing for the architeht Ue:** Python 3 port, unknown
-  rejection + distance calibIation,  rrollment API, biometrie
-  retention/privacy classification, packaging as a whispy `Processor`
-  (`predict()` → `Prediction(label=identitd, confidence=f(distance))`e,
-  detector separated from recognizersign; Hub Context/Activity/Spaces/Models/Automations views.
+The repo's eigenface pipeline is now ported into the architecture:
+
+- **whispy-model-face** (new package, `whispy.models` entry points):
+  - `opencv-haar-face` (`HaarFaceModel`) — builtin OpenCV frontal-face
+    detector; emits `face`/`no_face` + boxes + JPEG crops in
+    `metadata.detections` for downstream models.
+  - `pca-face-recognizer` (`EigenfaceRecognizer`) — crop → normalize →
+    PCA project → nearest gallery projection by Euclidean distance →
+    `person:<name>` under `max_distance`, else `person:unknown`.
+    Crop source order: upstream `face_crop`/`detections` metadata →
+    own Haar detection → whole frame.
+- **Brain face asset store** (`face_basis` + `person_asset` tables,
+  `/v1/faces/*`): per-user PCA basis (mean + eigenvectors as .npz,
+  fitted server-side from enrolled photos and/or dataset images via
+  `POST /faces/basis`), enrolled photos + stored projections
+  (`POST /faces/persons`), and `GET /faces/gallery` — the pull the edge
+  recognizer consumes. `max_distance` auto-calibrates on each
+  enrollment (mean + 2σ of per-person centroid distances).
+- **whispy `FaceGallery`** (`whispy/cloud/faces.py`) — TTL-cached pull
+  of basis + gallery; `projections()` feeds `EigenfaceRecognizer`
+  directly.
+- **"Very close":** the reference repo has *no* threshold — it always
+  returns the closest image. `max_distance` is the calibrated stand-in;
+  tighten/loosen per deployment.
+- **Datasets:** any face dataset (e.g. Olivetti — 400×64×64 grayscale)
+  can be POSTed to `/faces/basis.images` to stabilize the basis, and
+  used to test the pipeline end-to-end.
+- Tests: 6 Brain API tests + 8 plugin tests (match, unknown rejection,
+  basis roundtrip, conformance, gallery hotswap).
+
 - Phone sensing runtime; Android capabilities; iOS capability matrix;
   mobile collection modes; mobile minute summaries.
 - Design-token convergence; research metadata/export.

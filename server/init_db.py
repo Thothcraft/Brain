@@ -264,7 +264,6 @@ def ensure_context_schema():
                 CREATE TABLE IF NOT EXISTS context_state (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL REFERENCES user_account(user_id),
-            "context_schema": ensure_context_schema(),
                     state_key VARCHAR(255) NOT NULL,
                     entity_id VARCHAR(255) NOT NULL DEFAULT '',
                     value TEXT,
@@ -381,6 +380,7 @@ def initialize_database():
             "trained_model": ensure_trained_model_table(),
             "device.approved": ensure_approved_column(),
             "device_deployment": ensure_device_deployment_table(),
+            "context_schema": ensure_context_schema(),
         }
         failed = [name for name, succeeded in results.items() if not succeeded]
         if failed:

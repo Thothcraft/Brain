@@ -246,6 +246,29 @@ def run_migrations():
         UNIQUE(user_id, name)
     );
     CREATE INDEX IF NOT EXISTS idx_automation_rule_user ON automation_rule(user_id);
+    CREATE TABLE IF NOT EXISTS face_basis (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        name VARCHAR(255) NOT NULL DEFAULT 'default',
+        image_size INTEGER NOT NULL DEFAULT 64,
+        n_components INTEGER NOT NULL DEFAULT 0,
+        max_distance DOUBLE PRECISION DEFAULT 0,
+        data BYTEA NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_face_basis_user ON face_basis(user_id);
+    CREATE TABLE IF NOT EXISTS person_asset (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        name VARCHAR(255) NOT NULL,
+        basis_id INTEGER NOT NULL REFERENCES face_basis(id),
+        projection TEXT NOT NULL,
+        photo BYTEA,
+        photo_mime VARCHAR(64),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_person_asset_user ON person_asset(user_id);
     """
 
     try:

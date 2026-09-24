@@ -8,8 +8,10 @@ than silently changing behavior (Architecture v3.0 section 2, section 9.2).
 from .router import router
 from .context import router as context_router
 from .automation import router as automation_router
+from .faces import router as faces_router
 
 router.include_router(context_router)
 router.include_router(automation_router)
+router.include_router(faces_router)
 
 __all__ = ["router"]
