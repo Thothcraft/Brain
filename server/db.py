@@ -1243,6 +1243,41 @@ class ContextEvent(Base):
         }
 
 
+class AutomationRule(Base):
+    """A declarative automation rule evaluated by Brain's AutomationEngine.
+
+    ``when``/``then`` are JSON payloads — no executable code is stored.
+    """
+    __tablename__ = "automation_rule"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    when = Column(Text, nullable=False)                           # JSON match spec
+    then = Column(Text, nullable=False)                           # JSON action spec
+    cooldown_s = Column(Float, default=0.0)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_automation_rule_name"),
+    )
+
+    def to_dict(self):
+        import json as _json
+        return {
+            "id": str(self.id),
+            "name": self.name,
+            "when": _json.loads(self.when) if self.when else {},
+            "then": _json.loads(self.then) if self.then else {},
+            "cooldown_s": self.cooldown_s or 0.0,
+            "enabled": bool(self.enabled),
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() + "Z" if self.updated_at else None,
+        }
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)

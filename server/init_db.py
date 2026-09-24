@@ -205,6 +205,123 @@ def ensure_product_core_schema():
         return False
 
 
+def ensure_context_schema():
+    """Apply the context model + automation schema (Architecture §30–§35).
+
+    Idempotent — safe to run on every startup. Mirrors run_migrations.py,
+    which remains the manual fallback for one-off application.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS context_entity (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    entity_key VARCHAR(255) NOT NULL,
+                    kind VARCHAR(80) NOT NULL,
+                    name VARCHAR(255),
+                    attributes TEXT,
+                    retired_at DOUBLE PRECISION,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, entity_key)
+                );
+                ALTER TABLE context_entity ADD COLUMN IF NOT EXISTS retired_at DOUBLE PRECISION;
+                CREATE TABLE IF NOT EXISTS context_relationship (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    subject VARCHAR(255) NOT NULL,
+                    predicate VARCHAR(80) NOT NULL,
+                    object VARCHAR(255) NOT NULL,
+                    valid_from DOUBLE PRECISION NOT NULL,
+                    valid_until DOUBLE PRECISION,
+                    confidence DOUBLE PRECISION DEFAULT 1.0,
+                    source VARCHAR(255),
+                    provenance TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS context_evidence (
+                    id SERIAL PRIMARY KEY,
+                    external_id VARCHAR(255),
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    evidence_key VARCHAR(255) NOT NULL,
+                    value TEXT,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    source_id VARCHAR(255),
+                    device_id VARCHAR(255),
+                    prediction_id VARCHAR(255),
+                    observation_id VARCHAR(255),
+                    model_id VARCHAR(255),
+                    model_version VARCHAR(80),
+                    confidence DOUBLE PRECISION,
+                    execution_class VARCHAR(40),
+                    provenance TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                ALTER TABLE context_evidence ADD COLUMN IF NOT EXISTS external_id VARCHAR(255);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_context_evidence_external
+                    ON context_evidence(user_id, external_id) WHERE external_id IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS context_state (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+            "context_schema": ensure_context_schema(),
+                    state_key VARCHAR(255) NOT NULL,
+                    entity_id VARCHAR(255) NOT NULL DEFAULT '',
+                    value TEXT,
+                    confidence DOUBLE PRECISION DEFAULT 1.0,
+                    since DOUBLE PRECISION NOT NULL,
+                    valid_until DOUBLE PRECISION,
+                    evidence_ids TEXT,
+                    estimator VARCHAR(255),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, state_key, entity_id)
+                );
+                UPDATE context_state SET entity_id = '' WHERE entity_id IS NULL;
+                ALTER TABLE context_state ALTER COLUMN entity_id SET DEFAULT '';
+                ALTER TABLE context_state ALTER COLUMN entity_id SET NOT NULL;
+                CREATE TABLE IF NOT EXISTS context_event (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    event_key VARCHAR(255) NOT NULL,
+                    event_type VARCHAR(20) NOT NULL,
+                    entity_id VARCHAR(255),
+                    state_id VARCHAR(255),
+                    value TEXT,
+                    previous_value TEXT,
+                    confidence DOUBLE PRECISION,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    provenance TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_context_entity_user ON context_entity(user_id);
+                CREATE INDEX IF NOT EXISTS idx_context_entity_key ON context_entity(entity_key);
+                CREATE INDEX IF NOT EXISTS idx_context_rel_subject ON context_relationship(subject);
+                CREATE INDEX IF NOT EXISTS idx_context_rel_predicate ON context_relationship(predicate);
+                CREATE INDEX IF NOT EXISTS idx_context_evidence_key ON context_evidence(evidence_key);
+                CREATE INDEX IF NOT EXISTS idx_context_evidence_ts ON context_evidence(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_context_state_key ON context_state(state_key);
+                CREATE INDEX IF NOT EXISTS idx_context_event_key ON context_event(event_key);
+                CREATE INDEX IF NOT EXISTS idx_context_event_ts ON context_event(timestamp);
+                CREATE TABLE IF NOT EXISTS automation_rule (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    name VARCHAR(255) NOT NULL,
+                    "when" TEXT NOT NULL,
+                    "then" TEXT NOT NULL,
+                    cooldown_s DOUBLE PRECISION DEFAULT 0,
+                    enabled BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_automation_rule_user ON automation_rule(user_id);
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring context schema: {e}")
+        return False
+
+
 def ensure_device_deployment_table():
     """Ensure the device_deployment table exists for pull-based model delivery."""
     try:

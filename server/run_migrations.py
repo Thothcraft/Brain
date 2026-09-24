@@ -171,8 +171,8 @@ def run_migrations():
         created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS context_evidence (
-        ixternal_id VARCHAR(255),
-        ed SERIAL PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
+        external_id VARCHAR(255),
         user_id INTEGER NOT NULL REFERENCES user_account(user_id),
         evidence_key VARCHAR(255) NOT NULL,
         value TEXT,
@@ -192,7 +192,7 @@ def run_migrations():
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES user_account(user_id),
         state_key VARCHAR(255) NOT NULL,
-        entity_id VARCHAR(255),
+        entity_id VARCHAR(255) NOT NULL DEFAULT '',
         value TEXT,
         confidence DOUBLE PRECISION DEFAULT 1.0,
         since DOUBLE PRECISION NOT NULL,
@@ -226,14 +226,33 @@ def run_migrations():
     CREATE INDEX IF NOT EXISTS idx_context_evidence_key ON context_evidence(evidence_key);
     CREATE INDEX IF NOT EXISTS idx_context_evidence_ts ON context_evidence(timestamp);
     CREATE INDEX IF NOT EXISTS idx_context_state_key ON context_state(state_key);
+    UPDATE context_state SET entity_id = '' WHERE entity_id IS NULL;
+    ALTER TABLE context_state ALTER COLUMN entity_id SET DEFAULT '';
+    ALTER TABLE context_state ALTER COLUMN entity_id SET NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_context_event_key ON context_event(event_key);
     CREATE INDEX IF NOT EXISTS idx_context_event_ts ON context_event(timestamp);
+
+    -- Automation rules (evaluated server-side by Brain's AutomationEngine)
+    CREATE TABLE IF NOT EXISTS automation_rule (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        name VARCHAR(255) NOT NULL,
+        "when" TEXT NOT NULL,
+        "then" TEXT NOT NULL,
+        cooldown_s DOUBLE PRECISION DEFAULT 0,
+        enabled BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_rule_user ON automation_rule(user_id);
     """
-    
+
     try:
+        from sqlalchemy import text
         from server.db import engine
         with engine.connect() as conn:
-            conn.execute(migration_sql)
+            conn.execute(text(migration_sql))
             conn.commit()
         print("[migrations] ✅ Migrations completed successfully")
     except Exception as e:

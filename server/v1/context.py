@@ -20,7 +20,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from server.auth import get_current_user
+from server.auth import get_current_user, get_scoped_principal
 from server.db import (
     ContextEntity, ContextEvent, ContextEvidence, ContextRelationship,
     ContextState, User, get_db,
@@ -324,7 +324,7 @@ async def get_state(
 @router.post("/state")
 async def upsert_state(
     body: StateIn,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_scoped_principal("context:write")),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Upsert an estimator's derived state; emits a ContextEvent on change.
