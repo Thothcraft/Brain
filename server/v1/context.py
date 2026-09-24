@@ -47,35 +47,46 @@ class RelationshipIn(BaseModel):
     object: str
     valid_from: Optional[float] = None
     valid_until: Optional[float] = None
-    confidence: float = 1.0
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     source: str = ""
     provenance: Dict[str, Any] = Field(default_factory=dict)
+    # Endpoints must exist as entities unless explicitly marked unresolved
+    # (external/not-yet-known graph objects).
+    allow_unresolved: bool = False
 
 
 class EvidenceIn(BaseModel):
     key: str                                               # versioned key
     value: Any = None
     timestamp: Optional[float] = None
+    external_id: Optional[str] = None                      # producer idempotency key
     source_id: str = ""
     device_id: str = ""
     prediction_id: str = ""
     observation_id: str = ""
     model_id: str = ""
     model_version: str = ""
-    confidence: Optional[float] = None
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     execution_class: str = ""
     provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
+_TRANSITION_TYPES = {"entered", "exited", "changed"}
+
+
 class StateIn(BaseModel):
+    """Estimator output. The generic store knows value changed/unchanged;
+    semantic transition type (entered/exited) is supplied by the estimator
+    or a registered context schema — never guessed from value strings."""
     key: str
     value: Any = None
     entity_id: str = ""
-    confidence: float = 1.0
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     since: Optional[float] = None
     valid_until: Optional[float] = None
     evidence_ids: List[str] = Field(default_factory=list)
-    estimator: str = ""
+    estimator: str = Field(min_length=1)                   # required attribution
+    transition: Optional[str] = None                       # entered|exited|changed
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +100,8 @@ async def list_entities(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     q = db.query(ContextEntity).filter(
-        ContextEntity.user_id == current_user.userId)
+        ContextEntity.user_id == current_user.userId,
+        ContextEntity.retired_at.is_(None))
     if kind:
         q = q.filter(ContextEntity.kind == kind)
     return {"entities": [e.to_dict() for e in
@@ -109,6 +121,7 @@ async def upsert_entity(
         entity = ContextEntity(user_id=current_user.userId,
                                entity_key=body.id, kind=body.kind)
         db.add(entity)
+    entity.retired_at = None  # resurrect if previously retired
     entity.name = body.name or entity.name
     entity.attributes = json.dumps(body.attributes or {})
     db.commit()
@@ -124,12 +137,15 @@ async def delete_entity(
 ) -> Dict[str, Any]:
     entity = db.query(ContextEntity).filter(
         ContextEntity.user_id == current_user.userId,
-        ContextEntity.entity_key == entity_key).first()
+        ContextEntity.entity_key == entity_key,
+        ContextEntity.retired_at.is_(None)).first()
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
-    db.delete(entity)
+    # Soft delete: relationships/evidence reference entity keys as strings,
+    # so physical deletion would leave dangling graph references.
+    entity.retired_at = time.time()
     db.commit()
-    return {"ok": True, "id": entity_key}
+    return {"ok": True, "id": entity_key, "retired_at": entity.retired_at}
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +167,11 @@ async def list_relationships(
     if predicate:
         q = q.filter(ContextRelationship.predicate == predicate)
     if active_only:
-        q = q.filter(ContextRelationship.valid_until.is_(None))
+        now = time.time()
+        q = q.filter(
+            ContextRelationship.valid_from <= now,
+            (ContextRelationship.valid_until.is_(None)) |
+            (ContextRelationship.valid_until > now))
     return {"relationships": [r.to_dict() for r in
                               q.order_by(ContextRelationship.id).all()]}
 
@@ -162,6 +182,21 @@ async def create_relationship(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
+    if not body.allow_unresolved:
+        missing = [
+            key for key in (body.subject, body.object)
+            if db.query(ContextEntity).filter(
+                ContextEntity.user_id == current_user.userId,
+                ContextEntity.entity_key == key,
+                ContextEntity.retired_at.is_(None)).first() is None
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "unresolved relationship endpoints",
+                        "missing": missing,
+                        "hint": "create the entities first or set "
+                                "allow_unresolved=true"})
     rel = ContextRelationship(
         user_id=current_user.userId,
         subject=body.subject, predicate=body.predicate, object=body.object,
@@ -209,8 +244,16 @@ async def ingest_evidence(
     out = []
     for raw in items:
         ev = EvidenceIn(**raw)
+        if ev.external_id:
+            existing = db.query(ContextEvidence).filter(
+                ContextEvidence.user_id == current_user.userId,
+                ContextEvidence.external_id == ev.external_id).first()
+            if existing is not None:
+                out.append(existing)  # idempotent retry — return original
+                continue
         row = ContextEvidence(
             user_id=current_user.userId,
+            external_id=ev.external_id or None,
             evidence_key=ev.key,
             value=json.dumps(ev.value),
             timestamp=ev.timestamp or time.time(),
@@ -260,6 +303,7 @@ async def list_evidence(
 async def get_state(
     key: Optional[str] = None,
     entity_id: Optional[str] = None,
+    active_only: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -267,8 +311,12 @@ async def get_state(
         ContextState.user_id == current_user.userId)
     if key:
         q = q.filter(ContextState.state_key == key)
-    if entity_id:
+    if entity_id is not None:
         q = q.filter(ContextState.entity_id == entity_id)
+    if active_only:
+        now = time.time()
+        q = q.filter((ContextState.valid_until.is_(None)) |
+                     (ContextState.valid_until > now))
     return {"states": [s.to_dict() for s in
                        q.order_by(ContextState.state_key).all()]}
 
@@ -279,29 +327,50 @@ async def upsert_state(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Upsert a derived state; emits a ContextEvent on value change."""
+    """Upsert an estimator's derived state; emits a ContextEvent on change.
+
+    ``since`` resets on every actual value transition and is preserved when
+    the value is unchanged. Transition semantics are generic — the store
+    knows changed/unchanged; estimators may supply ``transition``
+    (entered|exited|changed) for schema-aware event typing.
+    """
     now = time.time()
+    entity_id = body.entity_id or ""
+    if body.evidence_ids:
+        try:
+            wanted = {int(e) for e in body.evidence_ids}
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail="evidence_ids must reference evidence row ids")
+        found = {row.id for row in db.query(ContextEvidence.id).filter(
+            ContextEvidence.user_id == current_user.userId,
+            ContextEvidence.id.in_(wanted)).all()}
+        missing = sorted(wanted - found)
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "unknown evidence_ids",
+                        "missing": [str(m) for m in missing]})
     state = db.query(ContextState).filter(
         ContextState.user_id == current_user.userId,
         ContextState.state_key == body.key,
-        ContextState.entity_id == (body.entity_id or None)).first()
+        ContextState.entity_id == entity_id).first()
     previous = None
-    event_type = "changed"
+    event_type = ""
     if state is None:
         state = ContextState(
             user_id=current_user.userId, state_key=body.key,
-            entity_id=body.entity_id or None, since=body.since or now)
+            entity_id=entity_id, since=body.since if body.since is not None else now)
         db.add(state)
-        event_type = "entered"
+        event_type = body.transition if body.transition in _TRANSITION_TYPES else "entered"
     else:
         previous = json.loads(state.value) if state.value else None
-        if previous == body.value:
-            event_type = ""  # no transition
-        elif previous in (None, "absent", "vacant", "empty", "off") \
-                and body.value not in (None, "absent", "vacant", "empty", "off"):
-            event_type = "entered"
-        elif body.value in (None, "absent", "vacant", "empty", "off"):
-            event_type = "exited"
+        if previous != body.value:
+            event_type = (body.transition
+                          if body.transition in _TRANSITION_TYPES else "changed")
+            state.since = body.since if body.since is not None else now
+        # unchanged value → no transition, ``since`` preserved
     state.value = json.dumps(body.value)
     state.confidence = body.confidence
     state.valid_until = body.valid_until
@@ -313,7 +382,7 @@ async def upsert_state(
     if event_type:
         event = ContextEvent(
             user_id=current_user.userId, event_key=body.key,
-            event_type=event_type, entity_id=body.entity_id or None,
+            event_type=event_type, entity_id=entity_id or None,
             state_id=str(state.id), value=json.dumps(body.value),
             previous_value=json.dumps(previous),
             confidence=body.confidence, timestamp=now,
@@ -346,15 +415,22 @@ async def context_snapshot(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Full context snapshot: entities + active relationships + states."""
+    """Current context: live entities + relationships valid now +
+    non-expired states. History is available via the list endpoints."""
     uid = current_user.userId
+    now = time.time()
     entities = db.query(ContextEntity).filter(
-        ContextEntity.user_id == uid).all()
+        ContextEntity.user_id == uid,
+        ContextEntity.retired_at.is_(None)).all()
     rels = db.query(ContextRelationship).filter(
         ContextRelationship.user_id == uid,
-        ContextRelationship.valid_until.is_(None)).all()
+        ContextRelationship.valid_from <= now,
+        (ContextRelationship.valid_until.is_(None)) |
+        (ContextRelationship.valid_until > now)).all()
     states = db.query(ContextState).filter(
-        ContextState.user_id == uid).all()
+        ContextState.user_id == uid,
+        (ContextState.valid_until.is_(None)) |
+        (ContextState.valid_until > now)).all()
     return {
         "entities": [e.to_dict() for e in entities],
         "relationships": [r.to_dict() for r in rels],

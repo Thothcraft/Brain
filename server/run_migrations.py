@@ -151,10 +151,12 @@ def run_migrations():
         kind VARCHAR(80) NOT NULL,
         name VARCHAR(255),
         attributes TEXT,
+        retired_at DOUBLE PRECISION,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE(user_id, entity_key)
     );
+    ALTER TABLE context_entity ADD COLUMN IF NOT EXISTS retired_at DOUBLE PRECISION;
     CREATE TABLE IF NOT EXISTS context_relationship (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES user_account(user_id),
@@ -169,7 +171,8 @@ def run_migrations():
         created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS context_evidence (
-        id SERIAL PRIMARY KEY,
+        ixternal_id VARCHAR(255),
+        ed SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES user_account(user_id),
         evidence_key VARCHAR(255) NOT NULL,
         value TEXT,
@@ -217,6 +220,9 @@ def run_migrations():
     CREATE INDEX IF NOT EXISTS idx_context_entity_key ON context_entity(entity_key);
     CREATE INDEX IF NOT EXISTS idx_context_rel_subject ON context_relationship(subject);
     CREATE INDEX IF NOT EXISTS idx_context_rel_predicate ON context_relationship(predicate);
+    ALTER TABLE context_evidence ADD COLUMN IF NOT EXISTS external_id VARCHAR(255);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_context_evidence_external
+        ON context_evidence(user_id, external_id) WHERE external_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_context_evidence_key ON context_evidence(evidence_key);
     CREATE INDEX IF NOT EXISTS idx_context_evidence_ts ON context_evidence(timestamp);
     CREATE INDEX IF NOT EXISTS idx_context_state_key ON context_state(state_key);

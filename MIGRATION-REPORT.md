@@ -2,147 +2,167 @@
 
 Governing principle: **Context is all you need.**
 
-Started: 2026-09-24. Updated incrementally per phase.
+Started: 2026-09-24. Rewritten 2026-09-24 after external review: the previous
+version conflated *committed locally* with *done*. Statuses below reflect
+what is actually on GitHub `main` vs. local-only work.
 
-## Repository baseline
+## Status model
 
-| Repo | Branch | HEAD | Stack | Baseline result |
-|---|---|---|---|---|
-| gadm21/whispy | main | b4a743d0bd003d0e059fe0ced045dfc2ecbabad0 | Python ≥3.10, setuptools, entry-point plugins | `pytest tests` → **96 passed** (BASELINE_PASS; `test_runner_window_has_binding_map` is timing-flaky, passes on retry) |
-| Thothcraft/thoth | main | 0bc483b78f5d563e3fab7bcf42dca6b04828fe5c | Python ≥3.10, Flask/Jinja, whispy dep | `pytest tests` → 48 passed, **1 failed** (`test_model_occupancy_publishes_only_explicit_binary_class` — stale `chunk_index` kwarg; BASELINE_FAILURE_EXISTING), `test_settings_and_occupancy.py` collection error (`fcntl` missing on Windows; CANNOT_RUN_ENVIRONMENT) |
-| Thothcraft/Brain | main | bb6ba4ff684f6e2a15db1267a9c7aa82d5efe9b0 | FastAPI, SQLAlchemy, uvicorn | `pytest tests` → **55 passed** (BASELINE_PASS) |
-| Thothcraft/ResearchPortal | main | 62935b2a734f64b4da6ff78f6eceaa377d5eeb6f | Next.js 15.5, React 19, TS 5.3, Supabase | `tsc --noEmit` PASS, `next build` PASS; `next lint` deprecated (CANNOT_RUN_ENVIRONMENT — no eslint CLI wired) |
-| Thothcraft/thoth-app | main | e3e40f1aa1248117a4ff649c36c3636330ee6601 | Flutter 3.47.5 / Dart 3.13.4 (SDK at C:\flutter, not on PATH) | `flutter test` → **1 passed** (BASELINE_PASS) |
-| Thothcraft/website | main | 0a14bbdc892cbc26e34b4e49cff7537a0086ede7 | Vite 6, React 19, R3F 9, TS 5.8 | `typecheck` PASS, `lint` PASS, `build` PASS (chunk-size warning only) |
-| Research-Portal-app, EducationPortal, PCA, radar | — | not cloned locally | — | CANNOT_RUN_ENVIRONMENT (reference only) |
+| Status | Meaning |
+|---|---|
+| `NOT_STARTED` | No work exists |
+| `LOCAL_UNCOMMITTED` | Changes in working tree only |
+| `COMMITTED_LOCAL` | Committed locally, **not on GitHub** — unverifiable by reviewers |
+| `PUSHED` | On the canonical GitHub branch |
+| `TESTED` | Unit tests pass on the pushed code |
+| `INTEGRATION_VERIFIED` | Cross-repo/integration tests pass |
+| `HARDWARE_VERIFIED` | Verified against physical devices |
+
+A phase is not "done" below `PUSHED` + `TESTED`, and the ending SHA must be
+listed.
+
+## Repository state (verified 2026-09-24)
+
+| Repo | GitHub `main` HEAD | Local HEAD | Unpushed commits |
+|---|---|---|---|
+| gadm21/whispy | `b4a743d` | `0c0e33b` | **2** (contracts, compute+infer) |
+| Thothcraft/thoth | `0bc483b` | `ab7bd81` | **3** (security+minutes, v1 API, windows fix) |
+| Thothcraft/Brain | `3e56509` | `3e56509` + this commit | 0 (all pushed) |
+| Thothcraft/ResearchPortal | `62935b2` | `46152c7` | **2** (.env.local untrack, contracts) |
+| Thothcraft/thoth-app | `e3e40f1` | `83e35e2` | **1** (contracts) |
+| Thothcraft/website | `0a14bbd` | `0a14bbd` | 0 |
+| hub | — | `b3d4971` (local `master`) | **no remote exists** |
+| Research-Portal-app, EducationPortal, PCA, radar | — | not cloned | baseline review **skipped — outstanding** |
 
 ## Security/hygiene audit findings
 
-- **thoth/.env** — committed to git with real secrets (BRAIN_AUTH_TOKEN, API_KEY, FLASK_SECRET_KEY, MQTT_PASSWORD). Action: untrack, add `.env.example`, **credential rotation required**.
-- **ResearchPortal/.env.local** — committed despite `.gitignore` rule (force-added historically). Contains NEXT_PUBLIC_API_URL/WS_URL (public-scoped, low sensitivity). Action: untrack, add example.
-- **Brain/.venv** — was committed; already untracked in HEAD commit bb6ba4f. Resolved.
-- **website/dist/** — intentionally versioned (install scripts ship from dist). Retained.
-- **thoth/src/backend/config.py** — `HOST` defaults to `0.0.0.0` (LAN-exposed by default), `SECRET_KEY` hardcoded fallback `thoth-dev-secret-key`, `AP_PASSWORD` default `thoth123`.
-- **thoth/src/backend/app.py** — `CORS(app)` wide open, `socketio cors_allowed_origins="*"`, hardcoded demo users `admin/admin123` + `user/password123`, no `login_required` on routes.
-- **thoth/src/backend/terminal_manager.py** — SSH provisioning via pexpect; must be admin-scoped (verified below).
+- **thoth/.env** — committed on `origin/main` with a real Brain bearer token.
+  Untracked locally, but **the token remains in pushed history and must be
+  treated as compromised → rotate it.** History rewrite was ruled out.
+- **ResearchPortal/.env.local** — still tracked on `origin/main`
+  (public-scoped values, low severity). Untracked locally, unpushed.
+- **thoth config defaults** — `HOST=0.0.0.0`, hardcoded `SECRET_KEY`,
+  `AP_PASSWORD=thoth123`, `CORS(app)` + `cors_allowed_origins="*"`, demo
+  users. **All fixed locally, none pushed.** `origin/main` is still unsafe.
+- **Brain/.venv** — untracked in `bb6ba4f` (pushed). Resolved.
 
 ## Phase log
 
-### Phase 0 — Baseline + security (done)
+### Phase 0 — Baseline + security — `COMMITTED_LOCAL` (thoth, ResearchPortal)
 
-- Baseline table above; all runnable suites executed.
-- **thoth**: `.env` untracked + `.env.example`; `config.py` defaults to
-  loopback (`THOTH_BIND_MODE=lan` opts in), `SECRET_KEY`/`AP_PASSWORD` are
-  per-device persisted secrets; `app.py` CORS/SocketIO restricted to
-  loopback origins (`THOTH_CORS_ORIGINS` allowlist); dead demo USERS removed.
-- **ResearchPortal**: `.env.local` untracked + `.env.example`.
-- **Fixed baseline failure**: `test_model_occupancy_publishes_only_explicit_binary_class`
-  updated to renamed `second_index` kwarg + dual-post (binary + probability)
-  HA publish behavior.
+- Repos: thoth `0bc483b`→`6ce74b7` (local), ResearchPortal `62935b2`→`7eb90fb` (local).
+- thoth: `.env` untracked + `.env.example`; loopback default
+  (`THOTH_BIND_MODE=lan` opt-in); persisted per-device `SECRET_KEY`/
+  `AP_PASSWORD`; CORS/SocketIO restricted to `THOTH_CORS_ORIGINS`; demo
+  users removed.
+- Baseline failure fixed: stale `chunk_index` kwarg → `second_index`.
+- **Blocking:** not pushed; exposed token not rotated.
+- Baseline gap: PCA/radar/EducationPortal/Research-Portal-app never
+  cloned — mandatory reference review outstanding.
 
-### Phase 1 — Canonical contracts in whispy (done)
+### Phase 1 — Canonical contracts in whispy — `COMMITTED_LOCAL`
 
-- `whispy/contracts/schemas/*.schema.json` — 15 JSON Schemas are the single
-  semantic source: observation, source-descriptor, device-descriptor,
-  compute-capability, prediction, action-request/result, inference-
-  request/trace/result, context-evidence/state/event, relationship,
-  minute-manifest.
-- `whispy/tools/generate_contracts.py` — emits TypeScript + Dart bindings
-  from schemas; `validate` subcommand checks fixtures.
-- `whispy/contracts/fixtures/*.json` — 15 shared cross-language test vectors;
-  `tests/test_contract_fixtures.py` round-trips each through the Python
-  dataclasses (112 whispy tests pass).
+- whispy `b4a743d`→`a6ff6bc` (local). 15 JSON Schemas under
+  `whispy/contracts/schemas/`; `tools/generate_contracts.py` emits TS+Dart;
+  15 fixtures round-tripped in `test_contract_fixtures.py` (112 tests pass
+  locally).
 
-### Phase 2 — ObservationSource generalization (done)
+### Phase 2 — ObservationSource generalization — `COMMITTED_LOCAL`
 
-- `Observation` (source_id, schema, quality/provenance, optional
-  confidence/accuracy/spatial_reference/privacy_classification) with
-  `from_sample`/`to_sample` projection to legacy `SensorSample`.
-- `SourceDescriptor` = `SensorDescriptor` + `source_class` ("sensor"|
-  "context") + `health`; `SourceHandle` = `SensorHandle` alias;
-  `ObservationAdapter` = `SensorAdapter`; `ContextAdapter` for
-  non-physical sources; `DeviceHandle.source()`/`sources()`.
-- `AmbiguousSourceError`/`SourceNotFoundError`/`SourceUnavailableError`
-  (KeyError subclasses — backward compatible) wired into LocalDevice and
-  LanDevice resolution.
+- Same whispy commit. `Observation`, `SourceDescriptor` (source_class,
+  health), `ContextAdapter`, `SourceHandle`, ambiguity errors. `main` still
+  only has `SensorDescriptor`/`SensorHandle`.
 
-### Phase 3 — Model manifest v2 (done)
+### Phase 3 — Model manifest v2 — `COMMITTED_LOCAL`
 
-- `whispy-model/v2` in `ModelManifest`: id/version/task/lifecycle
-  (streaming|windowed|batch)/execution classes/resources/privacy/
-  config_schema. v1 + `thoth-model/v1` still accepted and normalized.
-- `thoth/src/backend/model_runtime.py` delegates format constants to
-  `whispy.contracts` and accepts v2 (constraints-wrapped inputs, outputs
-  list, lifecycle→cadence mapping).
+- whispy `a6ff6bc` + thoth `model_runtime.py` accepts `whispy-model/v2`
+  (constraints-wrapped inputs, outputs list, lifecycle→cadence).
 
-### Phase 4 — Canonical minute (done)
+### Phase 4 — Canonical minute — `COMMITTED_LOCAL`, **partial**
 
-- `thoth-minute/v1` schema + `MinuteManifest`/`MinuteSourceData` contracts.
-- `whispy/minutes.py` — `read_minute()` normalizes legacy
-  `thoth-minute-manifest/v5–v7` (chunk_index→second_index, chunks→seconds,
-  expected_chunks→expected_seconds) in memory; `write_minute_manifest()`
-  for new writers; `iter_minute_dirs()`.
-- `thoth/tools/{audit_minutes,migrate_minutes,verify_minute_migration}.py`
-  — explicit, non-destructive, idempotent migration (writes `minute.json`
-  alongside untouched legacy files). Fixture tests in
-  `thoth/tests/test_minute_migration.py` (5 pass).
+- whispy `a6ff6bc` (`minutes.py` legacy v5–v7 reader, `minute.json` writer)
+  + thoth `6ce74b7` (audit/migrate/verify tools, 5 fixture tests).
+- **Open:** only the *manifest* layer is canonical. The persisted
+  multi-source container (`capture.npz` keys, timestamp arrays, source-id
+  representation, second offsets, arbitrary context sources, lossless
+  legacy conversion) is **not yet specified or verified**.
 
-### Phase 5/6 — Multi-instance + actuators (already satisfied)
+### Phase 5/6 — Multi-instance sources + actuators — `PUSHED` (pre-existing), needs conformance pass
 
-- Stable descriptor ids (hardware_id hash), ambiguity errors, actuator
-  contracts + conformance were landed in the prior whispy migration.
+- Stable descriptor ids, ambiguity errors, actuator contracts predate this
+  migration and are on `main`. Short-hash hardware IDs need collision
+  review; `SourceDescriptor` naming is local-only.
 
-### Phase 7/12 — Thoth v1 local API (done)
+### Phase 7/12 — Thoth v1 local API — `COMMITTED_LOCAL`
 
-- `thoth/local_api/server.py` + `thoth/daemon/service.py`: `/api/v1/device`
-  (with compute), `/health`, `/compute`, `/sources`, `/sources/{id}`,
-  `/sources/{id}/observations`, `/actuators` (+actions), `/models`,
-  `/model-deployments`, `/inference` (canonical InferenceResult+Trace),
-  `/minutes`, `/minutes/{id}`, `/minutes/{id}/seconds/{s}`, `/privacy`,
-  `/sync`. Token auth unchanged; legacy `/api/*` routes preserved.
-- `whispy/compute.py` — `probe_compute()` (psutil + nvidia-smi best-effort,
-  unknown metrics stay None) + `model_fits()` resource check.
-- `ModelRunner.infer()` — canonical InferenceResult with full
-  InferenceTrace (model id/version/artifact hash, runtime id, execution
-  device/class, input bindings, input interval, latency, confidence).
-- **Fix**: `ThreadingHTTPServer.server_bind` reverse-DNS (`getfqdn`)
-  stalled ~20s on Windows — bypassed via `_FastBindHTTPServer`.
-- `tests/test_v1_api.py` — 5 tests pass.
+- thoth `6f383a5` (local): `/api/v1/{device,health,compute,sources,
+  sources/{id}/observations,actuators,models,model-deployments,inference,
+  minutes,minutes/{id}/seconds/{s},privacy,sync}`; `probe_compute()` +
+  `model_fits()`; `ModelRunner.infer()` canonical InferenceResult+Trace;
+  Windows `server_bind` fix. `test_v1_api.py` 5 tests pass locally.
 
-### Phase 9 — Hub scaffold (done)
+### Phase 9 — Hub scaffold — `COMMITTED_LOCAL` (no remote), **architecture issue**
 
-- New `hub/` repo: `ContextCache` (TTL snapshot mirror of Brain's
-  `/v1/context/snapshot`), `AutomationEngine` (declarative rules,
-  edge-triggered on state transitions, cooldown re-arm), `DeviceRegistry`
-  (Brain `/v1/devices` + lazy LAN health probes), `IntegrationRegistry`
-  (declared source/sink providers), `Hub`+`HubServer` local API
-  (`/api/v1/{status,devices,context,context/state,rules,integrations,
-  context/refresh,tick}`, bearer-token, `_FastBindHTTPServer`).
-- `tests/test_hub.py` (5) + `tests/test_context_loop.py` — the
-  end-to-end claim: fixture source → `ModelRunner.infer()` →
-  InferenceResult+Trace → ContextEvidence → ContextState → ContextEvent
-  → automation fires → ActionResult. 6 tests pass.
+- Local `hub/` repo only — not on GitHub. ContextCache, AutomationEngine,
+  DeviceRegistry, IntegrationRegistry, local API; 6 tests pass locally.
+- **Blocking design issue:** `AutomationEngine` lives in Hub, but the
+  architecture assigns automation evaluation to **Brain** (Hub offline →
+  automations stop). AutomationEngine must move to Brain; Hub keeps
+  configuration/visualization. An offline subset may live in Thoth.
 
-### Phase 11 — Brain context model (done)
+### Phase 11 — Brain context model — `PUSHED` + `TESTED`, foundation only
 
-- `server/db.py`: `context_entity`, `context_relationship`,
-  `context_evidence`, `context_state`, `context_event` — user-scoped,
-  JSON payloads, validity windows, evidence links.
-- `server/v1/context.py`: `/v1/context/{entities,relationships,evidence,
-  state,events,snapshot}` — entity upsert, relationship end (history
-  preserved), batch evidence ingest, state upsert emitting entered/
-  exited/changed events, full snapshot. Tenant isolation tested.
-- `run_migrations.py`: CREATE TABLE IF NOT EXISTS for all five.
-- 61 Brain tests pass.
+- Brain `bb6ba4f`→`3e56509` pushed: 5 context tables + `/v1/context/*` +
+  migrations + tests.
+- **Correctness fixes applied this round** (commit pending): `since` resets
+  on value transition; hardcoded absent/empty/off transition semantics
+  removed (generic changed/unchanged + estimator-supplied `transition`);
+  `estimator` required on state writes; `evidence_ids` validated against
+  same-tenant evidence rows; `external_id` idempotency key on evidence;
+  `active_only` = `valid_from<=now AND (until NULL or >now)`; snapshot
+  excludes expired states and retired entities; confidence bounded [0,1];
+  relationship endpoints must resolve unless `allow_unresolved`; entity
+  delete is now soft (`retired_at`); `context_state.entity_id` NOT NULL
+  DEFAULT `''` (NULL broke the unique constraint under Postgres).
+- 72 Brain tests pass.
+- **Open:** `POST /state` is still client-callable (estimator-attributed,
+  not capability-scoped); Space/Zone/DevicePlacement vs ContextEntity
+  identity reconciliation unresolved; `DeviceCaptureChunk` still the live
+  occupancy path; no Postgres integration suite yet (tests run on SQLite).
 
-### Phase 13 — Client contract bindings (partial)
+### Phase 13 — Client contract bindings — `COMMITTED_LOCAL`
 
-- `ResearchPortal/lib/contracts.generated.ts` + `thoth-app/lib/
-  contracts.generated.dart` generated from canonical schemas; `tsc
-  --noEmit` clean, `dart analyze` clean. Component wiring is follow-up.
+- `ResearchPortal/lib/contracts.generated.ts` (`46152c7` local),
+  `thoth-app/lib/contracts.generated.dart` (`83e35e2` local). `tsc`/`dart
+  analyze` clean. Component wiring not started.
 
-### Remaining
+## Not started (previously omitted from this report)
 
-- Wire generated contracts into ResearchPortal/thoth-app/website views.
-- Demo scaffolds (workspace `demos/`) + live end-to-end verification.
-- Brain WS topics for context updates (polling works today).
+- Trusted-edge inference routing; managed-cloud inference; worker
+  registry; external model-provider abstraction; compute-aware placement;
+  privacy-aware fallback; inference cost/latency telemetry.
+- Windows ContextAdapters (location, foreground-app/session/idle).
+- PCA/SVD face-recognition plugin; face detector separation; enrollment;
+  unknown rejection/calibration; biometric retention.
+- Evidence fusion; full spatial hierarchy + absolute geography; device
+  mobility/staleness; external context providers.
+- **Brain automation engine** (the real one); privacy policy engine;
+  retention engine; plugin trust/signatures.
+- Thoth UI redesign; Hub Context/Activity/Spaces/Models/Automations views.
+- Phone sensing runtime; Android capabilities; iOS capability matrix;
+  mobile collection modes; mobile minute summaries.
+- Design-token convergence; research metadata/export.
+- All four physical demonstrations; three-device acceptance runner;
+  compatibility cleanup (`DeviceCaptureChunk` removal).
+
+## Immediate actions (ordered)
+
+1. **Rotate the Brain token** exposed in thoth `origin/main:.env`.
+2. Push thoth (3 commits), whispy (2), ResearchPortal (2), thoth-app (1).
+3. Create a `hub` remote or fold it into an existing repo; move
+   `AutomationEngine` to Brain.
+4. Reconcile `Space`/`Zone`/`DevicePlacement` with `ContextEntity`.
+5. Migrate `DeviceCaptureChunk` → Prediction→Evidence→State.
+6. Clone + review PCA, radar, EducationPortal, Research-Portal-app.
+7. Postgres integration suite for context (constraints, JSONB, upsert
+   concurrency).

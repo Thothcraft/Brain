@@ -1074,6 +1074,7 @@ class ContextEntity(Base):
     kind = Column(String(80), nullable=False, index=True)         # person|device|space|…
     name = Column(String(255), nullable=True)
     attributes = Column(Text, nullable=True)                      # JSON
+    retired_at = Column(Float, nullable=True)                     # soft delete
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -1088,6 +1089,7 @@ class ContextEntity(Base):
             "kind": self.kind,
             "name": self.name,
             "attributes": _json.loads(self.attributes) if self.attributes else {},
+            "retired_at": self.retired_at,
             "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
             "updated_at": self.updated_at.isoformat() + "Z" if self.updated_at else None,
         }
@@ -1130,6 +1132,7 @@ class ContextEvidence(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    external_id = Column(String(255), nullable=True)              # producer idempotency key
     evidence_key = Column(String(255), nullable=False, index=True)  # versioned key
     value = Column(Text, nullable=True)                           # JSON
     timestamp = Column(Float, nullable=False, index=True)
@@ -1144,10 +1147,16 @@ class ContextEvidence(Base):
     provenance = Column(Text, nullable=True)                      # JSON
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    __table_args__ = (
+        UniqueConstraint("user_id", "external_id",
+                         name="uq_context_evidence_external"),
+    )
+
     def to_dict(self):
         import json as _json
         return {
             "id": str(self.id),
+            "external_id": self.external_id,
             "key": self.evidence_key,
             "value": _json.loads(self.value) if self.value else None,
             "timestamp": self.timestamp,
@@ -1170,7 +1179,9 @@ class ContextState(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
     state_key = Column(String(255), nullable=False, index=True)     # versioned key
-    entity_id = Column(String(255), nullable=True, index=True)
+    # '' is the canonical global entity — a nullable column would break the
+    # unique constraint below (Postgres treats NULLs as distinct).
+    entity_id = Column(String(255), nullable=False, default="", server_default="", index=True)
     value = Column(Text, nullable=True)                           # JSON
     confidence = Column(Float, default=1.0)
     since = Column(Float, nullable=False)
@@ -1189,7 +1200,7 @@ class ContextState(Base):
         return {
             "id": str(self.id),
             "key": self.state_key,
-            "entity_id": self.entity_id,
+            "entity_id": self.entity_id or None,
             "value": _json.loads(self.value) if self.value else None,
             "confidence": self.confidence,
             "since": self.since,
