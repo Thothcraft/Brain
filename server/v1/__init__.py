@@ -6,5 +6,8 @@ than silently changing behavior (Architecture v3.0 section 2, section 9.2).
 """
 
 from .router import router
+from .context import router as context_router
+
+router.include_router(context_router)
 
 __all__ = ["router"]

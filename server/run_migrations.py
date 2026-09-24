@@ -142,6 +142,86 @@ def run_migrations():
     ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) DEFAULT 'private',
     ADD COLUMN IF NOT EXISTS registry_name VARCHAR(255);
     CREATE INDEX IF NOT EXISTS idx_trained_model_registry_name ON trained_model(registry_name);
+
+    -- Context model (Architecture §30–§35)
+    CREATE TABLE IF NOT EXISTS context_entity (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        entity_key VARCHAR(255) NOT NULL,
+        kind VARCHAR(80) NOT NULL,
+        name VARCHAR(255),
+        attributes TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, entity_key)
+    );
+    CREATE TABLE IF NOT EXISTS context_relationship (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        subject VARCHAR(255) NOT NULL,
+        predicate VARCHAR(80) NOT NULL,
+        object VARCHAR(255) NOT NULL,
+        valid_from DOUBLE PRECISION NOT NULL,
+        valid_until DOUBLE PRECISION,
+        confidence DOUBLE PRECISION DEFAULT 1.0,
+        source VARCHAR(255),
+        provenance TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS context_evidence (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        evidence_key VARCHAR(255) NOT NULL,
+        value TEXT,
+        timestamp DOUBLE PRECISION NOT NULL,
+        source_id VARCHAR(255),
+        device_id VARCHAR(255),
+        prediction_id VARCHAR(255),
+        observation_id VARCHAR(255),
+        model_id VARCHAR(255),
+        model_version VARCHAR(80),
+        confidence DOUBLE PRECISION,
+        execution_class VARCHAR(40),
+        provenance TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS context_state (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        state_key VARCHAR(255) NOT NULL,
+        entity_id VARCHAR(255),
+        value TEXT,
+        confidence DOUBLE PRECISION DEFAULT 1.0,
+        since DOUBLE PRECISION NOT NULL,
+        valid_until DOUBLE PRECISION,
+        evidence_ids TEXT,
+        estimator VARCHAR(255),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, state_key, entity_id)
+    );
+    CREATE TABLE IF NOT EXISTS context_event (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        event_key VARCHAR(255) NOT NULL,
+        event_type VARCHAR(20) NOT NULL,
+        entity_id VARCHAR(255),
+        state_id VARCHAR(255),
+        value TEXT,
+        previous_value TEXT,
+        confidence DOUBLE PRECISION,
+        timestamp DOUBLE PRECISION NOT NULL,
+        provenance TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_context_entity_user ON context_entity(user_id);
+    CREATE INDEX IF NOT EXISTS idx_context_entity_key ON context_entity(entity_key);
+    CREATE INDEX IF NOT EXISTS idx_context_rel_subject ON context_relationship(subject);
+    CREATE INDEX IF NOT EXISTS idx_context_rel_predicate ON context_relationship(predicate);
+    CREATE INDEX IF NOT EXISTS idx_context_evidence_key ON context_evidence(evidence_key);
+    CREATE INDEX IF NOT EXISTS idx_context_evidence_ts ON context_evidence(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_context_state_key ON context_state(state_key);
+    CREATE INDEX IF NOT EXISTS idx_context_event_key ON context_event(event_key);
+    CREATE INDEX IF NOT EXISTS idx_context_event_ts ON context_event(timestamp);
     """
     
     try:

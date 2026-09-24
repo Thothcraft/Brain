@@ -1054,6 +1054,184 @@ class Payment(Base):
     user = relationship("User", foreign_keys=[user_id])
 
 
+# ---------------------------------------------------------------------------
+# Context model (Architecture §30–§35)
+#
+# Entities are canonical objects (persons, devices, spaces). Relationships
+# are subject–predicate–object edges with validity windows. Evidence wraps
+# observations/predictions with provenance — predictions are evidence,
+# never truth. ContextState is a derived statement with evidence links;
+# ContextEvent is the discrete transition emitted when a state changes.
+# ---------------------------------------------------------------------------
+
+class ContextEntity(Base):
+    """A canonical context entity: person, device, space, or logical object."""
+    __tablename__ = "context_entity"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    entity_key = Column(String(255), nullable=False, index=True)  # e.g. "person:gad"
+    kind = Column(String(80), nullable=False, index=True)         # person|device|space|…
+    name = Column(String(255), nullable=True)
+    attributes = Column(Text, nullable=True)                      # JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "entity_key", name="uq_context_entity_key"),
+    )
+
+    def to_dict(self):
+        import json as _json
+        return {
+            "id": self.entity_key,
+            "kind": self.kind,
+            "name": self.name,
+            "attributes": _json.loads(self.attributes) if self.attributes else {},
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() + "Z" if self.updated_at else None,
+        }
+
+
+class ContextRelationship(Base):
+    """Subject–predicate–object edge; valid_until=NULL means still valid."""
+    __tablename__ = "context_relationship"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    subject = Column(String(255), nullable=False, index=True)
+    predicate = Column(String(80), nullable=False, index=True)
+    object = Column(String(255), nullable=False, index=True)
+    valid_from = Column(Float, nullable=False)
+    valid_until = Column(Float, nullable=True)
+    confidence = Column(Float, default=1.0)
+    source = Column(String(255), nullable=True)
+    provenance = Column(Text, nullable=True)                      # JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        import json as _json
+        return {
+            "id": str(self.id),
+            "subject": self.subject,
+            "predicate": self.predicate,
+            "object": self.object,
+            "valid_from": self.valid_from,
+            "valid_until": self.valid_until,
+            "confidence": self.confidence,
+            "source": self.source,
+            "provenance": _json.loads(self.provenance) if self.provenance else {},
+        }
+
+
+class ContextEvidence(Base):
+    """One piece of evidence feeding a ContextState (append-mostly)."""
+    __tablename__ = "context_evidence"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    evidence_key = Column(String(255), nullable=False, index=True)  # versioned key
+    value = Column(Text, nullable=True)                           # JSON
+    timestamp = Column(Float, nullable=False, index=True)
+    source_id = Column(String(255), nullable=True, index=True)
+    device_id = Column(String(255), nullable=True, index=True)
+    prediction_id = Column(String(255), nullable=True)
+    observation_id = Column(String(255), nullable=True)
+    model_id = Column(String(255), nullable=True)
+    model_version = Column(String(80), nullable=True)
+    confidence = Column(Float, nullable=True)
+    execution_class = Column(String(40), nullable=True)
+    provenance = Column(Text, nullable=True)                      # JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        import json as _json
+        return {
+            "id": str(self.id),
+            "key": self.evidence_key,
+            "value": _json.loads(self.value) if self.value else None,
+            "timestamp": self.timestamp,
+            "source_id": self.source_id,
+            "device_id": self.device_id,
+            "prediction_id": self.prediction_id,
+            "observation_id": self.observation_id,
+            "model_id": self.model_id,
+            "model_version": self.model_version,
+            "confidence": self.confidence,
+            "execution_class": self.execution_class,
+            "provenance": _json.loads(self.provenance) if self.provenance else {},
+        }
+
+
+class ContextState(Base):
+    """A derived context statement with evidence links (current truth view)."""
+    __tablename__ = "context_state"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    state_key = Column(String(255), nullable=False, index=True)     # versioned key
+    entity_id = Column(String(255), nullable=True, index=True)
+    value = Column(Text, nullable=True)                           # JSON
+    confidence = Column(Float, default=1.0)
+    since = Column(Float, nullable=False)
+    valid_until = Column(Float, nullable=True)
+    evidence_ids = Column(Text, nullable=True)                    # JSON list
+    estimator = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "state_key", "entity_id",
+                         name="uq_context_state_key_entity"),
+    )
+
+    def to_dict(self):
+        import json as _json
+        return {
+            "id": str(self.id),
+            "key": self.state_key,
+            "entity_id": self.entity_id,
+            "value": _json.loads(self.value) if self.value else None,
+            "confidence": self.confidence,
+            "since": self.since,
+            "valid_until": self.valid_until,
+            "evidence_ids": _json.loads(self.evidence_ids) if self.evidence_ids else [],
+            "estimator": self.estimator,
+        }
+
+
+class ContextEvent(Base):
+    """Discrete transition emitted when a ContextState changes (append-only)."""
+    __tablename__ = "context_event"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"), nullable=False, index=True)
+    event_key = Column(String(255), nullable=False, index=True)
+    event_type = Column(String(20), nullable=False)               # entered|exited|changed
+    entity_id = Column(String(255), nullable=True, index=True)
+    state_id = Column(String(255), nullable=True)
+    value = Column(Text, nullable=True)                           # JSON
+    previous_value = Column(Text, nullable=True)                  # JSON
+    confidence = Column(Float, nullable=True)
+    timestamp = Column(Float, nullable=False, index=True)
+    provenance = Column(Text, nullable=True)                      # JSON
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        import json as _json
+        return {
+            "id": str(self.id),
+            "key": self.event_key,
+            "event_type": self.event_type,
+            "entity_id": self.entity_id,
+            "state_id": self.state_id,
+            "value": _json.loads(self.value) if self.value else None,
+            "previous_value": _json.loads(self.previous_value) if self.previous_value else None,
+            "confidence": self.confidence,
+            "timestamp": self.timestamp,
+            "provenance": _json.loads(self.provenance) if self.provenance else {},
+        }
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)
