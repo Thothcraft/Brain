@@ -110,14 +110,19 @@ def test_evaluate_fires_against_current_context(api):
                  "params": {"on": True}}})
     # no state → no fire
     assert client.post("/v1/automation/evaluate").json()["fired"] == []
-    # estimator writes state → rule fires on next evaluation
+    # estimator writes state → the transition event fires the rule
+    # immediately (event-driven — no manual evaluate needed)
     client.post("/v1/context/state", json={
         "key": "spatial.occupancy/v1", "value": "occupied",
         "entity_id": "space:lab", "estimator": "occ-v1"})
+    execs = client.get("/v1/automation/executions").json()["executions"]
+    assert len(execs) == 1 and execs[0]["rule"] == "lab-light"
+    actions = client.get("/v1/automation/actions").json()["actions"]
+    assert len(actions) == 1
+    assert actions[0]["status"] == "queued"   # no device endpoint → queued
+    # edge-triggered + persisted: a manual evaluate does not re-fire
     res = client.post("/v1/automation/evaluate").json()
-    assert len(res["fired"]) == 1
-    assert res["fired"][0]["rule"] == "lab-light"
-    assert res["fired"][0]["result"]["status"] == "queued"
+    assert res["fired"] == []
     # disabled rule doesn't fire
     client.post("/v1/automation/rules", json={
         "name": "lab-light",

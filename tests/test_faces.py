@@ -89,8 +89,11 @@ def test_enroll_and_gallery(api):
     assert r.status_code == 201, r.text
     assert len(r.json()["projection"]) == 7  # min(8, 8-1)
 
+    # Second enrollment is a *different* photo of the same person — the
+    # per-person calibrated threshold is then > 0. (Identical duplicate
+    # photos correctly calibrate to 0.0 = exact-match-only.)
     client.post("/v1/faces/persons", json={
-        "name": "gad", "photo_b64": _png_b64(_face(0))})
+        "name": "gad", "photo_b64": _png_b64(_face(0) + 2)})
     client.post("/v1/faces/persons", json={
         "name": "sara", "photo_b64": _png_b64(_face(1))})
 

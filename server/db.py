@@ -1278,6 +1278,132 @@ class AutomationRule(Base):
         }
 
 
+class AutomationRuleState(Base):
+    """Durable per-rule evaluator state — survives Brain restarts.
+
+    ``matched`` is the edge-trigger latch and ``last_fired_at`` the
+    cooldown clock; both persist so a restart never re-fires a rule that
+    already fired for the current condition.
+    """
+    __tablename__ = "automation_rule_state"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_id = Column(Integer, ForeignKey("automation_rule.id"),
+                     nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    matched = Column(Boolean, default=False)
+    last_fired_at = Column(DateTime, nullable=True)
+    last_execution_id = Column(String(64), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow,
+                        onupdate=datetime.utcnow)
+
+
+class AutomationExecution(Base):
+    """One rule firing — links the triggering context to the actions it
+    dispatched, so the provenance chain
+    evidence → state → event → execution → action → result is queryable.
+    """
+    __tablename__ = "automation_execution"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_id = Column(String(64), unique=True, nullable=False,
+                          index=True)
+    rule_id = Column(Integer, ForeignKey("automation_rule.id"),
+                     nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    rule_name = Column(String(255), nullable=False)
+    trigger_state_id = Column(Integer, nullable=True)
+    trigger_event_id = Column(Integer, nullable=True)
+    trigger_snapshot = Column(Text, nullable=True)      # JSON matched state
+    status = Column(String(20), nullable=False, default="fired")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "execution_id": self.execution_id,
+            "rule": self.rule_name,
+            "rule_id": str(self.rule_id),
+            "trigger_state_id": self.trigger_state_id,
+            "trigger_event_id": self.trigger_event_id,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() + "Z"
+                          if self.created_at else None,
+        }
+
+
+class ActionRequest(Base):
+    """Canonical action request — durable, idempotent, expirable.
+
+    ``action_id`` is the idempotency key: a replayed request with the
+    same id never executes twice. Dispatch targets the owning Thoth
+    node's authenticated local API; results are stored as canonical
+    ActionResult JSON.
+    """
+    __tablename__ = "action_request"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    action_id = Column(String(64), unique=True, nullable=False, index=True)
+    execution_id = Column(String(64), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    device_id = Column(String(255), nullable=False)      # device_uuid
+    actuator_id = Column(String(255), nullable=False)
+    operation = Column(String(64), nullable=False)
+    params = Column(Text, nullable=False, default="{}")
+    origin = Column(String(255), nullable=False, default="")
+    status = Column(String(20), nullable=False, default="queued",
+                    index=True)
+    attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=3)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    dispatched_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)            # ActionResult
+    correlation = Column(Text, nullable=True)            # JSON id chain
+
+    def to_dict(self):
+        import json as _json
+        try:
+            result = _json.loads(self.result_json) if self.result_json else None
+        except (TypeError, _json.JSONDecodeError):
+            result = None
+        try:
+            corr = _json.loads(self.correlation) if self.correlation else {}
+        except (TypeError, _json.JSONDecodeError):
+            corr = {}
+        try:
+            params = _json.loads(self.params) if self.params else {}
+        except (TypeError, _json.JSONDecodeError):
+            params = {}
+        return {
+            "action_id": self.action_id,
+            "execution_id": self.execution_id,
+            "device_id": self.device_id,
+            "actuator_id": self.actuator_id,
+            "operation": self.operation,
+            "params": params,
+            "origin": self.origin,
+            "status": self.status,
+            "attempts": self.attempts,
+            "max_attempts": self.max_attempts,
+            "created_at": self.created_at.isoformat() + "Z"
+                          if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() + "Z"
+                          if self.expires_at else None,
+            "dispatched_at": self.dispatched_at.isoformat() + "Z"
+                             if self.dispatched_at else None,
+            "completed_at": self.completed_at.isoformat() + "Z"
+                            if self.completed_at else None,
+            "last_error": self.last_error,
+            "result": result,
+            "correlation": corr,
+        }
+
+
 class FaceBasis(Base):
     """A PCA eigenface basis — mean face + eigenvectors as .npz bytes.
 

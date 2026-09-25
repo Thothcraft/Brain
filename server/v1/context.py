@@ -379,6 +379,7 @@ async def upsert_state(
     db.commit()
     db.refresh(state)
 
+    event = None
     if event_type:
         event = ContextEvent(
             user_id=current_user.userId, event_key=body.key,
@@ -389,6 +390,21 @@ async def upsert_state(
             provenance=json.dumps({"estimator": body.estimator}))
         db.add(event)
         db.commit()
+        db.refresh(event)
+
+    # Event-driven automation (§17): a context transition evaluates the
+    # user's rules immediately — no manual /automation/evaluate call and
+    # no control surface required. Dispatch failures degrade to queued
+    # ActionRequests; they never fail the state write.
+    if event is not None:
+        try:
+            from server.automation import evaluate_user_rules
+            evaluate_user_rules(db, current_user.userId, trigger={
+                "state_id": state.id, "event_id": event.id,
+                "state": state.to_dict()})
+        except Exception:
+            logger.exception("automation evaluation failed for state %s",
+                             state.id)
     return state.to_dict()
 
 

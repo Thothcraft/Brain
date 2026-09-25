@@ -40,30 +40,55 @@ DEFAULT_THRESHOLD_SIGMA = 2.0
 
 
 # ---------------------------------------------------------------------------
-# Eigenface math (server-side; mirrors whispy_model_face.basis)
+# Eigenface math — the canonical shared implementation lives in
+# ``whispy_model_face.basis`` so Brain enrollment and edge inference run
+# byte-identical preprocessing (gray conversion, resize, normalization,
+# PCA projection, per-person threshold calibration). Never reimplement
+# it here.
 # ---------------------------------------------------------------------------
 
+try:
+    from whispy_model_face import basis as _face_basis
+except ImportError:  # pragma: no cover - optional deployment dep
+    _face_basis = None
+
+
+def _basis_math():
+    if _face_basis is None:
+        raise HTTPException(
+            503, "face math unavailable: install the whispy-model-face "
+                 "package (shared eigenface basis/preprocessing)")
+    return _face_basis
+
+
 def _decode_image_b64(data_b64: str, image_size: int):
-    """base64 image → flattened float32 gray vector in [0,1]."""
+    """base64 image → flattened float32 vector via the shared pipeline.
+
+    Decodes with PIL (lossless formats decode identically to cv2 on the
+    edge), then delegates gray/resize/normalize to
+    ``whispy_model_face.basis.normalize_image`` — the exact preprocessing
+    the edge recognizer applies.
+    """
     from PIL import Image
     try:
         raw = base64.b64decode(data_b64)
-        img = Image.open(io.BytesIO(raw)).convert("L")
-        img = img.resize((image_size, image_size))
-        arr = np.asarray(img, dtype=np.float32) / 255.0
-        return arr.flatten()
+        # RGB conversion mirrors cv2.IMREAD_COLOR on the edge (3-channel,
+        # alpha dropped) so both sides normalize identical pixels.
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        arr = np.asarray(img)
     except Exception as exc:
         raise HTTPException(422, f"undecodable image: {exc}")
+    vec = _basis_math().normalize_image(arr, image_size)
+    if vec is None:
+        raise HTTPException(422, "undecodable image: normalize failed")
+    return vec
 
 
-def _fit_basis(vectors: List[np.ndarray], n_components: int) -> Dict[str, Any]:
-    """SVD on the centered data matrix — same math as cv2.PCACompute."""
-    A = np.stack(vectors)
-    mean = A.mean(axis=0)
-    k = max(1, min(int(n_components), min(A.shape) - 1))
-    _, _, vt = np.linalg.svd(A - mean, full_matrices=False)
-    return {"mean": mean.astype(np.float32),
-            "eigenvectors": vt[:k].astype(np.float32)}
+def _fit_basis(vectors: List[np.ndarray], n_components: int,
+               image_size: int = DEFAULT_IMAGE_SIZE) -> Dict[str, Any]:
+    """SVD on the centered data matrix — shared implementation."""
+    return _basis_math().fit_basis_normalized(vectors, image_size,
+                                              n_components)
 
 
 def _serialize_basis(mean, eigenvectors, image_size, max_distance) -> bytes:
@@ -87,15 +112,16 @@ def _project(basis: Dict[str, Any], vec: np.ndarray) -> List[float]:
     return np.dot(centered, basis["eigenvectors"].T).tolist()
 
 
-def _calibrate(projections: List[List[float]], sigma: float) -> float:
-    """mean + sigma·std of each projection's distance to the centroid —
-    the "very close" cutoff (the reference repo has no threshold)."""
-    if not projections:
-        return 0.0
-    arr = np.asarray(projections, dtype=np.float32)
-    centroid = arr.mean(axis=0)
-    dists = [float(np.sqrt(np.sum((p - centroid) ** 2))) for p in arr]
-    return float(np.mean(dists) + sigma * np.std(dists))
+def _calibrate(gallery: Dict[str, List[List[float]]],
+               sigma: float = DEFAULT_THRESHOLD_SIGMA) -> float:
+    """Per-person calibrated ``max_distance`` — the shared
+    ``whispy_model_face.basis.calibrate_threshold`` (mean + sigma·std of
+    each enrolled projection's distance to *its own person's* centroid).
+
+    A one-sample gallery calibrates to 0.0 → exact-match-only on the
+    edge; rejection can never be silently disabled.
+    """
+    return float(_basis_math().calibrate_threshold(gallery, sigma))
 
 
 def _get_basis_row(db: Session, user_id: int,
@@ -150,7 +176,7 @@ async def upsert_basis(
             raise HTTPException(422, f"invalid npz basis: {exc}")
     elif len(body.images) >= 2:
         vecs = [_decode_image_b64(b, body.image_size) for b in body.images]
-        fitted = _fit_basis(vecs, body.n_components)
+        fitted = _fit_basis(vecs, body.n_components, body.image_size)
         image_size, n_components = body.image_size, \
             int(fitted["eigenvectors"].shape[0])
         data = _serialize_basis(fitted["mean"], fitted["eigenvectors"],
@@ -212,13 +238,18 @@ async def enroll_person(
         photo_mime=body.photo_mime)
     db.add(asset)
 
-    # Re-calibrate the basis threshold against the updated gallery.
+    # Re-calibrate the basis threshold against the updated gallery —
+    # per-person centroids via the shared whispy math (a global centroid
+    # across different people would inflate the cutoff and let unknown
+    # faces match the nearest enrolled person).
     rows = db.query(PersonAsset).filter(
         PersonAsset.user_id == current_user.userId,
         PersonAsset.basis_id == basis_row.id).all()
-    projections = [json.loads(r.projection) for r in rows] + [projection]
-    basis_row.max_distance = _calibrate(projections,
-                                        DEFAULT_THRESHOLD_SIGMA)
+    gallery: Dict[str, List[List[float]]] = {}
+    for r in rows:
+        gallery.setdefault(r.name, []).append(json.loads(r.projection))
+    gallery.setdefault(body.name, []).append(projection)
+    basis_row.max_distance = _calibrate(gallery, DEFAULT_THRESHOLD_SIGMA)
     basis_dict = _load_basis(basis_row)
     basis_row.data = _serialize_basis(
         basis_dict["mean"], basis_dict["eigenvectors"],
