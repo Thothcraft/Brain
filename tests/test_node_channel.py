@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from server.auth import create_access_token, get_current_user
 from server.db import ApiUsage, Base, Device, NodeEvent, NodeRoom, User, get_db
@@ -29,9 +30,13 @@ def api(monkeypatch):
     # connections — in-memory StaticPool would force them onto ONE shared
     # transaction and corrupt session state across threads.
     tmp = Path(tempfile.mkdtemp()) / 'test.db'
+    # NullPool: no checkout ceiling — sessions get a fresh connection each
+    # and return it on close, so leaked/late-closed sessions (WS handler
+    # to_thread writes, _wait_for probes) can never exhaust the pool.
     engine = create_engine(f'sqlite:///{tmp}',
                            connect_args={'check_same_thread': False,
-                                         'timeout': 30})
+                                         'timeout': 30},
+                           poolclass=NullPool)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     user = User(userId=1, username='test', email='t@example.invalid',
@@ -59,7 +64,15 @@ def api(monkeypatch):
     app = FastAPI()
     app.include_router(v1_router, prefix='/v1')
     app.dependency_overrides[get_current_user] = lambda: user
-    app.dependency_overrides[get_db] = lambda: factory()
+
+    def _get_db():
+        s = factory()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = _get_db
     with TestClient(app) as client:
         yield client, factory, user
 
