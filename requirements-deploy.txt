@@ -27,6 +27,6 @@ numpy>=1.21.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
 pandas>=2.0.0
-# whispy face math — /v1/faces basis fitting + enrollment projections
-whispy @ git+https://github.com/gadm21/whispy@dc7a192#subdirectory=packages/whispy
-whispy-model-face @ git+https://github.com/gadm21/whispy@dc7a192#subdirectory=packages/whispy-model-face
+# NOTE: whispy-model-face would come from git+https://github.com/gadm21/whispy
+# but nixpacks can't fetch git deps — server/v1/face_basis.py vendors the
+# same module instead (whispy_model_face.basis is preferred when present).

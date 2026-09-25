@@ -50,7 +50,13 @@ DEFAULT_THRESHOLD_SIGMA = 2.0
 try:
     from whispy_model_face import basis as _face_basis
 except ImportError:  # pragma: no cover - optional deployment dep
-    _face_basis = None
+    try:
+        # Vendored copy of whispy_model_face/basis.py — byte-identical
+        # math, used when the package can't install (e.g. deploy envs
+        # without git for git+https requirements).
+        from server.v1 import face_basis as _face_basis
+    except ImportError:
+        _face_basis = None
 
 
 def _basis_math():
