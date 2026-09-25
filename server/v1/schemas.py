@@ -41,6 +41,9 @@ class DeviceV1(BaseModel):
     capabilities: List[str] = Field(default_factory=list)
     sensors: List[SensorV1] = Field(default_factory=list)
     health: Dict[str, Any] = Field(default_factory=dict)
+    # Node-advertised LAN endpoint {host,port,token} — same-network clients
+    # reach the node directly; Brain is only a registry.
+    local_api: Dict[str, Any] = Field(default_factory=dict)
 
 
 class DeviceListV1(BaseModel):

@@ -80,6 +80,7 @@ def device_to_v1(device: Any, *, include_sensors: bool = True) -> Dict[str, Any]
         "capabilities": list(hw.get("capabilities") or []),
         "sensors": sensors_from_hardware(device) if include_sensors else [],
         "health": dict(hw.get("health") or {}),
+        "local_api": dict(hw.get("local_api") or {}),
     }
 
 
