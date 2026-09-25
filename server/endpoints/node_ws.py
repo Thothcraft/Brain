@@ -47,6 +47,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from server import event_bus
 from server.auth import decode_token_any, get_current_user
 from server.db import (
     ApiUsage, Device, NodeEvent, NodeRoom, User, get_db, get_db_session,
