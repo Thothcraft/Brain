@@ -280,6 +280,17 @@ def start_scheduler():
             next_run_time=datetime.now() + timedelta(seconds=120),
         )
 
+        # Outbound webhook delivery — drain queued EventDelivery rows.
+        from server.event_delivery import drain as _drain_deliveries
+        scheduler.add_job(
+            _drain_deliveries,
+            trigger=IntervalTrigger(seconds=1),
+            id='event_delivery_job',
+            name='Deliver outbound event webhooks',
+            replace_existing=True,
+            next_run_time=datetime.now() + timedelta(seconds=5),
+        )
+
         scheduler.start()
         logger.info("Scheduler started successfully with jobs: %s", 
                    [job.name for job in scheduler.get_jobs()])

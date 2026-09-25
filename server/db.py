@@ -1582,6 +1582,74 @@ class ApiUsage(Base):
         }
 
 
+class EventSubscription(Base):
+    """Outbound webhook subscription — POST every matching node_event to a URL.
+
+    Deliveries are signed ``X-Thoth-Signature: sha256=<hmac(secret, body)>``
+    and retried with backoff (:class:`EventDelivery` rows). ``kinds`` is a
+    JSON list — empty/null means every kind.
+    """
+    __tablename__ = "event_subscription"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    url = Column(String(1024), nullable=False)
+    secret = Column(String(255), nullable=False, default="")
+    kinds = Column(Text, nullable=True)                        # JSON list
+    device_id = Column(String(255), nullable=True)             # device_uuid filter
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        import json as _json
+        try:
+            kinds = _json.loads(self.kinds) if self.kinds else []
+        except (TypeError, _json.JSONDecodeError):
+            kinds = []
+        return {
+            "id": self.id,
+            "url": self.url,
+            "kinds": kinds,
+            "device_id": self.device_id,
+            "enabled": bool(self.enabled),
+            "created_at": self.created_at.isoformat() + "Z"
+                          if self.created_at else None,
+        }
+
+
+class EventDelivery(Base):
+    """One webhook delivery attempt chain — retries until terminal."""
+    __tablename__ = "event_delivery"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    subscription_id = Column(Integer,
+                             ForeignKey("event_subscription.id"),
+                             nullable=False, index=True)
+    event_id = Column(String(64), nullable=False, index=True)  # node_event.id
+    status = Column(String(20), nullable=False, default="queued", index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    next_attempt_at = Column(Float, nullable=True)
+    last_status_code = Column(Integer, nullable=True)
+    last_error = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "subscription_id": self.subscription_id,
+            "event_id": self.event_id,
+            "status": self.status,
+            "attempts": self.attempts,
+            "last_status_code": self.last_status_code,
+            "last_error": self.last_error,
+            "created_at": self.created_at.isoformat() + "Z"
+                          if self.created_at else None,
+        }
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)

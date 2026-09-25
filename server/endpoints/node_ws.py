@@ -195,7 +195,80 @@ def _write_event(
             if existing is not None:
                 return existing.to_dict()
             raise
-        return row.to_dict()
+        doc = row.to_dict()
+    # Push to live subscribers (SSE /v1/events/stream) — never block the
+    # node channel on a slow consumer.
+    event_bus.publish(user_id, doc)
+    try:
+        from server.event_delivery import enqueue
+        enqueue(user_id, doc)
+    except Exception:
+        logger.debug("[node-ws] webhook enqueue failed", exc_info=True)
+    return doc
+
+
+def _apply_prediction_context(user_id: int, device_uuid: str,
+                              data: Any) -> None:
+    """Project a node ``prediction`` event into the context store.
+
+    Normalized context (CONTRACT §5): every model output reduces to a
+    ``ContextState`` keyed ``prediction`` per device whose value is the
+    label string. A changed value emits a ``ContextEvent`` and the
+    automation engine evaluates the user's rules — so
+    ``empty → occupied`` needs nothing but a ``when: {key: "prediction",
+    equals: "occupied"}`` rule. Non-dict payloads and errors degrade to
+    a logged no-op; prediction events must never break the node channel.
+    """
+    if not isinstance(data, dict):
+        return
+    label = data.get("label") or data.get("prediction")
+    if not label:
+        return
+    try:
+        from server.automation import evaluate_user_rules
+        from server.db import ContextEvent, ContextState
+        now = time()
+        with get_db_session() as db:
+            state = db.query(ContextState).filter(
+                ContextState.user_id == user_id,
+                ContextState.state_key == "prediction",
+                ContextState.entity_id == device_uuid).first()
+            previous = None
+            event_type = ""
+            if state is None:
+                state = ContextState(
+                    user_id=user_id, state_key="prediction",
+                    entity_id=device_uuid, since=now)
+                db.add(state)
+                event_type = "entered"
+            else:
+                previous = json.loads(state.value) if state.value else None
+                if previous != label:
+                    event_type = "changed"
+                    state.since = now
+            state.value = json.dumps(label)
+            state.confidence = float(data.get("confidence") or 0.0)
+            state.estimator = str(data.get("runtime_model_id")
+                                  or data.get("model_id") or "node")
+            db.commit()
+            db.refresh(state)
+            if event_type:
+                event = ContextEvent(
+                    user_id=user_id, event_key="prediction",
+                    event_type=event_type, entity_id=device_uuid,
+                    state_id=str(state.id), value=json.dumps(label),
+                    previous_value=json.dumps(previous),
+                    confidence=state.confidence, timestamp=now,
+                    provenance=json.dumps({"estimator": state.estimator}))
+                db.add(event)
+                db.commit()
+                db.refresh(event)
+                evaluate_user_rules(db, user_id, trigger={
+                    "state_id": state.id, "event_id": event.id,
+                    "state": state.to_dict()})
+    except Exception:
+        logger.exception("[node-ws] prediction→context failed for %s",
+                         device_uuid)
 
 
 def _cache_room(user_id: int, device_uuid: str, doc: Dict[str, Any]) -> None:
@@ -372,6 +445,10 @@ async def node_ws(
                 await asyncio.to_thread(
                     _write_event, user_id, device_uuid, kind,
                     frame.get("data"), frame.get("ts"), frame.get("id"))
+                if kind == "prediction":
+                    await asyncio.to_thread(
+                        _apply_prediction_context, user_id,
+                        device_uuid, frame.get("data") or {})
             await asyncio.to_thread(_touch_seen, device_uuid)
     except WebSocketDisconnect:
         pass
@@ -536,6 +613,10 @@ async def post_event(
         raise HTTPException(status_code=422, detail="kind is required")
     row = _write_event(user_id, target.device_uuid, request.kind,
                        request.data, request.ts, request.event_id)
+    if request.kind == "prediction":
+        await asyncio.to_thread(
+            _apply_prediction_context, user_id,
+            target.device_uuid, request.data or {})
     return {"ok": True, "event": row}
 
 
