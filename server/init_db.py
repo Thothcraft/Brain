@@ -321,6 +321,45 @@ def ensure_context_schema():
         return False
 
 
+def ensure_face_schema():
+    """Apply the face-asset schema (face_basis + person_asset).
+
+    Idempotent — mirrors run_migrations.py. Without this the /v1/faces
+    endpoints 500 on a fresh DB.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS face_basis (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    name VARCHAR(255) NOT NULL DEFAULT 'default',
+                    image_size INTEGER NOT NULL DEFAULT 64,
+                    n_components INTEGER NOT NULL DEFAULT 0,
+                    max_distance DOUBLE PRECISION DEFAULT 0,
+                    data BYTEA NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_face_basis_user ON face_basis(user_id);
+                CREATE TABLE IF NOT EXISTS person_asset (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    name VARCHAR(255) NOT NULL,
+                    basis_id INTEGER NOT NULL REFERENCES face_basis(id),
+                    projection TEXT NOT NULL,
+                    photo BYTEA,
+                    photo_mime VARCHAR(64),
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_person_asset_user ON person_asset(user_id);
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring face schema: {e}")
+        return False
+
+
 def ensure_device_deployment_table():
     """Ensure the device_deployment table exists for pull-based model delivery."""
     try:
@@ -381,6 +420,7 @@ def initialize_database():
             "device.approved": ensure_approved_column(),
             "device_deployment": ensure_device_deployment_table(),
             "context_schema": ensure_context_schema(),
+            "face_schema": ensure_face_schema(),
         }
         failed = [name for name, succeeded in results.items() if not succeeded]
         if failed:
