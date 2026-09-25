@@ -409,6 +409,65 @@ def ensure_device_deployment_table():
     return True
 
 
+def ensure_node_channel_schema():
+    """Apply the node↔Brain channel schema (plans/CONTRACT.md §2–§4).
+
+    Idempotent — safe to run on every startup. Mirrors run_migrations.py.
+    Without this the /v1/node/ws, /v1/events, and /v1/usage endpoints 500
+    on a fresh DB.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS node_event (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    device_id VARCHAR(255) NOT NULL,
+                    kind VARCHAR(80) NOT NULL,
+                    data TEXT,
+                    ts DOUBLE PRECISION NOT NULL,
+                    external_id VARCHAR(255),
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, device_id, external_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_node_event_user ON node_event(user_id);
+                CREATE INDEX IF NOT EXISTS idx_node_event_device ON node_event(device_id);
+                CREATE INDEX IF NOT EXISTS idx_node_event_kind ON node_event(kind);
+                CREATE INDEX IF NOT EXISTS idx_node_event_ts ON node_event(ts);
+                CREATE INDEX IF NOT EXISTS idx_node_event_created ON node_event(created_at);
+                CREATE TABLE IF NOT EXISTS node_room (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    device_id VARCHAR(255) NOT NULL UNIQUE,
+                    doc TEXT NOT NULL DEFAULT '{}',
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_node_room_user ON node_room(user_id);
+                CREATE TABLE IF NOT EXISTS api_usage (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    device_id VARCHAR(255) NOT NULL,
+                    ts DOUBLE PRECISION NOT NULL,
+                    source VARCHAR(40) NOT NULL DEFAULT 'api',
+                    kind VARCHAR(40) NOT NULL,
+                    model_id VARCHAR(255),
+                    latency_ms DOUBLE PRECISION,
+                    tokens INTEGER,
+                    meta TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_api_usage_user ON api_usage(user_id);
+                CREATE INDEX IF NOT EXISTS idx_api_usage_device ON api_usage(device_id);
+                CREATE INDEX IF NOT EXISTS idx_api_usage_ts ON api_usage(ts);
+                CREATE INDEX IF NOT EXISTS idx_api_usage_kind ON api_usage(kind);
+                CREATE INDEX IF NOT EXISTS idx_api_usage_source ON api_usage(source);
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring node channel schema: {e}")
+        return False
+
+
 def initialize_database():
     """Initialize all required database tables."""
     logger.info("[INIT] Starting database initialization")
@@ -421,6 +480,7 @@ def initialize_database():
             "device_deployment": ensure_device_deployment_table(),
             "context_schema": ensure_context_schema(),
             "face_schema": ensure_face_schema(),
+            "node_channel": ensure_node_channel_schema(),
         }
         failed = [name for name, succeeded in results.items() if not succeeded]
         if failed:

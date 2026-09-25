@@ -9,9 +9,11 @@ from .router import router
 from .context import router as context_router
 from .automation import router as automation_router
 from .faces import router as faces_router
+from server.endpoints.node_ws import router as node_ws_router
 
 router.include_router(context_router)
 router.include_router(automation_router)
 router.include_router(faces_router)
+router.include_router(node_ws_router)
 
 __all__ = ["router"]

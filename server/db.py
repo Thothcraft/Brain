@@ -1474,6 +1474,114 @@ class PersonAsset(Base):
         return out
 
 
+class NodeEvent(Base):
+    """One node-originated event (trigger_fired, room_changed, metadata, …).
+
+    Rows arrive over the node↔Brain WebSocket (``/v1/node/ws`` event
+    frames) or via ``POST /v1/events`` and feed the portal/mobile
+    notification stream. ``external_id`` is the node's idempotency key —
+    a replayed event never duplicates.
+    """
+    __tablename__ = "node_event"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    device_id = Column(String(255), nullable=False, index=True)  # device_uuid
+    kind = Column(String(80), nullable=False, index=True)
+    data = Column(Text, nullable=True)                            # JSON
+    ts = Column(Float, nullable=False, index=True)                # producer epoch
+    external_id = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_id", "external_id",
+                         name="uq_node_event_external"),
+    )
+
+    def to_dict(self):
+        import json as _json
+        try:
+            data = _json.loads(self.data) if self.data else {}
+        except (TypeError, _json.JSONDecodeError):
+            data = {}
+        return {
+            "id": str(self.id),
+            "device_id": self.device_id,
+            "kind": self.kind,
+            "data": data,
+            "ts": self.ts,
+            "created_at": self.created_at.isoformat() + "Z"
+                          if self.created_at else None,
+        }
+
+
+class NodeRoom(Base):
+    """Cached ``room/v1`` document per node — Brain mirrors the node's
+    authoritative room doc so portal/mobile render without a live tunnel."""
+    __tablename__ = "node_room"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    device_id = Column(String(255), unique=True, nullable=False,
+                       index=True)                            # device_uuid
+    doc = Column(Text, nullable=False, default="{}")           # JSON room/v1
+    updated_at = Column(DateTime, default=datetime.utcnow,
+                        onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        import json as _json
+        try:
+            doc = _json.loads(self.doc) if self.doc else {}
+        except (TypeError, _json.JSONDecodeError):
+            doc = {}
+        return doc
+
+
+class ApiUsage(Base):
+    """Metered node/cloud API activity (§4).
+
+    ``source`` ∈ api|portal|dashboard|mobile — who initiated the call.
+    ``kind`` ∈ prediction|deploy|capture|automation|actuate — inferred
+    from the relayed node path or supplied by the poster.
+    """
+    __tablename__ = "api_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    device_id = Column(String(255), nullable=False, index=True)  # device_uuid
+    ts = Column(Float, nullable=False, index=True)               # epoch seconds
+    source = Column(String(40), nullable=False, default="api", index=True)
+    kind = Column(String(40), nullable=False, index=True)
+    model_id = Column(String(255), nullable=True)
+    latency_ms = Column(Float, nullable=True)
+    tokens = Column(Integer, nullable=True)
+    meta = Column(Text, nullable=True)                           # JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        import json as _json
+        try:
+            meta = _json.loads(self.meta) if self.meta else {}
+        except (TypeError, _json.JSONDecodeError):
+            meta = {}
+        return {
+            "id": str(self.id),
+            "device_id": self.device_id,
+            "ts": self.ts,
+            "source": self.source,
+            "kind": self.kind,
+            "model_id": self.model_id,
+            "latency_ms": self.latency_ms,
+            "tokens": self.tokens,
+            "meta": meta,
+            "created_at": self.created_at.isoformat() + "Z"
+                          if self.created_at else None,
+        }
+
+
 # DO NOT run migrations or create tables at import time in serverless environments!
 # Run this manually in a migration script or CLI, not here:
 # Base.metadata.create_all(bind=engine)

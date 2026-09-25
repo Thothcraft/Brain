@@ -269,6 +269,50 @@ def run_migrations():
         created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_person_asset_user ON person_asset(user_id);
+
+    -- Node↔Brain channel (plans/CONTRACT.md §2–§4)
+    CREATE TABLE IF NOT EXISTS node_event (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        device_id VARCHAR(255) NOT NULL,
+        kind VARCHAR(80) NOT NULL,
+        data TEXT,
+        ts DOUBLE PRECISION NOT NULL,
+        external_id VARCHAR(255),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, device_id, external_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_event_user ON node_event(user_id);
+    CREATE INDEX IF NOT EXISTS idx_node_event_device ON node_event(device_id);
+    CREATE INDEX IF NOT EXISTS idx_node_event_kind ON node_event(kind);
+    CREATE INDEX IF NOT EXISTS idx_node_event_ts ON node_event(ts);
+    CREATE INDEX IF NOT EXISTS idx_node_event_created ON node_event(created_at);
+    CREATE TABLE IF NOT EXISTS node_room (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        device_id VARCHAR(255) NOT NULL UNIQUE,
+        doc TEXT NOT NULL DEFAULT '{}',
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_room_user ON node_room(user_id);
+    CREATE TABLE IF NOT EXISTS api_usage (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+        device_id VARCHAR(255) NOT NULL,
+        ts DOUBLE PRECISION NOT NULL,
+        source VARCHAR(40) NOT NULL DEFAULT 'api',
+        kind VARCHAR(40) NOT NULL,
+        model_id VARCHAR(255),
+        latency_ms DOUBLE PRECISION,
+        tokens INTEGER,
+        meta TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_usage_user ON api_usage(user_id);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_device ON api_usage(device_id);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_ts ON api_usage(ts);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_kind ON api_usage(kind);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_source ON api_usage(source);
     """
 
     try:
