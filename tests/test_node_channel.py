@@ -92,11 +92,19 @@ def _ws_url(device_uuid: str = 'dev-1') -> str:
     return f'/v1/node/ws?device_id={device_uuid}&token={_device_token(device_uuid)}'
 
 
-def _wait_for(predicate, timeout=5.0):
+def _poll(factory, predicate, timeout=5.0):
+    """Poll ``predicate(session)`` with a context-managed session.
+
+    Probes must close their session — a leaked probe transaction pins a
+    shared lock on the SQLite file and starves the WS handler's
+    ``to_thread`` writers (connect/disconnect bookkeeping) for up to the
+    30 s sqlite timeout, which is what flaked CI.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if predicate():
-            return True
+        with factory() as s:
+            if predicate(s):
+                return True
         time.sleep(0.05)
     return False
 
@@ -133,7 +141,7 @@ def test_ws_relay_roundtrip_and_usage(api):
         assert result['resp'].json() == {'label': 'presence'}
 
         # A prediction-kind call is metered automatically.
-        assert _wait_for(lambda: factory().query(ApiUsage).count() == 1)
+        assert _poll(factory, lambda s: s.query(ApiUsage).count() == 1)
         with factory() as s:
             row = s.query(ApiUsage).first()
             assert row.kind == 'prediction'
@@ -150,11 +158,10 @@ def test_ws_event_frames_and_room_cache(api):
         ws.send_json({'type': 'event', 'kind': 'trigger_fired',
                       'data': {'automation': 'light-on'}, 'id': 'evt-1'})
         ws.send_json({'type': 'room_changed', 'data': room_doc})
-        assert _wait_for(
-            lambda: factory().query(NodeEvent)
+        assert _poll(
+            factory, lambda s: s.query(NodeEvent)
             .filter(NodeEvent.kind == 'trigger_fired').count() == 1)
-        assert _wait_for(
-            lambda: factory().query(NodeRoom).count() == 1)
+        assert _poll(factory, lambda s: s.query(NodeRoom).count() == 1)
 
     res = client.get('/v1/events?device_id=dev-1', headers=_user_headers())
     kinds = [e['kind'] for e in res.json()['events']]
@@ -164,10 +171,9 @@ def test_ws_event_frames_and_room_cache(api):
     assert res.status_code == 200
     assert res.json()['room']['room_id'] == 'living-room'
 
-    # disconnect marks the device offline
-    assert _wait_for(
-        lambda: not factory().query(Device)
-        .filter(Device.device_uuid == 'dev-1').first().online)
+    # disconnect unregisters the tunnel (DB online flag is best-effort
+    # bookkeeping; the 90s heartbeat staleness is the real offline signal)
+    assert _poll(factory, lambda s: not node_ws.manager.online('dev-1'))
 
 
 def test_relay_offline_node_returns_503(api):
@@ -198,7 +204,7 @@ def test_room_put_writes_through(api):
         t.join(10)
         assert result['resp'].status_code == 200
         assert result['resp'].json()['room']['room_id'] == 'office'
-        assert _wait_for(lambda: factory().query(NodeRoom).count() == 1)
+        assert _poll(factory, lambda s: s.query(NodeRoom).count() == 1)
 
 
 def test_events_and_usage_rest_fallback(api):
