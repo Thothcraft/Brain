@@ -113,7 +113,25 @@ def ensure_device_columns():
     try:
         with engine.begin() as conn:
             conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS device (
+                    device_id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES user_account(user_id),
+                    device_uuid VARCHAR(255) NOT NULL,
+                    device_name VARCHAR(255) NOT NULL,
+                    device_type VARCHAR(50) NOT NULL DEFAULT 'thoth',
+                    last_seen TIMESTAMP,
+                    online BOOLEAN DEFAULT FALSE,
+                    approved BOOLEAN DEFAULT FALSE,
+                    ip_address VARCHAR(45),
+                    mac_address VARCHAR(32),
+                    battery_level INTEGER,
+                    hardware_info TEXT
+                )
+            """))
+            conn.execute(text("""
                 ALTER TABLE device
+                    ADD COLUMN IF NOT EXISTS device_id SERIAL,
+                    ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES user_account(user_id),
                     ADD COLUMN IF NOT EXISTS device_uuid VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS device_name VARCHAR(255),
                     ADD COLUMN IF NOT EXISTS device_type VARCHAR(50) DEFAULT 'thoth',
@@ -124,6 +142,8 @@ def ensure_device_columns():
                     ADD COLUMN IF NOT EXISTS battery_level INTEGER,
                     ADD COLUMN IF NOT EXISTS hardware_info TEXT
             """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_device_uuid ON device (device_uuid)"))
         return True
     except Exception as e:
         logger.error(f"[INIT] Error ensuring device columns: {e}")

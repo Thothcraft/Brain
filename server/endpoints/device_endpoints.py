@@ -809,11 +809,12 @@ async def start_device_pairing(
     try:
         existing_device = db.query(Device).filter(
             Device.device_uuid == device_uuid).first()
-    except Exception:
+    except Exception as exc:
         db.rollback()
         logger.exception("[pairing] device lookup failed for %s", device_uuid)
-        raise HTTPException(status_code=503,
-                            detail="Device lookup failed — retry in a moment")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Device lookup failed ({type(exc).__name__}: {exc})")
     if existing_device:
         token_authorizes_existing_device = False
         if authorization and isinstance(authorization, str):
