@@ -102,6 +102,34 @@ def ensure_approved_column():
     return True
 
 
+def ensure_device_columns():
+    """Ensure every ``device`` ORM column exists on the prod table.
+
+    The prod ``device`` table predates several columns the ORM selects;
+    a missing column makes EVERY ``db.query(Device)`` raise
+    UndefinedColumn (500/503 on pairing, heartbeat, portal devices).
+    ADD COLUMN IF NOT EXISTS is a no-op once healthy.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                ALTER TABLE device
+                    ADD COLUMN IF NOT EXISTS device_uuid VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS device_name VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS device_type VARCHAR(50) DEFAULT 'thoth',
+                    ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS online BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS ip_address VARCHAR(45),
+                    ADD COLUMN IF NOT EXISTS mac_address VARCHAR(32),
+                    ADD COLUMN IF NOT EXISTS battery_level INTEGER,
+                    ADD COLUMN IF NOT EXISTS hardware_info TEXT
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring device columns: {e}")
+        return False
+
+
 def ensure_product_core_schema():
     """Apply small, idempotent schema improvements required by the product UI."""
     try:
@@ -477,6 +505,7 @@ def initialize_database():
             "product_core": ensure_product_core_schema(),
             "trained_model": ensure_trained_model_table(),
             "device.approved": ensure_approved_column(),
+            "device.columns": ensure_device_columns(),
             "device_deployment": ensure_device_deployment_table(),
             "context_schema": ensure_context_schema(),
             "face_schema": ensure_face_schema(),
