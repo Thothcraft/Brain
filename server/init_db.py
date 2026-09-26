@@ -144,6 +144,21 @@ def ensure_device_columns():
             """))
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_device_uuid ON device (device_uuid)"))
+            # Prod drift: device_uuid was created as Postgres ``uuid`` while
+            # the ORM binds VARCHAR — comparisons crash with
+            # "operator does not exist: uuid = character varying".
+            col_type = conn.execute(text("""
+                SELECT udt_name FROM information_schema.columns
+                WHERE table_name = 'device' AND column_name = 'device_uuid'
+            """)).scalar()
+            if col_type and col_type != "varchar":
+                logger.info("[INIT] Converting device.device_uuid %s -> varchar",
+                            col_type)
+                conn.execute(text("""
+                    ALTER TABLE device
+                    ALTER COLUMN device_uuid TYPE VARCHAR(255)
+                    USING device_uuid::text
+                """))
         return True
     except Exception as e:
         logger.error(f"[INIT] Error ensuring device columns: {e}")
