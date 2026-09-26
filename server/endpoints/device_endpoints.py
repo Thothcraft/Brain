@@ -806,7 +806,14 @@ async def start_device_pairing(
     """Create a short-lived code that can be claimed from thothHUB."""
     now = datetime.utcnow()
     device_uuid = _normalized_device_uuid(request.device_id)
-    existing_device = db.query(Device).filter(Device.device_uuid == device_uuid).first()
+    try:
+        existing_device = db.query(Device).filter(
+            Device.device_uuid == device_uuid).first()
+    except Exception:
+        db.rollback()
+        logger.exception("[pairing] device lookup failed for %s", device_uuid)
+        raise HTTPException(status_code=503,
+                            detail="Device lookup failed — retry in a moment")
     if existing_device:
         token_authorizes_existing_device = False
         if authorization and isinstance(authorization, str):
