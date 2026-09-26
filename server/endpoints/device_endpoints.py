@@ -819,7 +819,13 @@ async def start_device_pairing(
 
         if not token_authorizes_existing_device:
             recovery_cutoff = now - timedelta(seconds=DEVICE_ONLINE_TIMEOUT_SECONDS)
-            if existing_device.last_seen and existing_device.last_seen >= recovery_cutoff:
+            last_seen = existing_device.last_seen
+            # Postgres TIMESTAMPTZ columns return tz-aware datetimes while
+            # `now`/`recovery_cutoff` are naive UTC — normalize before compare
+            # (a naive-vs-aware TypeError here 500s the pairing handshake).
+            if getattr(last_seen, "tzinfo", None) is not None:
+                last_seen = last_seen.replace(tzinfo=None)
+            if last_seen and last_seen >= recovery_cutoff:
                 raise HTTPException(
                     status_code=409,
                     detail="This device is still online. Wait for its previous session to expire or use its current token to re-pair.",
@@ -829,10 +835,15 @@ async def start_device_pairing(
             # stale, possession of the random device UUID plus the code shown
             # by its local dashboard is the recovery proof.
 
-    db.query(DevicePairing).filter(
-        DevicePairing.device_uuid == device_uuid,
-        DevicePairing.status == "pending",
-    ).update({DevicePairing.status: "expired"}, synchronize_session=False)
+    try:
+        db.query(DevicePairing).filter(
+            DevicePairing.device_uuid == device_uuid,
+            DevicePairing.status == "pending",
+        ).update({DevicePairing.status: "expired"}, synchronize_session=False)
+    except Exception:
+        db.rollback()
+        logger.exception("[pairing] failed to expire stale rows for %s", device_uuid)
+        raise HTTPException(status_code=503, detail="Pairing state cleanup failed — retry in a moment")
 
     pairing_code = None
     for _attempt in range(8):
@@ -857,7 +868,12 @@ async def start_device_pairing(
         expires_at=expires_at,
     )
     db.add(pairing)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[pairing] failed to persist pairing row for %s", device_uuid)
+        raise HTTPException(status_code=503, detail="Pairing persistence failed — retry in a moment")
     return {
         "success": True,
         "status": "pending",
@@ -882,7 +898,10 @@ async def device_pairing_status(
     ).first()
     if not pairing:
         raise HTTPException(status_code=404, detail="Pairing session not found")
-    if pairing.expires_at <= datetime.utcnow():
+    expires_at = pairing.expires_at
+    if getattr(expires_at, "tzinfo", None) is not None:
+        expires_at = expires_at.replace(tzinfo=None)
+    if expires_at <= datetime.utcnow():
         pairing.status = "expired"
         db.commit()
         raise HTTPException(status_code=410, detail="Pairing code expired")
