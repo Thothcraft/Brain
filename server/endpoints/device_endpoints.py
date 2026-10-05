@@ -2057,7 +2057,11 @@ async def create_device_command(
     """Queue a collection command for an owned Thoth device."""
     device = _owned_device(device_uuid, current_user, db)
     command_name = str(payload.get("command") or "").strip()
-    if command_name not in {"start_collection", "stop_collection", "label_current_chunk", "enable_model", "disable_model"}:
+    if command_name not in {"start_collection", "stop_collection", "label_current_chunk", "enable_model", "disable_model",
+                            # BLE-gated watch commands — a gateway device (e.g. the
+                            # thoth app proxying a PineTime) drains these via
+                            # pending_commands and acknowledges after the GATT write.
+                            "watch_notify", "watch_nav", "watch_alert", "ble_gatt_write"}:
         raise HTTPException(status_code=422, detail="Unsupported device command")
     command_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     command = DeviceCommand(
@@ -2186,7 +2190,7 @@ async def upsert_live_capture_chunk(
         key: payload.get(key)
         for key in (
             "labels", "model_predictions", "camera_filename", "captured_at", "error",
-            "features",
+            "features", "samples",
         )
         if payload.get(key) is not None
     }

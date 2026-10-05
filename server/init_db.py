@@ -531,6 +531,54 @@ def ensure_node_channel_schema():
         return False
 
 
+def ensure_spatial_schema():
+    """Apply the spatial layer schema (spaces, zones, device placement).
+
+    Idempotent — safe to run on every startup. Mirrors run_migrations.py.
+    Without this /api/spaces* 500s on a DB that predates the spatial
+    layer (prod).
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS space (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    parent_id INTEGER REFERENCES space(id),
+                    name VARCHAR(255) NOT NULL,
+                    floor_plan_file_id INTEGER REFERENCES file(file_id),
+                    width_m DOUBLE PRECISION,
+                    height_m DOUBLE PRECISION,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS zone (
+                    id SERIAL PRIMARY KEY,
+                    space_id INTEGER NOT NULL REFERENCES space(id) ON DELETE CASCADE,
+                    name VARCHAR(255) NOT NULL,
+                    polygon_json TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS device_placement (
+                    id SERIAL PRIMARY KEY,
+                    device_id INTEGER NOT NULL UNIQUE REFERENCES device(device_id) ON DELETE CASCADE,
+                    space_id INTEGER NOT NULL REFERENCES space(id) ON DELETE CASCADE,
+                    x DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    y DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    rotation_deg DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    fov_deg DOUBLE PRECISION NOT NULL DEFAULT 90,
+                    range_m DOUBLE PRECISION NOT NULL DEFAULT 8,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_space_user_id ON space(user_id);
+                CREATE INDEX IF NOT EXISTS idx_zone_space_id ON zone(space_id);
+                CREATE INDEX IF NOT EXISTS idx_device_placement_space ON device_placement(space_id);
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring spatial schema: {e}")
+        return False
+
+
 def initialize_database():
     """Initialize all required database tables."""
     logger.info("[INIT] Starting database initialization")
@@ -545,6 +593,7 @@ def initialize_database():
             "context_schema": ensure_context_schema(),
             "face_schema": ensure_face_schema(),
             "node_channel": ensure_node_channel_schema(),
+            "spatial_schema": ensure_spatial_schema(),
         }
         failed = [name for name, succeeded in results.items() if not succeeded]
         if failed:

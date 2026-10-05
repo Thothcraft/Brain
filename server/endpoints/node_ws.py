@@ -23,6 +23,9 @@ Frames (contract §2)::
     ← {"type":"event","kind":"trigger_fired","data":{...}}
     ← {"type":"room_changed","data":{room/v1 doc}}
     ← {"type":"metadata","data":{...}}
+    ← {"type":"observation_batch","id":"<batch>","items":[observation/v1]}
+       (observation-contract-v1 §2 — items land in ContextEvidence,
+       idempotent on obs:<observation_id>)
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import base64
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from time import perf_counter, time
@@ -206,6 +210,102 @@ def _write_event(
     except Exception:
         logger.debug("[node-ws] webhook enqueue failed", exc_info=True)
     return doc
+
+
+_OBSERVATION_BATCH_MAX = 500
+_OBS_SCHEMA_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*\.v\d+$")
+
+
+def ingest_observation_batch(db: Session, user_id: int,
+                             device_uuid: str,
+                             frame: Dict[str, Any]) -> Dict[str, Any]:
+    """Map an ``observation_batch`` frame onto ContextEvidence rows.
+
+    observation/v1 (node contract doc): every item becomes one evidence
+    row keyed ``external_id="obs:<observation_id>"`` — redelivery after a
+    reconnect collapses on the unique constraint instead of duplicating.
+    Unknown schemas are still stored (consumers ignore what they do not
+    read); malformed items are counted and skipped, never fatal.
+
+    Returns a small receipt: ``{stored, deduplicated, rejected}``.
+    """
+    from server.db import ContextEvidence
+    items = frame.get("items") if isinstance(frame, dict) else None
+    if not isinstance(items, list):
+        return {"stored": 0, "deduplicated": 0, "rejected": 0}
+    stored = deduped = rejected = 0
+    batch_id = str(frame.get("id") or "")
+    for raw in items[:_OBSERVATION_BATCH_MAX]:
+        if not isinstance(raw, dict):
+            rejected += 1
+            continue
+        schema = str(raw.get("schema") or "")
+        value = raw.get("value")
+        if not _OBS_SCHEMA_RE.match(schema) or value is None:
+            rejected += 1
+            continue
+        obs_id = str(raw.get("observation_id") or "")
+        external_id = f"obs:{obs_id}" if obs_id else None
+        if external_id:
+            existing = db.query(ContextEvidence.id).filter(
+                ContextEvidence.user_id == user_id,
+                ContextEvidence.external_id == external_id).first()
+            if existing is not None:
+                deduped += 1
+                continue
+        try:
+            ts = float(raw.get("timestamp") or time())
+        except (TypeError, ValueError):
+            ts = time()
+        conf = raw.get("confidence")
+        try:
+            conf = float(conf) if conf is not None else None
+        except (TypeError, ValueError):
+            conf = None
+        row = ContextEvidence(
+            user_id=user_id,
+            external_id=external_id,
+            evidence_key=schema[:255],
+            value=json.dumps({
+                "value": value,
+                "units": raw.get("units"),
+                "sequence": raw.get("sequence"),
+                "subject": raw.get("subject"),
+                "batch_id": raw.get("batch_id") or batch_id or None,
+            }),
+            timestamp=ts,
+            source_id=str(raw.get("source_id") or "")[:255] or None,
+            device_id=device_uuid,
+            observation_id=obs_id or None,
+            confidence=conf,
+            execution_class="edge",
+            provenance=json.dumps(raw.get("provenance") or {}))
+        db.add(row)
+        try:
+            db.flush()
+            stored += 1
+        except IntegrityError:
+            # Concurrent re-delivery of the same observation_id.
+            db.rollback()
+            deduped += 1
+    db.commit()
+    if stored or deduped or rejected:
+        logger.debug("[node-ws] observations from %s: %d stored, %d dedup, "
+                     "%d rejected", device_uuid, stored, deduped, rejected)
+    return {"stored": stored, "deduplicated": deduped,
+            "rejected": rejected}
+
+
+def _ingest_observation_frame(user_id: int, device_uuid: str,
+                              frame: Dict[str, Any]) -> None:
+    """Session wrapper for the WS loop — never lets ingest break the
+    node channel."""
+    try:
+        with get_db_session() as db:
+            ingest_observation_batch(db, user_id, device_uuid, frame)
+    except Exception:
+        logger.exception("[node-ws] observation ingest failed for %s",
+                         device_uuid)
 
 
 def _apply_prediction_context(user_id: int, device_uuid: str,
@@ -440,6 +540,9 @@ async def node_ws(
                         _write_event, user_id, device_uuid,
                         "room_changed", doc, frame.get("ts"),
                         frame.get("id"))
+            elif ftype == "observation_batch":
+                await asyncio.to_thread(
+                    _ingest_observation_frame, user_id, device_uuid, frame)
             elif ftype in ("event", "metadata"):
                 kind = frame.get("kind") or (
                     "metadata" if ftype == "metadata" else "event")
