@@ -108,17 +108,16 @@ async def list_entities(
                          q.order_by(ContextEntity.entity_key).all()]}
 
 
-@router.post("/entities", status_code=201)
-async def upsert_entity(
-    body: EntityIn,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
+def apply_entity(db: Session, user_id: int,
+                 body: EntityIn) -> ContextEntity:
+    """Upsert one entity row — shared by the REST endpoint and the
+    context-form (LLM) submission path so both enforce identical
+    semantics."""
     entity = db.query(ContextEntity).filter(
-        ContextEntity.user_id == current_user.userId,
+        ContextEntity.user_id == user_id,
         ContextEntity.entity_key == body.id).first()
     if entity is None:
-        entity = ContextEntity(user_id=current_user.userId,
+        entity = ContextEntity(user_id=user_id,
                                entity_key=body.id, kind=body.kind)
         db.add(entity)
     entity.retired_at = None  # resurrect if previously retired
@@ -126,7 +125,16 @@ async def upsert_entity(
     entity.attributes = json.dumps(body.attributes or {})
     db.commit()
     db.refresh(entity)
-    return entity.to_dict()
+    return entity
+
+
+@router.post("/entities", status_code=201)
+async def upsert_entity(
+    body: EntityIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return apply_entity(db, current_user.userId, body).to_dict()
 
 
 @router.delete("/entities/{entity_key}")
@@ -176,17 +184,15 @@ async def list_relationships(
                               q.order_by(ContextRelationship.id).all()]}
 
 
-@router.post("/relationships", status_code=201)
-async def create_relationship(
-    body: RelationshipIn,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
+def apply_relationship(db: Session, user_id: int,
+                       body: RelationshipIn) -> ContextRelationship:
+    """Create one relationship row — shared validation for REST and
+    context-form submissions."""
     if not body.allow_unresolved:
         missing = [
             key for key in (body.subject, body.object)
             if db.query(ContextEntity).filter(
-                ContextEntity.user_id == current_user.userId,
+                ContextEntity.user_id == user_id,
                 ContextEntity.entity_key == key,
                 ContextEntity.retired_at.is_(None)).first() is None
         ]
@@ -198,7 +204,7 @@ async def create_relationship(
                         "hint": "create the entities first or set "
                                 "allow_unresolved=true"})
     rel = ContextRelationship(
-        user_id=current_user.userId,
+        user_id=user_id,
         subject=body.subject, predicate=body.predicate, object=body.object,
         valid_from=body.valid_from or time.time(),
         valid_until=body.valid_until,
@@ -207,7 +213,16 @@ async def create_relationship(
     db.add(rel)
     db.commit()
     db.refresh(rel)
-    return rel.to_dict()
+    return rel
+
+
+@router.post("/relationships", status_code=201)
+async def create_relationship(
+    body: RelationshipIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return apply_relationship(db, current_user.userId, body).to_dict()
 
 
 @router.delete("/relationships/{rel_id}")
@@ -241,18 +256,26 @@ async def ingest_evidence(
     items = body.get("items") if isinstance(body, dict) else None
     if items is None:
         items = [body]
+    rows = apply_evidence_items(db, current_user.userId, items)
+    return {"evidence": [r.to_dict() for r in rows]}
+
+
+def apply_evidence_items(db: Session, user_id: int,
+                         items: List[Any]) -> List[ContextEvidence]:
+    """Insert evidence rows with external_id idempotency — shared by
+    the REST endpoint and context-form submissions."""
     out = []
     for raw in items:
         ev = EvidenceIn(**raw)
         if ev.external_id:
             existing = db.query(ContextEvidence).filter(
-                ContextEvidence.user_id == current_user.userId,
+                ContextEvidence.user_id == user_id,
                 ContextEvidence.external_id == ev.external_id).first()
             if existing is not None:
                 out.append(existing)  # idempotent retry — return original
                 continue
         row = ContextEvidence(
-            user_id=current_user.userId,
+            user_id=user_id,
             external_id=ev.external_id or None,
             evidence_key=ev.key,
             value=json.dumps(ev.value),
@@ -271,7 +294,7 @@ async def ingest_evidence(
     db.commit()
     for row in out:
         db.refresh(row)
-    return {"evidence": [r.to_dict() for r in out]}
+    return out
 
 
 @router.get("/evidence")
@@ -334,6 +357,15 @@ async def upsert_state(
     knows changed/unchanged; estimators may supply ``transition``
     (entered|exited|changed) for schema-aware event typing.
     """
+    state = apply_state(db, current_user.userId, body)
+    return state.to_dict()
+
+
+def apply_state(db: Session, user_id: int,
+                body: StateIn) -> ContextState:
+    """State upsert + transition event + automation evaluation — the
+    same path the REST endpoint uses, callable by the context-form
+    submission pipeline."""
     now = time.time()
     entity_id = body.entity_id or ""
     if body.evidence_ids:
@@ -344,7 +376,7 @@ async def upsert_state(
                 status_code=422,
                 detail="evidence_ids must reference evidence row ids")
         found = {row.id for row in db.query(ContextEvidence.id).filter(
-            ContextEvidence.user_id == current_user.userId,
+            ContextEvidence.user_id == user_id,
             ContextEvidence.id.in_(wanted)).all()}
         missing = sorted(wanted - found)
         if missing:
@@ -353,14 +385,14 @@ async def upsert_state(
                 detail={"error": "unknown evidence_ids",
                         "missing": [str(m) for m in missing]})
     state = db.query(ContextState).filter(
-        ContextState.user_id == current_user.userId,
+        ContextState.user_id == user_id,
         ContextState.state_key == body.key,
         ContextState.entity_id == entity_id).first()
     previous = None
     event_type = ""
     if state is None:
         state = ContextState(
-            user_id=current_user.userId, state_key=body.key,
+            user_id=user_id, state_key=body.key,
             entity_id=entity_id, since=body.since if body.since is not None else now)
         db.add(state)
         event_type = body.transition if body.transition in _TRANSITION_TYPES else "entered"
@@ -382,7 +414,7 @@ async def upsert_state(
     event = None
     if event_type:
         event = ContextEvent(
-            user_id=current_user.userId, event_key=body.key,
+            user_id=user_id, event_key=body.key,
             event_type=event_type, entity_id=entity_id or None,
             state_id=str(state.id), value=json.dumps(body.value),
             previous_value=json.dumps(previous),
@@ -399,13 +431,13 @@ async def upsert_state(
     if event is not None:
         try:
             from server.automation import evaluate_user_rules
-            evaluate_user_rules(db, current_user.userId, trigger={
+            evaluate_user_rules(db, user_id, trigger={
                 "state_id": state.id, "event_id": event.id,
                 "state": state.to_dict()})
         except Exception:
             logger.exception("automation evaluation failed for state %s",
                              state.id)
-    return state.to_dict()
+    return state
 
 
 @router.get("/events")
