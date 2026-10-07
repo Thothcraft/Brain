@@ -62,6 +62,9 @@ except ImportError:
             "connect_timeout": 10,  # Reduced from 30 for faster failure detection
             "application_name": "thoth_pro",
             "sslmode": "require",
+            # Supabase transaction pooler breaks psycopg3 prepared
+            # statements (DuplicatePreparedStatement _pg3_N) — disable.
+            "prepare_threshold": None,
             "keepalives": 1,
             "keepalives_idle": 15,  # Reduced from 30 to send keepalives more frequently
             "keepalives_interval": 5,  # Reduced from 10 for more frequent checks

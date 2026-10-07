@@ -55,6 +55,11 @@ class SupabaseProConfig:
             "connect_timeout": cls.DATABASE_CONNECT_TIMEOUT,
             "application_name": cls.APPLICATION_NAME,
             "sslmode": "require",
+            # psycopg3 prepares statements after 5 executions by default;
+            # behind Supabase's transaction-mode pooler the same backend
+            # session is shared across clients and the generated names
+            # (_pg3_N) collide → DuplicatePreparedStatement 42P05.
+            "prepare_threshold": None,
             "keepalives": 1,
             "keepalives_idle": 30,
             "keepalives_interval": 10,
