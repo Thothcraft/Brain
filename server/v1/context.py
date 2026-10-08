@@ -260,6 +260,44 @@ async def ingest_evidence(
     return {"evidence": [r.to_dict() for r in rows]}
 
 
+# High-frequency evidence schemas are sampled to at most one row per
+# (user, key, device) per interval. Raw per-observation pings (BLE RSSI,
+# radio sightings, motion ticks) flooded context_evidence past 500MB in
+# ~2 days; consumers only ever need the recent shape of this signal.
+EVIDENCE_SAMPLE_INTERVAL_S = {
+    "ble.rssi.v1": 60.0,
+    "radio.ble.v1": 60.0,
+    "radio.wifi.v1": 60.0,
+    "radio.csi.v1": 60.0,
+    "activity.motion.v1": 60.0,
+    "ble.discovery.v1": 60.0,
+    "ble.presence.v1": 60.0,
+    "ble.proximity.v1": 60.0,
+    "location.geo.v1": 60.0,
+    "net.link.v1": 60.0,
+    "observation.dropped.v1": 60.0,
+    # Estimator state snapshots are written every few seconds; one per
+    # minute retains the trajectory without filling the table.
+    "context.state.v1": 60.0,
+}
+_evidence_last_write: Dict[tuple, float] = {}
+
+
+def evidence_sample_ok(user_id: int, key: str, device_id: str,
+                       timestamp: float) -> bool:
+    """True unless this (user, key, device) wrote a sampled schema within
+    its min interval. Process-local — sampling races are harmless."""
+    interval = EVIDENCE_SAMPLE_INTERVAL_S.get(key)
+    if interval is None:
+        return True
+    k = (user_id, key, device_id)
+    last = _evidence_last_write.get(k)
+    if last is not None and timestamp - last < interval:
+        return False
+    _evidence_last_write[k] = timestamp
+    return True
+
+
 def apply_evidence_items(db: Session, user_id: int,
                          items: List[Any]) -> List[ContextEvidence]:
     """Insert evidence rows with external_id idempotency — shared by
@@ -267,6 +305,9 @@ def apply_evidence_items(db: Session, user_id: int,
     out = []
     for raw in items:
         ev = EvidenceIn(**raw)
+        ts = ev.timestamp or time.time()
+        if not evidence_sample_ok(user_id, ev.key, ev.device_id or "", ts):
+            continue
         if ev.external_id:
             existing = db.query(ContextEvidence).filter(
                 ContextEvidence.user_id == user_id,
@@ -279,7 +320,7 @@ def apply_evidence_items(db: Session, user_id: int,
             external_id=ev.external_id or None,
             evidence_key=ev.key,
             value=json.dumps(ev.value),
-            timestamp=ev.timestamp or time.time(),
+            timestamp=ts,
             source_id=ev.source_id or None,
             device_id=ev.device_id or None,
             prediction_id=ev.prediction_id or None,
