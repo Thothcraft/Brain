@@ -12,6 +12,15 @@ from server.endpoints.file_endpoints import router as files_router
 from server.endpoints.labs_endpoints import router as labs_router
 
 
+@pytest.fixture(autouse=True)
+def _reset_evidence_sampler():
+    """The evidence sampler is process-global — isolate tests."""
+    from server.v1 import context as _ctx
+    _ctx._evidence_last_write.clear()
+    yield
+    _ctx._evidence_last_write.clear()
+
+
 @pytest.fixture
 def api():
     engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)

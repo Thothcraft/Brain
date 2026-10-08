@@ -261,7 +261,8 @@ def ingest_observation_batch(db: Session, user_id: int,
         # sampled to one row/min per device — ungated they filled
         # context_evidence with 750K rows / 515MB in two days.
         from server.v1.context import evidence_sample_ok
-        if not evidence_sample_ok(user_id, schema, device_uuid, ts):
+        if not evidence_sample_ok(user_id, schema, device_uuid, ts,
+                                  str(raw.get("subject") or "")):
             deduped += 1
             continue
         conf = raw.get("confidence")

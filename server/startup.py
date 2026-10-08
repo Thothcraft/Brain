@@ -64,6 +64,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start database health monitor: {e}")
         # Continue without health monitor - don't crash the app
+
+    builder_task = None
+    try:
+        from server.db import SessionLocal
+        from server.v1.context_builder import context_builder_loop
+        builder_task = asyncio.create_task(context_builder_loop(SessionLocal))
+    except Exception as e:
+        logger.error(f"Failed to start context builder: {e}")
     
     logger.info("Application startup complete")
     
@@ -71,6 +79,9 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("Shutting down application...")
+
+    if builder_task is not None:
+        builder_task.cancel()
     
     # Stop database health monitoring
     try:

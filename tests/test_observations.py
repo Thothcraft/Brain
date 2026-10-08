@@ -35,7 +35,8 @@ def _item(**kw):
 
 def test_batch_stores_evidence_rows(session):
     frame = {"type": "observation_batch", "id": "b1",
-             "items": [_item(), _item(observation_id="obs-2")]}
+             "items": [_item(), _item(observation_id="obs-2",
+                                       subject="device:watch-2")]}
     out = ingest_observation_batch(session, 1, "dev-uuid", frame)
     assert out == {"stored": 2, "deduplicated": 0, "rejected": 0}
     rows = session.query(ContextEvidence).all()
@@ -51,6 +52,19 @@ def test_batch_stores_evidence_rows(session):
     assert body["subject"] == "device:watch-1"
     assert body["batch_id"] == "b1"
     assert json.loads(r.provenance)["observer"] == "device:node-42"
+
+
+def test_sampled_schema_keeps_one_row_per_subject_per_interval(session):
+    frame = {"items": [
+        _item(observation_id="a"),
+        _item(observation_id="b", timestamp=1759612350.0),
+        _item(observation_id="c", subject="person:gad"),
+        _item(observation_id="d", timestamp=1759612410.0),
+    ]}
+    out = ingest_observation_batch(session, 1, "dev-uuid", frame)
+    assert out == {"stored": 3, "deduplicated": 1, "rejected": 0}
+    ids = {r.observation_id for r in session.query(ContextEvidence).all()}
+    assert ids == {"a", "c", "d"}
 
 
 def test_redelivery_is_idempotent(session):

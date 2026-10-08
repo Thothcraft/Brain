@@ -60,6 +60,10 @@ def api(monkeypatch):
             s.close()
 
     monkeypatch.setattr(node_ws, 'get_db_session', _session_ctx)
+    # Webhook enqueue opens its own session — without this it retries
+    # against the real DATABASE_URL and stalls the WS loop past _poll.
+    from server import event_delivery
+    monkeypatch.setattr(event_delivery, 'get_db_session', _session_ctx)
 
     app = FastAPI()
     app.include_router(v1_router, prefix='/v1')

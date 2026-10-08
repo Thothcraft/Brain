@@ -279,18 +279,23 @@ EVIDENCE_SAMPLE_INTERVAL_S = {
     # Estimator state snapshots are written every few seconds; one per
     # minute retains the trajectory without filling the table.
     "context.state.v1": 60.0,
+    # Node context uplink — nodes default to 60s; this floor protects the
+    # table from misconfigured fast uplinks.
+    "context.descriptors.v1": 10.0,
 }
 _evidence_last_write: Dict[tuple, float] = {}
 
 
 def evidence_sample_ok(user_id: int, key: str, device_id: str,
-                       timestamp: float) -> bool:
-    """True unless this (user, key, device) wrote a sampled schema within
-    its min interval. Process-local — sampling races are harmless."""
+                       timestamp: float, subject: str = "") -> bool:
+    """True unless this (user, key, device, subject) wrote a sampled
+    schema within its min interval. Subject is part of the key so two
+    people/beacons seen by one node in the same minute both survive.
+    Process-local — sampling races are harmless."""
     interval = EVIDENCE_SAMPLE_INTERVAL_S.get(key)
     if interval is None:
         return True
-    k = (user_id, key, device_id)
+    k = (user_id, key, device_id, subject or "")
     last = _evidence_last_write.get(k)
     if last is not None and timestamp - last < interval:
         return False
