@@ -89,6 +89,36 @@ def test_bundle_aggregates_descriptors_not_raw(db):
     assert "map:builder" not in ids
 
 
+def test_bundle_surfaces_textual_scenes_from_node_uplinks(db):
+    session, _ = db
+    for ts, scene in ((T0 - 120, "old"), (T0 - 5, "radar: high motion")):
+        session.add(ContextEvidence(
+            user_id=1, evidence_key="context.descriptors.v1",
+            device_id="dev-1", timestamp=ts,
+            value=json.dumps({"value": {
+                "scene": scene,
+                "predictions": {"builtin:occupancy-radar": {
+                    "label": "occupied", "confidence": 0.91}},
+                "sensors": {
+                    "radar-1": {"type": "radar", "n": 20,
+                                "text": "radar: high motion",
+                                "cues": {"motion": "high"},
+                                "fields": {"snr_db": {"mean": 1.0}}},
+                    "mic-1": {"type": "microphone", "n": 1,
+                              "text": 'speech: "lights off"',
+                              "cues": {"speech": {"text": "lights off"}}}}}})))
+    session.commit()
+    bundle = cb.build_bundle(session, 1, T0)
+    assert len(bundle["scenes"]) == 1
+    sc = bundle["scenes"][0]
+    assert sc["scene"] == "radar: high motion" and sc["age_s"] == 5.0
+    assert sc["sensors"]["mic-1"]["cues"]["speech"]["text"] == "lights off"
+    assert "fields" not in sc["sensors"]["radar-1"]
+    assert sc["predictions"]["builtin:occupancy-radar"]["label"] == "occupied"
+    assert all(a["key"] != "context.descriptors.v1"
+               for a in bundle["descriptors"])
+
+
 def test_build_applies_map_and_seeds_devices(db):
     session, _ = db
     _evidence(session)

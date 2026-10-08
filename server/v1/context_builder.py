@@ -220,6 +220,43 @@ def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
     return seeded
 
 
+DESCRIPTOR_KEY = "context.descriptors.v1"
+MAX_SCENES = 12
+
+
+def _scenes(rows: List[ContextEvidence], now: float) -> List[Dict[str, Any]]:
+    """Latest node uplink per device → textual cues (scene line, per-
+    sensor sentences + cues, predictions). This is the richest, most
+    LLM-friendly evidence: speech transcripts, people/face identities,
+    motion levels — already summarised on the node."""
+    latest: Dict[str, ContextEvidence] = {}
+    for row in rows:
+        dev = row.device_id or ""
+        if dev not in latest or row.timestamp > latest[dev].timestamp:
+            latest[dev] = row
+    out = []
+    for dev, row in sorted(latest.items(), key=lambda kv: -kv[1].timestamp):
+        try:
+            body = json.loads(row.value) if row.value else {}
+        except (TypeError, ValueError):
+            continue
+        v = body.get("value") if isinstance(body.get("value"), dict) else body
+        sensors = {}
+        for sid, d in (v.get("sensors") or {}).items():
+            if not isinstance(d, dict):
+                continue
+            entry = {"type": d.get("type"), "text": d.get("text")}
+            if d.get("cues"):
+                entry["cues"] = _round(d["cues"])
+            sensors[sid] = entry
+        out.append({"device": dev or None,
+                    "age_s": round(now - row.timestamp, 1),
+                    "scene": v.get("scene"),
+                    "predictions": _round(v.get("predictions") or {}),
+                    "sensors": sensors})
+    return out[:MAX_SCENES]
+
+
 def build_bundle(db: Session, user_id: int, now: float,
                  window_s: float = DEFAULT_WINDOW_S) -> Dict[str, Any]:
     rows = db.query(ContextEvidence).filter(
@@ -227,13 +264,16 @@ def build_bundle(db: Session, user_id: int, now: float,
         ContextEvidence.timestamp >= now - window_s,
         ~ContextEvidence.evidence_key.like("context.map.%"),
     ).order_by(ContextEvidence.timestamp.desc()).limit(MAX_EVIDENCE_ROWS).all()
-    aggregates = _aggregate(rows)
+    uplinks = [r for r in rows if r.evidence_key == DESCRIPTOR_KEY]
+    aggregates = _aggregate([r for r in rows
+                             if r.evidence_key != DESCRIPTOR_KEY])
     for a in aggregates:
         a["age_s"] = round(now - a.pop("last_ts"), 1)
     return {
         "now": now,
         "window_s": window_s,
         "evidence_rows": len(rows),
+        "scenes": _scenes(uplinks, now),
         "descriptors": aggregates,
         "map": map_snapshot(db, user_id, now),
     }
@@ -318,8 +358,16 @@ def _map_tool_schema() -> Dict[str, Any]:
 _SYSTEM_PROMPT = """\
 You maintain a STABLE semantic context map of persons, places, devices,
 activities and objects for one household/lab. You never see raw sensor
-data — only compact physical descriptor aggregates per (evidence key,
-device): counts, field mean/min/max, latest value, mean confidence, age.
+data. You get:
+  * `scenes` — the latest uplink per node with TEXTUAL cues already
+    computed on the device: a one-line `scene`, a sentence per sensor
+    (`text`) and structured `cues` (speech transcript, people count,
+    recognized face identity, motion level, strongest radio emitter),
+    plus on-device `predictions`. Prefer these — they are the most
+    direct evidence.
+  * `descriptors` — compact physical aggregates per (evidence key,
+    device): counts, field mean/min/max, latest value, mean confidence,
+    age.
 Typical keys: occupancy/presence probabilities, radar SNR and range,
 CSI amplitude variance, BLE/Wi-Fi RSSI sightings (with decoded beacon
 identities), IMU motion variance, face/person detections, audio level,
