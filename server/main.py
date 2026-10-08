@@ -352,22 +352,33 @@ async def global_logging_middleware(request: Request, call_next):
     if endpoint == "/health":
         return await call_next(request)
 
+    # High-frequency/verbose endpoints — log the size, never the body.
+    # Full JSON bodies here were tripping Railway's 500 logs/sec cap.
+    _NO_BODY_LOG = (
+        "/api/device/heartbeat", "/api/device/location",
+        "/v1/context/evidence", "/v1/context/events",
+    )
+
     # Read body (non-stream) for small payloads ONLY (< 10 kB)
     body_str = ""
     try:
         body_bytes = await request.body()
         if body_bytes and len(body_bytes) <= 10_240:  # 10 KB safety limit
-            try:
-                body_str = body_bytes.decode("utf-8", errors="ignore")
-                # Try to pretty print JSON if possible, but don't fail if malformed
+            if endpoint in _NO_BODY_LOG or "/live-chunks" in endpoint:
+                body_str = f"<{len(body_bytes)} bytes>"
+            else:
                 try:
-                    json_body = json.loads(body_str)
-                    body_str = json.dumps(json_body, indent=2)
-                except (json.JSONDecodeError, TypeError):
-                    # Keep original string if JSON is malformed
-                    pass
-            except Exception as e:
-                body_str = f"<binary data: {str(e)[:200]}>"
+                    body_str = body_bytes.decode("utf-8", errors="ignore")
+                    # Try to compact JSON if possible, but don't fail if malformed
+                    try:
+                        json_body = json.loads(body_str)
+                        body_str = json.dumps(json_body, separators=(",", ":"))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    # One line, bounded — multiline dumps flood the log
+                    body_str = " ".join(body_str.split())[:512]
+                except Exception as e:
+                    body_str = f"<binary data: {str(e)[:200]}>"
         elif body_bytes:
             body_str = f"<{len(body_bytes)} bytes>"
     except Exception as e:

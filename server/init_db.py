@@ -579,10 +579,57 @@ def ensure_spatial_schema():
         return False
 
 
+def ensure_subscription_schema():
+    """Apply the outbound webhook schema (event_subscription +
+    event_delivery). Mirrors run_migrations.py. Without these the
+    scheduler's event_delivery drain job errors every second and the
+    /v1/subscriptions endpoints 500."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS event_subscription (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    url VARCHAR(1024) NOT NULL,
+                    secret VARCHAR(255) NOT NULL DEFAULT '',
+                    kinds TEXT,
+                    device_id VARCHAR(255),
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS ix_event_subscription_user_id
+                    ON event_subscription(user_id);
+                CREATE TABLE IF NOT EXISTS event_delivery (
+                    id SERIAL PRIMARY KEY,
+                    subscription_id INTEGER NOT NULL
+                        REFERENCES event_subscription(id),
+                    event_id VARCHAR(64) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 5,
+                    next_attempt_at DOUBLE PRECISION,
+                    last_status_code INTEGER,
+                    last_error VARCHAR(500),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS ix_event_delivery_subscription_id
+                    ON event_delivery(subscription_id);
+                CREATE INDEX IF NOT EXISTS ix_event_delivery_event_id
+                    ON event_delivery(event_id);
+                CREATE INDEX IF NOT EXISTS ix_event_delivery_status
+                    ON event_delivery(status);
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring subscription schema: {e}")
+        return False
+
+
 def initialize_database():
     """Initialize all required database tables."""
     logger.info("[INIT] Starting database initialization")
-    
+
     try:
         results = {
             "product_core": ensure_product_core_schema(),
@@ -594,6 +641,7 @@ def initialize_database():
             "face_schema": ensure_face_schema(),
             "node_channel": ensure_node_channel_schema(),
             "spatial_schema": ensure_spatial_schema(),
+            "subscription_schema": ensure_subscription_schema(),
         }
         failed = [name for name, succeeded in results.items() if not succeeded]
         if failed:

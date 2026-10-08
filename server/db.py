@@ -82,24 +82,29 @@ logging.basicConfig(level=logging.INFO)
 db_logger = logging.getLogger('database')
 
 def get_db():
-    """Dependency to get database session with retry logic."""
+    """Dependency to get database session with retry logic.
+
+    Retries only cover the SELECT 1 connectivity probe. Once a session
+    is yielded, exceptions thrown back into the generator (e.g. a
+    QueuePool TimeoutError raised inside the route — itself an
+    OperationalError) must propagate, never resume: resuming after
+    throw() is what produced "generator didn't stop after throw()".
+    """
     max_retries = 3
     retry_delay = 1.0  # Increased from 0.5 for better recovery
-    
+
     for attempt in range(max_retries):
         db = SessionLocal()
         try:
             # Test the connection with a simple query
             db.execute(text("SELECT 1"))
-            yield db
-            return
         except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
             db_logger.warning(f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}")
             try:
                 db.close()
             except:
                 pass
-            
+
             # On SSL errors, dispose the engine to force new connections
             if "SSL" in str(e) or "closed unexpectedly" in str(e) or "server closed the connection unexpectedly" in str(e):
                 db_logger.warning("SSL/connection error detected, disposing engine to force new connections")
@@ -107,7 +112,7 @@ def get_db():
                     engine.dispose()
                 except:
                     pass
-            
+
             if attempt < max_retries - 1:
                 # Exponential backoff with jitter
                 import random
@@ -116,37 +121,44 @@ def get_db():
             else:
                 db_logger.error(f"All {max_retries} database connection attempts failed")
                 raise
+            continue
+
+        # Connected — hand the session to the route. Exceptions from the
+        # route propagate through this yield and land in `finally`.
+        try:
+            yield db
         finally:
             try:
                 db.close()
             except:
                 pass
+        return
 
 @contextmanager
 def get_db_session():
-    """Context manager for database sessions with automatic cleanup."""
+    """Context manager for database sessions with automatic cleanup.
+
+    Same yield contract as get_db(): the retry loop wraps only the
+    connection probe — a body exception thrown into the yield
+    (ProgrammingError on a missing table, TimeoutError on an exhausted
+    pool, etc.) rolls back and propagates; it is NOT a retryable
+    connection failure.
+    """
     max_retries = 3
     retry_delay = 1.0  # Increased from 0.5
-    
+
     for attempt in range(max_retries):
         db = SessionLocal()
         try:
             # Test the connection
             db.execute(text("SELECT 1"))
-            yield db
-            db.commit()
-            return
         except (SQLAlchemyError, DisconnectionError, OperationalError) as e:
             db_logger.warning(f"Database session attempt {attempt + 1}/{max_retries} failed: {e}")
-            try:
-                db.rollback()
-            except:
-                pass
             try:
                 db.close()
             except:
                 pass
-            
+
             # On SSL errors, dispose the engine to force new connections
             if "SSL" in str(e) or "closed unexpectedly" in str(e) or "server closed the connection unexpectedly" in str(e):
                 db_logger.warning("SSL/connection error detected, disposing engine")
@@ -154,7 +166,7 @@ def get_db_session():
                     engine.dispose()
                 except:
                     pass
-            
+
             if attempt < max_retries - 1:
                 # Exponential backoff with jitter
                 import random
@@ -163,21 +175,26 @@ def get_db_session():
             else:
                 db_logger.error(f"All {max_retries} database session attempts failed")
                 raise
-        except Exception as e:
+            continue
+
+        # Connected — run the with-body on this session. A body
+        # exception thrown into the yield rolls back and propagates;
+        # it is not a retryable connection failure.
+        try:
+            yield db
+            db.commit()
+        except Exception:
             try:
                 db.rollback()
-            except:
-                pass
-            try:
-                db.close()
-            except:
+            except Exception:
                 pass
             raise
         finally:
             try:
                 db.close()
-            except:
+            except Exception:
                 pass
+        return
 
 def test_database_connection():
     """Test database connectivity and return status."""

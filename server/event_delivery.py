@@ -64,18 +64,13 @@ def enqueue(user_id: int, event: Dict[str, Any]) -> int:
         return n
 
 
-def _deliver_one(db, delivery: EventDelivery) -> None:
+def _load_delivery(db, delivery: EventDelivery) -> Dict[str, Any]:
+    """Resolve the delivery's subscription + event into a detached
+    request spec. Runs inside the fetch session — no HTTP here."""
     sub = db.query(EventSubscription).get(delivery.subscription_id)
     if sub is None or not sub.enabled:
-        delivery.status = "dropped"
-        delivery.completed_at = datetime.utcnow()
-        delivery.last_error = "subscription disabled or removed"
-        return
-    body = json.dumps({
-        "event_id": delivery.event_id,
-        "subscription_id": sub.id,
-        "delivered_at": time.time(),
-    }).encode("utf-8")
+        return {"id": delivery.id, "drop": "subscription disabled or removed"}
+
     # The event payload travels with the delivery — join lazily so a
     # missing event row can't wedge the worker.
     from .db import NodeEvent
@@ -91,39 +86,62 @@ def _deliver_one(db, delivery: EventDelivery) -> None:
     except Exception:
         payload = {"id": delivery.event_id}
     payload["delivery_id"] = delivery.id
-    body = json.dumps(payload).encode("utf-8")[:_MAX_BODY_BYTES]
+    return {
+        "id": delivery.id,
+        "url": sub.url,
+        "secret": sub.secret or "",
+        "event_id": delivery.event_id,
+        "body": json.dumps(payload).encode("utf-8")[:_MAX_BODY_BYTES],
+    }
 
+
+def _post(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Fire one webhook POST. No DB session held — pure network."""
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "thoth-brain-webhook/1",
-        "X-Thoth-Event-Id": delivery.event_id,
+        "X-Thoth-Event-Id": spec["event_id"],
     }
-    if sub.secret:
-        sig = hmac.new(sub.secret.encode(), body, hashlib.sha256).hexdigest()
+    if spec["secret"]:
+        sig = hmac.new(spec["secret"].encode(), spec["body"],
+                       hashlib.sha256).hexdigest()
         headers["X-Thoth-Signature"] = f"sha256={sig}"
 
-    delivery.attempts += 1
     try:
-        req = urllib.request.Request(sub.url, data=body, headers=headers,
-                                     method="POST")
+        req = urllib.request.Request(spec["url"], data=spec["body"],
+                                     headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as res:
-            delivery.last_status_code = res.status
             if 200 <= res.status < 300:
-                delivery.status = "succeeded"
-                delivery.completed_at = datetime.utcnow()
-                delivery.last_error = None
-            else:
-                raise urllib.error.HTTPError(
-                    sub.url, res.status, "non-2xx", res.headers, None)
+                return {"code": res.status, "ok": True}
+            return {"code": res.status, "ok": False,
+                    "error": f"HTTP {res.status}"}
     except urllib.error.HTTPError as exc:
-        delivery.last_status_code = exc.code
-        _fail_or_retry(delivery, f"HTTP {exc.code}")
+        return {"code": exc.code, "ok": False, "error": f"HTTP {exc.code}"}
     except (urllib.error.URLError, OSError) as exc:
-        delivery.last_status_code = None
-        _fail_or_retry(delivery, str(exc)[:480])
+        return {"code": None, "ok": False, "error": str(exc)[:480]}
     except Exception as exc:  # never let one bad sub kill the drain loop
-        delivery.last_status_code = None
-        _fail_or_retry(delivery, f"{type(exc).__name__}: {exc}"[:480])
+        return {"code": None, "ok": False,
+                "error": f"{type(exc).__name__}: {exc}"[:480]}
+
+
+def _apply_result(db, delivery_id: int, result: Dict[str, Any]) -> None:
+    """Persist one delivery outcome in a fresh session."""
+    delivery = db.query(EventDelivery).get(delivery_id)
+    if delivery is None:
+        return
+    delivery.attempts += 1
+    if "drop" in result:
+        delivery.status = "dropped"
+        delivery.completed_at = datetime.utcnow()
+        delivery.last_error = result["drop"]
+        return
+    delivery.last_status_code = result.get("code")
+    if result.get("ok"):
+        delivery.status = "succeeded"
+        delivery.completed_at = datetime.utcnow()
+        delivery.last_error = None
+    else:
+        _fail_or_retry(delivery, result.get("error") or "unknown")
 
 
 def _fail_or_retry(delivery: EventDelivery, error: str) -> None:
@@ -138,19 +156,40 @@ def _fail_or_retry(delivery: EventDelivery, error: str) -> None:
 
 
 def drain(limit: int = 50) -> int:
-    """Attempt all due deliveries; called by the scheduler."""
+    """Attempt all due deliveries; called by the scheduler.
+
+    Three phases so a DB session is never held across outbound HTTP —
+    a hung subscriber endpoint used to pin a pooled connection for the
+    full request timeout and starve the API.
+    """
     now = time.time()
     with get_db_session() as db:
         due = db.query(EventDelivery).filter(
             EventDelivery.status == "queued",
             EventDelivery.next_attempt_at <= now).order_by(
             EventDelivery.id.asc()).limit(limit).all()
-        for delivery in due:
-            try:
-                _deliver_one(db, delivery)
-            except Exception:
-                logger.exception("event delivery %s crashed", delivery.id)
+        specs = [_load_delivery(db, d) for d in due]
+
+    results = []
+    for spec in specs:
+        if "drop" in spec:
+            results.append((spec["id"], spec))
+            continue
+        try:
+            results.append((spec["id"], _post(spec)))
+        except Exception:
+            logger.exception("event delivery %s crashed", spec["id"])
+
+    if not results:
         return len(due)
+    with get_db_session() as db:
+        for delivery_id, result in results:
+            try:
+                _apply_result(db, delivery_id, result)
+            except Exception:
+                logger.exception("persisting delivery %s failed",
+                                 delivery_id)
+    return len(due)
 
 
 __all__ = ["enqueue", "drain"]
