@@ -9,6 +9,7 @@ from .router import router
 from .context import router as context_router
 from .context_infer import router as context_infer_router
 from .context_builder import router as context_builder_router
+from .chat import router as chat_router
 from .automation import router as automation_router
 from .faces import router as faces_router
 from .subscriptions import router as subscriptions_router
@@ -16,6 +17,7 @@ from server.endpoints.node_ws import router as node_ws_router
 
 router.include_router(context_router)
 router.include_router(context_infer_router)
+router.include_router(chat_router)
 router.include_router(context_builder_router)
 router.include_router(automation_router)
 router.include_router(faces_router)
