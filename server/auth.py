@@ -460,7 +460,8 @@ def get_current_user(
 # Operation scopes advertised by the SDK. An automation key carries a subset
 # and may only perform the matching operations.
 AUTOMATION_SCOPES = {"sensor:stream", "model:deploy", "capture",
-                     "device:read", "predictions:read", "context:write"}
+                     "device:read", "device:control", "predictions:read",
+                     "context:write"}
 
 
 def hash_automation_key(raw_key: str) -> str:

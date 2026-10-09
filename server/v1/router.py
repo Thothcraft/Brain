@@ -104,6 +104,63 @@ async def get_device_sensors(
                         sensors=sensors_from_hardware(device))
 
 
+def _hw_actuators(device: Device) -> List[Dict[str, Any]]:
+    try:
+        hw = json.loads(device.hardware_info or "{}")
+    except (TypeError, ValueError):
+        return []
+    acts = hw.get("actuators") if isinstance(hw, dict) else None
+    return list(acts) if isinstance(acts, list) else []
+
+
+@router.get("/devices/{device_id}/actuators")
+async def get_device_actuators(
+    device_id: str,
+    current_user: User = Depends(get_scoped_principal("device:read")),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Actuator inventory — live from the node tunnel when online,
+    else the last inventory the node reported in ``hardware_info``."""
+    from server.endpoints.node_ws import manager
+    device = _owned_device(device_id, current_user, db)
+    try:
+        resp = await manager.request(
+            device.device_uuid, "GET", "/api/v1/actuators", None)
+    except Exception:
+        resp = None
+    body = (resp or {}).get("body")
+    if resp and int(resp.get("status") or 200) < 400 \
+            and isinstance(body, dict) and isinstance(body.get("actuators"), list):
+        return {"device_id": device_id, "actuators": body["actuators"],
+                "live": True}
+    return {"device_id": device_id, "actuators": _hw_actuators(device),
+            "live": False}
+
+
+@router.post("/devices/{device_id}/actuators/{actuator_id}/actions")
+async def execute_device_actuator(
+    device_id: str,
+    actuator_id: str,
+    command: Dict[str, Any] = Body(...),
+    current_user: User = Depends(get_scoped_principal("device:control")),
+    db: Session = Depends(get_db),
+) -> Any:
+    """Relay an ActuatorCommand to the node; returns its ActionResult."""
+    from fastapi.responses import JSONResponse
+    from server.endpoints.node_ws import manager
+    device = _owned_device(device_id, current_user, db)
+    try:
+        resp = await manager.request(
+            device.device_uuid, "POST",
+            f"/api/v1/actuators/{actuator_id}/actions", command)
+    except Exception:
+        raise HTTPException(status_code=504, detail="node api_request timed out")
+    if resp is None:
+        raise HTTPException(status_code=503, detail="node offline (no ws tunnel)")
+    return JSONResponse(status_code=int(resp.get("status") or 200),
+                        content=resp.get("body"))
+
+
 # ---------------------------------------------------------------------------
 # Predictions
 # ---------------------------------------------------------------------------
