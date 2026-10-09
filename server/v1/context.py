@@ -52,7 +52,7 @@ def is_confirmed_source(source: Optional[str]) -> bool:
                for p in _CONFIRMED_SOURCES)
 
 
-def _entity_is_confirmed(entity: Optional[ContextEntity]) -> bool:
+def entity_is_confirmed(entity: Optional[ContextEntity]) -> bool:
     if entity is None:
         return False
     try:
@@ -62,7 +62,7 @@ def _entity_is_confirmed(entity: Optional[ContextEntity]) -> bool:
     return isinstance(attrs, dict) and bool(attrs.get("_confirmed"))
 
 
-def _rel_is_confirmed(rel: ContextRelationship) -> bool:
+def rel_is_confirmed(rel: ContextRelationship) -> bool:
     if is_confirmed_source(getattr(rel, "source", "") or ""):
         return True
     try:
@@ -168,7 +168,7 @@ def apply_entity(db: Session, user_id: int,
         entity = ContextEntity(user_id=user_id,
                                entity_key=body.id, kind=body.kind)
         db.add(entity)
-    elif (_entity_is_confirmed(entity)
+    elif (entity_is_confirmed(entity)
           and not (isinstance(body.attributes, dict)
                    and body.attributes.get("_confirmed") is True)):
         # Confirmed entity — only a write that carries the marker back
@@ -268,7 +268,7 @@ def apply_relationship(db: Session, user_id: int,
         ContextRelationship.valid_from <= now,
         (ContextRelationship.valid_until.is_(None)) |
         (ContextRelationship.valid_until > now)).all()
-    confirmed = [r for r in live if _rel_is_confirmed(r)]
+    confirmed = [r for r in live if rel_is_confirmed(r)]
     if confirmed and not incoming_confirmed:
         same = next((r for r in confirmed if r.object == body.object), None)
         if same is not None:

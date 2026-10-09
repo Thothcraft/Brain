@@ -20,6 +20,11 @@ The model proposes; the stabilizer decides. Stability guarantees:
   are seeded deterministically from the device registry, never by the
   LLM, and never decay.
 * **Merges** require both entities to exist with the same kind.
+* **Confirmed-fact precedence** — entities/relationships/states the user
+  confirmed (see ``context.py``) are never mutated, contradicted, ended
+  or retired by a proposal; they appear in the receipt as skipped
+  ``confirmed_fact`` entries. A confirmed write supersedes through the
+  normal context API, not the builder.
 
 Builder memory (pending candidates, last summary) lives on a single
 ``system`` entity ``map:builder`` so it survives restarts and is
@@ -44,7 +49,11 @@ from server.db import (
     ContextEntity, ContextEvidence, ContextRelationship, ContextState,
     Device, User, get_db,
 )
-from .context import StateIn, apply_state
+from server.inference_auth import inference_call
+from .context import (
+    StateIn, apply_state, entity_is_confirmed, is_confirmed_source,
+    rel_is_confirmed,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/context", tags=["v1", "context"])
@@ -178,9 +187,11 @@ def map_snapshot(db: Session, user_id: int,
         entities.append({"id": e.entity_key, "kind": e.kind, "name": e.name,
                          "aliases": attrs.get("aliases", []),
                          "confidence": attrs.get("confidence"),
-                         "last_seen": attrs.get("last_seen")})
+                         "last_seen": attrs.get("last_seen"),
+                         "confirmed": entity_is_confirmed(e)})
     rels = [{"subject": r.subject, "predicate": r.predicate,
-             "object": r.object, "confidence": round(r.confidence or 0, 3)}
+             "object": r.object, "confidence": round(r.confidence or 0, 3),
+             "confirmed": rel_is_confirmed(r)}
             for r in _active_relationships(db, user_id, now)]
     states = []
     for s in _active_states(db, user_id, now):
@@ -190,7 +201,8 @@ def map_snapshot(db: Session, user_id: int,
             value = None
         states.append({"key": s.state_key, "entity_id": s.entity_id or None,
                        "value": value,
-                       "confidence": round(s.confidence or 0, 3)})
+                       "confidence": round(s.confidence or 0, 3),
+                       "confirmed": is_confirmed_source(s.estimator or "")})
     return {"entities": entities, "relationships": rels, "states": states}
 
 
@@ -205,6 +217,15 @@ def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
         if ent is None:
             ent = ContextEntity(user_id=user_id, entity_key=key, kind="device")
             db.add(ent)
+        if entity_is_confirmed(ent):
+            # User-curated entity — refresh presence only; never clobber
+            # the confirmed name/attributes.
+            attrs = _entity_attrs(ent)
+            attrs["last_seen"] = now
+            ent.attributes = json.dumps(attrs, default=str)
+            ent.retired_at = None
+            seeded.append(key)
+            continue
         attrs = _entity_attrs(ent)
         aliases = set(attrs.get("aliases", []))
         aliases.update({dev.device_uuid, dev.device_name})
@@ -388,13 +409,21 @@ Update the map by calling update_context_map exactly once:
     age_s) or conflicting evidence → low confidence. Omit what the
     descriptors don't support; absence of evidence is not evidence of
     absence unless the relevant sensor is fresh and reports it.
+  * Map entries marked `confirmed: true` are user-confirmed facts — do
+    not rename, move, contradict, merge or retire them; your proposals
+    for them are dropped automatically.
   * Only propose merges for clear duplicates and retire only entities the
     evidence contradicts.
 """
 
 
-def _llm_update(bundle: Dict[str, Any]) -> Dict[str, Any]:
-    """Forced tool call — returns the parsed proposal."""
+def _llm_update(bundle: Dict[str, Any], *,
+                usage_out: Optional[Dict[str, Any]] = None
+                ) -> Dict[str, Any]:
+    """Forced tool call — returns the parsed proposal.
+
+    ``usage_out``, when supplied, is filled with metering fields for the
+    inference ledger."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -414,6 +443,10 @@ def _llm_update(bundle: Dict[str, Any]) -> Dict[str, Any]:
                      "function": {"name": "update_context_map"}},
         temperature=0.1,
     )
+    if usage_out is not None:
+        usage_out["model_id"] = model
+        usage_out["tokens"] = getattr(
+            getattr(resp, "usage", None), "total_tokens", None)
     for call in resp.choices[0].message.tool_calls or []:
         if call.function.name == "update_context_map":
             try:
@@ -505,6 +538,19 @@ def _upsert_entity(db: Session, user_id: int, raw: Dict[str, Any],
     elif ent.kind == "device" and kind != "device":
         return ent  # registry devices keep their kind
     attrs = _entity_attrs(ent)
+    if entity_is_confirmed(ent):
+        # User-confirmed entity — the proposal may refresh presence and
+        # add aliases (identification aids) but must not rename it or
+        # mutate the confirmed attributes.
+        aliases = set(attrs.get("aliases", [])) | set(
+            raw.get("aliases") or [])
+        aliases.discard(key)
+        attrs["aliases"] = sorted(str(a) for a in aliases if a)
+        attrs["last_seen"] = now
+        ent.retired_at = None
+        ent.attributes = json.dumps(attrs, default=str)
+        db.flush()
+        return ent
     aliases = set(attrs.get("aliases", [])) | set(raw.get("aliases") or [])
     aliases.discard(key)
     extra = raw.get("attributes") or {}
@@ -595,6 +641,15 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
             receipt["skipped"].append({"merge": [src, dst],
                                        "reason": "invalid merge"})
             continue
+        if (entity_is_confirmed(a) or entity_is_confirmed(b)
+                or any(rel_is_confirmed(r)
+                       for r in _active_relationships(db, user_id, now)
+                       if src in (r.subject, r.object))):
+            # Merging retires the source and rewires its relationships —
+            # never touch a user-confirmed entity or a confirmed edge.
+            receipt["skipped"].append({"merge": [src, dst],
+                                       "reason": "confirmed_fact"})
+            continue
         battrs = _entity_attrs(b)
         aliases = set(battrs.get("aliases", [])) | set(
             _entity_attrs(a).get("aliases", [])) | {a.entity_key}
@@ -636,6 +691,12 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
                      and r.object == o), None)
         slot = f"rel|{s}|{p}"
         if same is not None:
+            if rel_is_confirmed(same):
+                # Re-asserting a user-confirmed edge — dedupe without
+                # mutating the confirmed row.
+                mem.clear(slot)
+                receipt["relationships"]["refreshed"].append(same.id)
+                continue
             same.confidence = round(0.7 * (same.confidence or 0) + 0.3 * conf, 3)
             prov = json.loads(same.provenance) if same.provenance else {}
             prov["confirmed_at"] = now
@@ -645,6 +706,12 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
             continue
         rivals = ([r for r in active if r.subject == s and r.predicate == p]
                   if p in EXCLUSIVE_PREDICATES else [])
+        if any(rel_is_confirmed(r) for r in rivals):
+            # A confirmed edge holds this subject+predicate — a builder
+            # proposal cannot displace it, hysteresis or not.
+            receipt["skipped"].append(
+                {"relationship": [s, p, o], "reason": "confirmed_fact"})
+            continue
         if rivals and not mem.confirm(slot, o, conf):
             receipt["relationships"]["pending"].append([s, p, o])
             continue
@@ -675,6 +742,15 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
         value = raw.get("value")
         prev = current.get((key, ent))
         slot = f"state|{key}|{ent}"
+        if (prev is not None
+                and is_confirmed_source(prev.estimator or "")):
+            # Live confirmed state — builder proposals can't touch it
+            # (same rule apply_state enforces for the form path; skip
+            # before the hysteresis branch would extend its validity).
+            receipt["skipped"].append(
+                {"state": key, "entity_id": ent or None,
+                 "reason": "confirmed_fact"})
+            continue
         if prev is not None:
             try:
                 prev_value = json.loads(prev.value) if prev.value else None
@@ -687,20 +763,33 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
                 continue
             if prev_value == value:
                 mem.clear(slot)
-        st = apply_state(db, user_id, StateIn(
-            key=key, value=value, entity_id=ent, confidence=conf,
-            valid_until=now + STATE_TTL_S, estimator=ESTIMATOR))
+        try:
+            st = apply_state(db, user_id, StateIn(
+                key=key, value=value, entity_id=ent, confidence=conf,
+                valid_until=now + STATE_TTL_S, estimator=ESTIMATOR))
+        except HTTPException as exc:
+            # e.g. a confirmed state written between snapshot and apply —
+            # record the block instead of aborting the whole build.
+            receipt["skipped"].append(
+                {"state": key, "entity_id": ent or None,
+                 "reason": "confirmed_fact" if exc.status_code == 409
+                 else f"http_{exc.status_code}"})
+            continue
         if ent:
             seen_entities.append(ent)
         receipt["states"]["applied"].append(st.to_dict())
 
-    # 5. explicit retirements — never registry devices
+    # 5. explicit retirements — never registry devices or confirmed facts
     for raw in update.get("retire") or []:
         key = _resolve(idx, raw.get("id"))
         ent = live.get(key)
-        if ent is None or ent.kind == "device" or key in seen_entities:
+        if (ent is None or ent.kind == "device" or key in seen_entities
+                or entity_is_confirmed(ent)):
             receipt["skipped"].append({"retire": key,
-                                       "reason": "protected or seen"})
+                                       "reason": "protected or seen"
+                                       if not (ent is not None
+                                               and entity_is_confirmed(ent))
+                                       else "confirmed_fact"})
             continue
         ent.retired_at = now
         live.pop(key, None)
@@ -719,13 +808,15 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
 def decay(db: Session, user_id: int, now: float) -> Dict[str, List[Any]]:
     ended, retired = [], []
     for rel in _active_relationships(db, user_id, now):
-        if rel.source != SOURCE:
+        if rel.source != SOURCE or rel_is_confirmed(rel):
             continue
         prov = json.loads(rel.provenance) if rel.provenance else {}
         if now - float(prov.get("confirmed_at") or rel.valid_from) > REL_TTL_S:
             rel.valid_until = now
             ended.append(rel.id)
     for ent in _live_entities(db, user_id):
+        if entity_is_confirmed(ent):
+            continue
         ttl = ENTITY_TTL_S.get(ent.kind)
         if ttl is None:
             continue
@@ -750,7 +841,14 @@ def run_build(db: Session, user_id: int, *, now: Optional[float] = None,
     now = now or time.time()
     seed_devices(db, user_id, now)
     bundle = build_bundle(db, user_id, now, window_s)
-    update = (llm or _llm_update)(bundle)
+    if llm is None:
+        # Hosted call — authorized + metered like every inference path
+        # (an injected ``llm`` is local and bypasses metering).
+        with inference_call(db, user_id,
+                            kind="context_build") as meter:
+            update = _llm_update(bundle, usage_out=meter)
+    else:
+        update = llm(bundle)
     result: Dict[str, Any] = {"generated_at": now, "dry_run": dry_run,
                               "evidence_rows": bundle["evidence_rows"],
                               "descriptor_groups": len(bundle["descriptors"]),

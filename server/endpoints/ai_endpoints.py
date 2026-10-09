@@ -10,6 +10,7 @@ from pydantic import BaseModel, validator
 
 from server.db import get_db, User, File, Query as DBQuery
 from server.auth import get_current_user
+from server.inference_auth import inference_call
 from server.utils.logging_utils import log_request_start, log_response, log_error, log_ai_call, log_ai_response
 from aiagent.handler.query import query_openai
 from aiagent.memory.memory_manager import LongTermMemoryManager, ShortTermMemoryManager
@@ -139,21 +140,27 @@ async def process_ai_query(
             short_term_memory = ShortTermMemoryManager()
             short_term_memory._memory_content = st_data
             
-            ai_response = query_openai(
-                query=query_data.query,
-                long_term_memory=long_term_memory,
-                short_term_memory=short_term_memory,
-                max_tokens=2000,
-                temperature=0.7,
-                aux_data={
-                    "current_user_id": current_user.userId,
-                    "chat_id": chat_id,
-                    "context": query_data.context
-                }
-            )
-            
+            # Hosted inference — authorize + meter through the common
+            # gate; quota/402 errors propagate to the caller rather
+            # than degrading to the generic failure message.
+            with inference_call(db, current_user, kind="ai_query"):
+                ai_response = query_openai(
+                    query=query_data.query,
+                    long_term_memory=long_term_memory,
+                    short_term_memory=short_term_memory,
+                    max_tokens=2000,
+                    temperature=0.7,
+                    aux_data={
+                        "current_user_id": current_user.userId,
+                        "chat_id": chat_id,
+                        "context": query_data.context
+                    }
+                )
+
             log_ai_response(ai_response, "/query")
-            
+
+        except HTTPException:
+            raise
         except Exception as e:
             log_error(f"AI processing error: {str(e)}")
             ai_response = "I apologize, but I'm experiencing technical difficulties. Please try again later."

@@ -30,8 +30,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
-from server.auth import get_scoped_principal
+from server.auth import get_current_user, get_scoped_principal
 from server.db import User, get_db
+from server.inference_auth import inference_call, inference_status
 from .context import (
     EntityIn, EvidenceIn, RelationshipIn, StateIn,
     apply_entity, apply_evidence_items, apply_relationship, apply_state,
@@ -237,8 +238,13 @@ plain text. Rules:
 # LLM call + form application
 # ---------------------------------------------------------------------------
 
-def _openai_form(request: InferRequest) -> Dict[str, Any]:
-    """Force the model to fill the form — returns parsed tool args."""
+def _openai_form(request: InferRequest, *,
+                 usage_out: Optional[Dict[str, Any]] = None
+                 ) -> Dict[str, Any]:
+    """Force the model to fill the form — returns parsed tool args.
+
+    ``usage_out``, when supplied, is filled with metering fields
+    (``model_id``, ``tokens``) for the inference ledger."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -267,6 +273,10 @@ def _openai_form(request: InferRequest) -> Dict[str, Any]:
                      "function": {"name": "submit_context_form"}},
         temperature=0.2,
     )
+    if usage_out is not None:
+        usage_out["model_id"] = model
+        usage_out["tokens"] = getattr(
+            getattr(resp, "usage", None), "total_tokens", None)
     msg = resp.choices[0].message
     calls = msg.tool_calls or []
     for call in calls:
@@ -423,8 +433,13 @@ async def infer_context(
     (valid sections still apply) — a malformed form can never corrupt
     the store because every section is validated against the same
     models as the REST endpoints.
+
+    This is a hosted-inference boundary: the call is authorized and
+    metered through ``server.inference_auth`` before the model runs.
     """
-    form = _openai_form(body)
+    with inference_call(db, current_user,
+                        kind="context_infer") as meter:
+        form = _openai_form(body, usage_out=meter)
     result: Dict[str, Any] = {
         "form": form,
         "summary": form.get("summary"),
@@ -434,3 +449,12 @@ async def infer_context(
     if not body.dry_run:
         result["receipt"] = _apply_form(db, current_user.userId, form)
     return result
+
+
+@router.get("/inference/usage")
+async def get_inference_usage(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Hosted-inference quota consumption for the current period."""
+    return inference_status(db, current_user)

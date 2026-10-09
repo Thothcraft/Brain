@@ -254,7 +254,7 @@ def test_registry_device_cannot_be_retired_by_llm(db):
 
 def test_scheduler_builds_only_users_with_fresh_evidence(db, monkeypatch):
     session, factory = db
-    monkeypatch.setattr(cb, "_llm_update", lambda b: _proposal())
+    monkeypatch.setattr(cb, "_llm_update", lambda b, **_: _proposal())
     assert cb.build_due_users(factory, now=T0) == []
     _evidence(session, ts=T0)
     assert cb.build_due_users(factory, now=T0 + 10) == [1]
@@ -275,7 +275,7 @@ def api(db):
 def test_rebuild_and_map_endpoints(api, monkeypatch):
     client, session = api
     _evidence(session)
-    monkeypatch.setattr(cb, "_llm_update", lambda b: _proposal())
+    monkeypatch.setattr(cb, "_llm_update", lambda b, **_: _proposal())
     r = client.post("/v1/context/rebuild", json={"window_s": 3600})
     assert r.status_code == 200, r.text
     assert r.json()["map"]["persons"][0]["id"] == "person:gad"
@@ -286,8 +286,124 @@ def test_rebuild_and_map_endpoints(api, monkeypatch):
 
 def test_rebuild_dry_run_writes_nothing(api, monkeypatch):
     client, session = api
-    monkeypatch.setattr(cb, "_llm_update", lambda b: _proposal())
+    monkeypatch.setattr(cb, "_llm_update", lambda b, **_: _proposal())
     r = client.post("/v1/context/rebuild", json={"dry_run": True})
     assert r.status_code == 200
     assert "receipt" not in r.json()
     assert session.query(ContextRelationship).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Confirmed-fact precedence (FR-SPA-07) — the builder path honors the same
+# markers the REST/form paths enforce in context.py.
+# ---------------------------------------------------------------------------
+
+def _confirm_entity(session, key, kind, name=None):
+    session.add(ContextEntity(
+        user_id=1, entity_key=key, kind=kind, name=name,
+        attributes=json.dumps({"_confirmed": True})))
+    session.commit()
+
+
+def _confirm_rel(session, subject, predicate, obj):
+    rel = ContextRelationship(
+        user_id=1, subject=subject, predicate=predicate, object=obj,
+        valid_from=T0 - 10, confidence=1.0, source="user")
+    session.add(rel)
+    session.commit()
+    return rel
+
+
+def _confirm_state(session, key, entity_id, value):
+    st = ContextState(
+        user_id=1, state_key=key, entity_id=entity_id,
+        value=json.dumps(value), confidence=1.0, estimator="user",
+        since=T0 - 10)
+    session.add(st)
+    session.commit()
+    return st
+
+
+def test_confirmed_entity_is_not_rewritten_by_proposal(db):
+    session, _ = db
+    _confirm_entity(session, "person:gad", "person", name="Gad (confirmed)")
+    r = cb.run_build(session, 1, now=T0, llm=lambda b: _proposal())
+    gad = session.query(ContextEntity).filter_by(
+        entity_key="person:gad").one()
+    assert gad.name == "Gad (confirmed)"          # rename dropped
+    attrs = json.loads(gad.attributes)
+    assert attrs.get("_confirmed") is True         # marker survives
+    assert "person:gad" in r["receipt"]["entities"]
+
+
+def test_confirmed_edge_blocks_rival_even_when_strong(db):
+    session, _ = db
+    rel = _confirm_rel(session, "person:gad", "located_in", "place:office")
+    r = cb.run_build(session, 1, now=T0,
+                     llm=lambda b: _proposal(conf=0.99))
+    session.refresh(rel)
+    assert rel.valid_until is None                # confirmed edge intact
+    assert _active_rel(session, "person:gad", "located_in") == [rel]
+    skips = [s for s in r["receipt"]["skipped"]
+             if s.get("reason") == "confirmed_fact"]
+    assert skips and skips[0]["relationship"] == [
+        "person:gad", "located_in", "place:living-room"]
+
+
+def test_reasserting_confirmed_edge_dedupes_without_mutation(db):
+    session, _ = db
+    rel = _confirm_rel(session, "person:gad", "located_in",
+                       "place:living-room")
+    r = cb.run_build(session, 1, now=T0, llm=lambda b: _proposal())
+    session.refresh(rel)
+    assert rel.id in r["receipt"]["relationships"]["refreshed"]
+    assert rel.confidence == 1.0                  # no builder EWMA
+    prov = json.loads(rel.provenance) if rel.provenance else {}
+    assert "confirmed_at" not in prov             # no builder stamp
+
+
+def test_confirmed_state_blocks_builder_proposal(db):
+    session, _ = db
+    st = _confirm_state(session, "occupancy.v1", "place:living-room",
+                        {"occupied": True})
+    r = cb.run_build(session, 1, now=T0,
+                     llm=lambda b: _proposal(occupied=False, conf=0.99))
+    session.refresh(st)
+    assert json.loads(st.value) == {"occupied": True}
+    assert st.estimator == "user"
+    assert st.valid_until is None                 # not extended by hysteresis
+    assert {"state": "occupancy.v1", "entity_id": "place:living-room",
+            "reason": "confirmed_fact"} in r["receipt"]["skipped"]
+
+
+def test_confirmed_entity_survives_retire_merge_and_decay(db):
+    session, _ = db
+    _confirm_entity(session, "person:gad", "person")
+    _confirm_rel(session, "person:gad", "located_in", "place:office")
+    # retire + merge proposals are skipped for confirmed entities/edges
+    r = cb.run_build(session, 1, now=T0, llm=lambda b: {
+        "summary": "x",
+        "retire": [{"id": "person:gad"}],
+        "merges": [{"source": "person:gad", "target": "person:x"}],
+        "entities": [{"id": "person:x", "kind": "person",
+                      "confidence": 0.9}]})
+    gad = session.query(ContextEntity).filter_by(
+        entity_key="person:gad").one()
+    assert gad.retired_at is None
+    reasons = {s.get("reason") for s in r["receipt"]["skipped"]}
+    assert "confirmed_fact" in reasons
+    # decay never ends confirmed edges nor retires confirmed entities
+    later = T0 + 8 * 86400
+    cb.run_build(session, 1, now=later, llm=lambda b: {"summary": "quiet"})
+    session.refresh(gad)
+    assert gad.retired_at is None
+    assert _active_rel(session, "person:gad", "located_in") != []
+
+
+def test_confirmed_device_entity_seed_preserves_user_name(db):
+    session, _ = db
+    _confirm_entity(session, "device:dev-1", "device", name="front-door")
+    cb.run_build(session, 1, now=T0, llm=lambda b: {"summary": "x"})
+    dev = session.query(ContextEntity).filter_by(
+        entity_key="device:dev-1").one()
+    assert dev.name == "front-door"               # seed can't clobber it

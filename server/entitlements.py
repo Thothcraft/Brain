@@ -7,10 +7,18 @@ All feature gating must go through this module — never scatter
 Plans
 -----
 free     : functionally capable; 1 device, no raw-data download,
-           rolling retention of the most recent 400 minutes.
-home     : 5 devices, 10 GB cloud storage, data download/export.
+           rolling retention of the most recent 400 minutes,
+           200 hosted-inference calls/month.
+home     : 5 devices, 10 GB cloud storage, data download/export,
+           5,000 hosted-inference calls/month.
 research : 10 devices, 100 GB cloud storage, datasets, Labs,
-           notebook submission/grading, full SDK use.
+           notebook submission/grading, full SDK use,
+           20,000 hosted-inference calls/month.
+
+``inference_quota`` = hosted model calls per UTC calendar month (None
+= unlimited), enforced by ``server.inference_auth``; the provisional
+values here are placeholders for the paid-inference phase and can be
+overridden deployment-wide via ``INFERENCE_MONTHLY_QUOTA``.
 """
 
 import logging
@@ -40,6 +48,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "notebook_submission": False,
         "custom_models": False,         # private model deployment
         "sdk": "read_control",          # read data + control devices
+        "inference_quota": 200,          # hosted model calls / month
     },
     "home": {
         "device_limit": 5,
@@ -52,6 +61,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "notebook_submission": False,
         "custom_models": False,
         "sdk": "full",
+        "inference_quota": 5000,
     },
     "research": {
         "device_limit": 10,
@@ -64,6 +74,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "notebook_submission": True,
         "custom_models": True,
         "sdk": "full",
+        "inference_quota": 20000,
     },
 }
 

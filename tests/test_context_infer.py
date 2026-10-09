@@ -78,7 +78,7 @@ def api():
 
 def test_infer_applies_full_form(api, monkeypatch):
     client, session, _ = api
-    monkeypatch.setattr(infer, "_openai_form", lambda req: dict(FORM))
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: dict(FORM))
     r = client.post("/v1/context/infer", json=REQ)
     assert r.status_code == 200
     body = r.json()
@@ -104,7 +104,7 @@ def test_infer_applies_full_form(api, monkeypatch):
 
 def test_infer_dry_run_writes_nothing(api, monkeypatch):
     client, session, _ = api
-    monkeypatch.setattr(infer, "_openai_form", lambda req: dict(FORM))
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: dict(FORM))
     r = client.post("/v1/context/infer", json={**REQ, "dry_run": True})
     assert r.status_code == 200
     assert "receipt" not in r.json()
@@ -123,7 +123,7 @@ def test_infer_bad_section_does_not_block_valid_ones(api, monkeypatch):
         {"entity_id": "x"},                      # missing key
         {"key": "activity.v1", "confidence": 9},  # confidence > 1
     ]
-    monkeypatch.setattr(infer, "_openai_form", lambda req: bad)
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: bad)
     r = client.post("/v1/context/infer", json=REQ)
     assert r.status_code == 200
     receipt = r.json()["receipt"]
@@ -136,7 +136,7 @@ def test_infer_bad_section_does_not_block_valid_ones(api, monkeypatch):
 
 def test_infer_no_tool_call_is_502(api, monkeypatch):
     client, session, _ = api
-    def boom(req):
+    def boom(req, **_):
         from fastapi import HTTPException
         raise HTTPException(502, "model did not call submit_context_form")
     monkeypatch.setattr(infer, "_openai_form", boom)
@@ -164,7 +164,7 @@ def test_confirmed_state_blocks_llm_form(api, monkeypatch):
     skipped (precedence), not an error."""
     client, session, _ = api
     _confirmed_state(client)
-    monkeypatch.setattr(infer, "_openai_form", lambda req: dict(FORM))
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: dict(FORM))
     r = client.post("/v1/context/infer", json=REQ)
     assert r.status_code == 200
     skipped = r.json()["receipt"]["skipped"]
@@ -226,7 +226,7 @@ def test_confirmed_entity_survives_form(api, monkeypatch):
         "id": "person:gad", "kind": "person",
         "attributes": {"_confirmed": True, "role": "owner"}})
     assert r.status_code == 201
-    monkeypatch.setattr(infer, "_openai_form", lambda req: dict(FORM))
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: dict(FORM))
     r = client.post("/v1/context/infer", json=REQ)
     assert r.status_code == 200
     skipped = r.json()["receipt"]["skipped"]
@@ -256,7 +256,7 @@ def test_confirmed_relationship_blocks_conflicting_edge(api, monkeypatch):
         {"subject": "person:gad", "predicate": "located_in",
          "object": "space:kitchen"}],
         "states": []}
-    monkeypatch.setattr(infer, "_openai_form", lambda req: form)
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: form)
     r = client.post("/v1/context/infer", json=REQ)
     receipt = r.json()["receipt"]
     skipped = receipt["skipped"]
@@ -275,7 +275,7 @@ def test_llm_cannot_self_assert_confirmed(api, monkeypatch):
                         "value": {"occupied": True},
                         "estimator": "user"}],
             "relationships": []}
-    monkeypatch.setattr(infer, "_openai_form", lambda req: form)
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: form)
     r = client.post("/v1/context/infer", json=REQ)
     receipt = r.json()["receipt"]
     assert any("stripped" in str(e["error"])
