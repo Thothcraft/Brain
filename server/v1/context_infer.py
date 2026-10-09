@@ -65,10 +65,39 @@ class InferRequest(BaseModel):
                     "{start_ts, end_ts, device_id, room_id}")
     calibration: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Per-target-class calibration statistics")
+        description="Per-target-class calibration statistics — the "
+                    "reference distributions the window is judged "
+                    "against (per-class feature mean/std/count, RSSI "
+                    "fingerprint anchor means, radar/CSI descriptor "
+                    "ranges)")
     descriptors: Dict[str, Any] = Field(
         default_factory=dict,
         description="Physical descriptors measured over the window")
+    context: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Account/device context around the window — "
+                    "entity inventory with kinds/names/confirmed "
+                    "attributes, device metadata (platform, firmware, "
+                    "capabilities), digital context (app, network, "
+                    "peripherals, traffic summaries). The model may "
+                    "infer device type/state from metadata + traffic "
+                    "but lands only proposals, never confirmed facts.")
+    history: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Prior windows / previously submitted form "
+                    "summaries for temporal context (caller bounds "
+                    "size; ~20 items is a good budget)")
+    coverage: List[str] = Field(
+        default_factory=list,
+        description="Form sections the caller wants emphasized "
+                    "('entities', 'relationships', 'evidence', "
+                    "'states'); empty = all relevant")
+    thinking: str = Field(
+        default="standard",
+        description="Reasoning tier → model route: 'quick' (cheap,"
+                    " fast), 'standard' (default), 'deep' (harder "
+                    "reconciliation; billed the same per call but "
+                    "uses the CONTEXT_INFER_MODEL_DEEP model)")
     entity_hint: Optional[str] = Field(
         default=None,
         description="Canonical entity id the window concerns "
@@ -198,6 +227,53 @@ def _ctx_tool_schema() -> Dict[str, Any]:
                             },
                             "required": ["key"],
                         }},
+                    "uncertainties": {
+                        "type": "array",
+                        "description": "Claims you considered but could "
+                                       "NOT support — curiosity, not "
+                                       "silence. The platform reviews "
+                                       "these instead of guessing.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string",
+                                        "description": "the state/claim "
+                                                       "key left "
+                                                       "unresolved"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["key", "reason"],
+                        }},
+                    "questions": {
+                        "type": "array",
+                        "description": "Specific observations you'd "
+                                       "request next to resolve the "
+                                       "uncertainties (what to "
+                                       "measure, on which device, "
+                                       "for how long).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string"},
+                                "target_key": {"type": "string"},
+                            },
+                            "required": ["question"],
+                        }},
+                    "notes": {
+                        "type": "array",
+                        "description": "Curated memory: durable "
+                                       "observations about entities/"
+                                       "relationships worth keeping "
+                                       "for future windows (never "
+                                       "confirmed facts).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subject": {"type": "string"},
+                                "text": {"type": "string"},
+                            },
+                            "required": ["subject", "text"],
+                        }},
                 },
                 "required": ["summary", "states"],
             },
@@ -208,17 +284,30 @@ def _ctx_tool_schema() -> Dict[str, Any]:
 _SYSTEM_PROMPT = """\
 You are the context-layer estimator for a sensor-fusion platform. For
 each request you receive:
-  * `calibration` — statistics of the target classes learned during
-    calibration (per-class feature means/stds, thresholds, priors,
-    support counts).
+  * `calibration` — the REFERENCE distributions: statistics of the
+    target classes learned during calibration. Entries carry per-class
+    feature mean/std/count; RSSI fingerprints are {anchor: {mean,std,
+    count}}; radar descriptors carry per-range-bin/angle statistics.
+    Judge a window by its distance to these references — a descriptor
+    several std from every class centroid is a low-confidence or
+    unknown classification, never a forced label.
   * `descriptors` — physical descriptors of ONE time window from the
     sensors (CSI/radar/BLE/IMU summaries, RSSI values, variances,
     packet counts, spectral features).
+  * `context` — the account's assets around the window: entity
+    inventory (names/kinds/confirmed attributes), device metadata
+    (platform, capabilities, firmware), digital context (app/network/
+    peripheral state, traffic summaries). Device type/state may be
+    INFERRED from metadata + traffic — land it as a proposal entity
+    attribute, never confirmed.
+  * `history` — recent prior windows/forms, for temporal consistency
+    (a label that contradicts the last stable window needs stronger
+    evidence).
+  * `coverage` — if non-empty, fill only the named form sections.
   * `window` — the window's bounds and provenance.
 
-Classify the window against the target classes using the calibration
-stats, then respond ONLY by calling submit_context_form. Do not emit
-plain text. Rules:
+Classify the window against the calibration references, then respond
+ONLY by calling submit_context_form. Do not emit plain text. Rules:
   * states[] must contain one entry per target class key the platform
     uses (e.g. occupancy.v1, activity.v1, location.v1); value is the
     predicted label/object, confidence is calibrated by distance to the
@@ -227,9 +316,11 @@ plain text. Rules:
     probabilities, the descriptors, the calibration reference).
   * entities[] and relationships[] describe WHO/WHERE/WHAT the window
     implies — create them when confident, omit when unsupported.
-  * Confidence must reflect the descriptor-vs-calibration distance:
-    a window far from every class centroid yields low confidence, not
-    a forced label.
+  * uncertainties[] reports claims you considered but rejected — what
+    was unresolved and why; questions[] asks for the specific
+    observations that would resolve them; notes[] records durable
+    entity/relationship observations for future windows. Use these
+    channels — silent ambiguity is worse than an explicit question.
   * All numbers are floats (epoch seconds); no prose inside values.
 """
 
@@ -238,13 +329,37 @@ plain text. Rules:
 # LLM call + form application
 # ---------------------------------------------------------------------------
 
+_THINKING_TIERS = ("quick", "standard", "deep")
+
+
+def _model_for_tier(tier: str) -> str:
+    """Resolve a thinking tier to a concrete model id.
+
+    ``standard`` keeps the historical env knobs
+    (``CONTEXT_INFER_MODEL`` → ``MODEL_NAME`` → default); ``quick``
+    and ``deep`` have their own overrides so operators can price the
+    meter. Unknown tiers are a client error."""
+    tier = (tier or "standard").lower()
+    if tier == "standard":
+        return (os.getenv("CONTEXT_INFER_MODEL")
+                or os.getenv("MODEL_NAME") or _DEFAULT_MODEL)
+    if tier == "quick":
+        return (os.getenv("CONTEXT_INFER_MODEL_QUICK")
+                or _DEFAULT_MODEL)
+    if tier == "deep":
+        return (os.getenv("CONTEXT_INFER_MODEL_DEEP") or "gpt-4o")
+    raise HTTPException(
+        422, f"unknown thinking tier {tier!r} "
+             f"— one of {list(_THINKING_TIERS)}")
+
+
 def _openai_form(request: InferRequest, *,
                  usage_out: Optional[Dict[str, Any]] = None
                  ) -> Dict[str, Any]:
     """Force the model to fill the form — returns parsed tool args.
 
     ``usage_out``, when supplied, is filled with metering fields
-    (``model_id``, ``tokens``) for the inference ledger."""
+    (``model_id``, ``tokens``, ``tier``) for the inference ledger."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -252,8 +367,7 @@ def _openai_form(request: InferRequest, *,
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(503, "OPENAI_API_KEY not configured")
-    model = (os.getenv("CONTEXT_INFER_MODEL")
-             or os.getenv("MODEL_NAME") or _DEFAULT_MODEL)
+    model = _model_for_tier(request.thinking)
 
     client = OpenAI(api_key=api_key)
     user_msg = json.dumps({
@@ -261,6 +375,9 @@ def _openai_form(request: InferRequest, *,
         "entity_hint": request.entity_hint,
         "calibration": request.calibration,
         "descriptors": request.descriptors,
+        "context": request.context,
+        "history": request.history[:20],
+        "coverage": request.coverage,
     }, default=str)
     resp = client.chat.completions.create(
         model=model,
@@ -275,6 +392,7 @@ def _openai_form(request: InferRequest, *,
     )
     if usage_out is not None:
         usage_out["model_id"] = model
+        usage_out["tier"] = request.thinking
         usage_out["tokens"] = getattr(
             getattr(resp, "usage", None), "total_tokens", None)
     msg = resp.choices[0].message
@@ -408,6 +526,33 @@ def _apply_form(db: Session, user_id: int,
             errors.append({"section": "states", "index": i,
                            "error": str(exc)[:300]})
 
+    # 5. curation — uncertainties / questions / notes land as evidence
+    # rows so the memory is inspectable and future windows can pick
+    # them up; none of them assert truth.
+    curation_keys = {"uncertainties": "context.uncertainty.v1",
+                     "questions": "context.question.v1",
+                     "notes": "context.note.v1"}
+    for section, key in curation_keys.items():
+        items = form.get(section) or []
+        if not items:
+            continue
+        evs = []
+        for raw in items:
+            raw = dict(raw) if isinstance(raw, dict) else {"text": str(raw)}
+            evs.append({"key": key, "value": raw,
+                        "timestamp": time.time(),
+                        "source_id": "context_infer",
+                        "provenance": {"kind": section[:-1],
+                                       "from": "openai-context-form"}})
+        try:
+            rows = apply_evidence_items(db, user_id, evs)
+            receipt["curation"] = receipt.get("curation", [])
+            receipt["curation"] += [{"kind": section, "id": r.id}
+                                    for r in rows]
+        except HTTPException as exc:
+            errors.append({"section": section, "index": 0,
+                           "error": exc.detail})
+
     if skipped:
         receipt["skipped"] = skipped
     if errors:
@@ -437,12 +582,18 @@ async def infer_context(
     This is a hosted-inference boundary: the call is authorized and
     metered through ``server.inference_auth`` before the model runs.
     """
+    model_id = _model_for_tier(body.thinking)  # 422 on bogus tier
     with inference_call(db, current_user,
-                        kind="context_infer") as meter:
+                        kind=f"context_infer:{body.thinking}",
+                        model_id=model_id) as meter:
         form = _openai_form(body, usage_out=meter)
     result: Dict[str, Any] = {
         "form": form,
         "summary": form.get("summary"),
+        "thinking": body.thinking,
+        "model_id": model_id,
+        "questions": form.get("questions") or [],
+        "uncertainties": form.get("uncertainties") or [],
         "dry_run": body.dry_run,
         "generated_at": time.time(),
     }

@@ -283,3 +283,80 @@ def test_llm_cannot_self_assert_confirmed(api, monkeypatch):
     st = session.query(ContextState).filter_by(
         state_key="occupancy.v1").one()
     assert st.estimator == "openai-context-form/1"
+
+
+# -- thinking meter + richer context + curation ------------------------
+
+def test_thinking_tier_routes_to_model(api, monkeypatch):
+    """thinking='deep' resolves the deep-tier model; the meter row is
+    keyed per-tier so quota/cost stays attributable."""
+    client, session, _ = api
+    seen = {}
+    def fake(req, **_):
+        seen["thinking"] = req.thinking
+        seen["model"] = infer._model_for_tier(req.thinking)
+        return {"summary": "s", "states": []}
+    monkeypatch.setattr(infer, "_openai_form", fake)
+    monkeypatch.setenv("CONTEXT_INFER_MODEL_DEEP", "gpt-4o-test")
+    r = client.post("/v1/context/infer", json={**REQ, "thinking": "deep"})
+    assert r.status_code == 200
+    assert seen["thinking"] == "deep"
+    assert seen["model"] == "gpt-4o-test"
+    body = r.json()
+    assert body["thinking"] == "deep"
+    assert body["model_id"] == "gpt-4o-test"
+
+
+def test_unknown_thinking_tier_is_422(api):
+    client, session, _ = api
+    r = client.post("/v1/context/infer",
+                    json={**REQ, "thinking": "galaxy"})
+    assert r.status_code == 422
+
+
+def test_curation_sections_persist_as_evidence(api, monkeypatch):
+    """uncertainties/questions/notes are the model's memory channel —
+    they land as versioned evidence rows, never as facts."""
+    client, session, _ = api
+    form = dict(FORM)
+    form["uncertainties"] = [{"key": "location.v1",
+                              "reason": "anchors disagree"}]
+    form["questions"] = [{"question": "walk with the watch for 2 min",
+                          "target_key": "location.v1"}]
+    form["notes"] = [{"subject": "device:watch-1",
+                      "text": "belongs on person:gad's left wrist"}]
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: form)
+    r = client.post("/v1/context/infer", json=REQ)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["questions"][0]["target_key"] == "location.v1"
+    curation = body["receipt"]["curation"]
+    assert {c["kind"] for c in curation} == {
+        "uncertainties", "questions", "notes"}
+    keys = {e.evidence_key for e in session.query(ContextEvidence)}
+    assert {"context.uncertainty.v1", "context.question.v1",
+            "context.note.v1"} <= keys
+
+
+def test_request_carries_extended_context(api, monkeypatch):
+    """context/history/coverage ride the request into the model
+    payload — richer steering data stays intact end to end."""
+    client, session, _ = api
+    seen = {}
+    def fake(req, **_):
+        seen["context"] = req.context
+        seen["history"] = req.history
+        seen["coverage"] = req.coverage
+        return {"summary": "s", "states": []}
+    monkeypatch.setattr(infer, "_openai_form", fake)
+    rich = {**REQ,
+            "context": {"devices": [{"id": "dev-1", "kind": "pi5",
+                                     "meta": {"model": "BGT60TR13C"}}]},
+            "history": [{"state": "occupancy.v1",
+                         "value": {"occupied": False}, "ts": 999.0}],
+            "coverage": ["states", "uncertainties"]}
+    r = client.post("/v1/context/infer", json=rich)
+    assert r.status_code == 200
+    assert seen["context"]["devices"][0]["kind"] == "pi5"
+    assert seen["history"][0]["ts"] == 999.0
+    assert seen["coverage"] == ["states", "uncertainties"]
