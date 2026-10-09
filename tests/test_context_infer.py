@@ -143,3 +143,143 @@ def test_infer_no_tool_call_is_502(api, monkeypatch):
     r = client.post("/v1/context/infer", json=REQ)
     assert r.status_code == 502
     assert session.query(ContextState).count() == 0
+
+
+# -- confirmed-fact precedence (FR-SPA-07) ---------------------------------
+
+def _confirmed_state(client, key="occupancy.v1",
+                     entity="space:living-room",
+                     value=None, **kw):
+    body = {"key": key, "value": value if value is not None
+            else {"occupied": True},
+            "entity_id": entity, "estimator": "user/portal"}
+    body.update(kw)
+    r = client.post("/v1/context/state", json=body)
+    assert r.status_code == 200
+    return r
+
+
+def test_confirmed_state_blocks_llm_form(api, monkeypatch):
+    """A user-confirmed state survives the LLM form — the form's write is
+    skipped (precedence), not an error."""
+    client, session, _ = api
+    _confirmed_state(client)
+    monkeypatch.setattr(infer, "_openai_form", lambda req: dict(FORM))
+    r = client.post("/v1/context/infer", json=REQ)
+    assert r.status_code == 200
+    skipped = r.json()["receipt"]["skipped"]
+    assert any(s["section"] == "states"
+               and s["reason"] == "confirmed_fact" for s in skipped)
+    st = session.query(ContextState).filter_by(
+        state_key="occupancy.v1").one()
+    assert st.estimator == "user/portal"      # confirmed writer kept
+    assert json.loads(st.value) == {"occupied": True}
+
+
+def test_rest_confirmed_state_409s_inferred_overwrite(api):
+    client, session, _ = api
+    _confirmed_state(client)
+    r = client.post("/v1/context/state", json={
+        "key": "occupancy.v1", "entity_id": "space:living-room",
+        "value": {"occupied": False},
+        "estimator": "openai-context-form/1"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "confirmed_fact"
+    st = session.query(ContextState).filter_by(
+        state_key="occupancy.v1").one()
+    assert json.loads(st.value) == {"occupied": True}
+
+
+def test_confirmed_write_supersedes_confirmed(api):
+    """The user can correct a confirmed fact — only with a confirmed
+    source."""
+    client, session, _ = api
+    _confirmed_state(client)
+    r = client.post("/v1/context/state", json={
+        "key": "occupancy.v1", "entity_id": "space:living-room",
+        "value": {"occupied": False}, "estimator": "confirmed/cli"})
+    assert r.status_code == 200
+    st = session.query(ContextState).filter_by(
+        state_key="occupancy.v1").one()
+    assert json.loads(st.value) == {"occupied": False}
+    assert st.estimator == "confirmed/cli"
+
+
+def test_expired_confirmed_state_allows_inference(api):
+    """Confirmation has a validity window — once valid_until passes,
+    inference may write the key again."""
+    client, session, _ = api
+    _confirmed_state(client, valid_until=1.0)   # long expired
+    r = client.post("/v1/context/state", json={
+        "key": "occupancy.v1", "entity_id": "space:living-room",
+        "value": {"occupied": False},
+        "estimator": "openai-context-form/1"})
+    assert r.status_code == 200
+    st = session.query(ContextState).filter_by(
+        state_key="occupancy.v1").one()
+    assert json.loads(st.value) == {"occupied": False}
+
+
+def test_confirmed_entity_survives_form(api, monkeypatch):
+    client, session, _ = api
+    r = client.post("/v1/context/entities", json={
+        "id": "person:gad", "kind": "person",
+        "attributes": {"_confirmed": True, "role": "owner"}})
+    assert r.status_code == 201
+    monkeypatch.setattr(infer, "_openai_form", lambda req: dict(FORM))
+    r = client.post("/v1/context/infer", json=REQ)
+    assert r.status_code == 200
+    skipped = r.json()["receipt"]["skipped"]
+    assert any(s["section"] == "entities" for s in skipped)
+    ent = session.query(ContextEntity).filter_by(
+        entity_key="person:gad").one()
+    assert json.loads(ent.attributes)["role"] == "owner"
+
+
+def test_confirmed_relationship_blocks_conflicting_edge(api, monkeypatch):
+    client, session, _ = api
+    for eid, kind in (("person:gad", "person"),
+                      ("space:kitchen", "space"),
+                      ("space:bedroom", "space")):
+        assert client.post("/v1/context/entities", json={
+            "id": eid, "kind": kind}).status_code == 201
+    r = client.post("/v1/context/relationships", json={
+        "subject": "person:gad", "predicate": "located_in",
+        "object": "space:kitchen", "source": "user"})
+    assert r.status_code == 201
+    rel_id = r.json()["id"]
+
+    # conflicting inferred edge → skipped; re-assertion → deduped
+    form = {"summary": "s", "relationships": [
+        {"subject": "person:gad", "predicate": "located_in",
+         "object": "space:bedroom"},
+        {"subject": "person:gad", "predicate": "located_in",
+         "object": "space:kitchen"}],
+        "states": []}
+    monkeypatch.setattr(infer, "_openai_form", lambda req: form)
+    r = client.post("/v1/context/infer", json=REQ)
+    receipt = r.json()["receipt"]
+    skipped = receipt["skipped"]
+    assert any(s["section"] == "relationships"
+               and s["reason"] == "confirmed_fact" for s in skipped)
+    assert [str(i) for i in receipt["relationships"]] == [rel_id]
+    assert session.query(ContextRelationship).count() == 1
+
+
+def test_llm_cannot_self_assert_confirmed(api, monkeypatch):
+    """A form that smuggles a confirmed estimator/source gets it
+    stripped — it lands as ordinary inference."""
+    client, session, _ = api
+    form = {"summary": "s",
+            "states": [{"key": "occupancy.v1", "entity_id": "e",
+                        "value": {"occupied": True},
+                        "estimator": "user"}],
+            "relationships": []}
+    monkeypatch.setattr(infer, "_openai_form", lambda req: form)
+    r = client.post("/v1/context/infer", json=REQ)
+    receipt = r.json()["receipt"]
+    assert any("stripped" in str(e["error"])
+               for e in receipt.get("errors", []))
+    st = session.query(ContextState).filter_by(
+        state_key="occupancy.v1").one()
+    assert st.estimator == "openai-context-form/1"

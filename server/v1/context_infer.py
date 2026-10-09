@@ -35,6 +35,7 @@ from server.db import User, get_db
 from .context import (
     EntityIn, EvidenceIn, RelationshipIn, StateIn,
     apply_entity, apply_evidence_items, apply_relationship, apply_state,
+    is_confirmed_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -290,14 +291,37 @@ def _apply_form(db: Session, user_id: int,
                                "evidence": [], "states": [],
                                "events": []}
     errors: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    def _conflict(exc: HTTPException, section: str, index: int) -> bool:
+        """409 confirmed_fact → ``skipped`` (precedence, not malformed)."""
+        if exc.status_code == 409:
+            skipped.append({"section": section, "index": index,
+                            "reason": "confirmed_fact",
+                            "detail": exc.detail})
+            return True
+        return False
 
     # 1. entities ---------------------------------------------------------
     seen_entities = set()
     for i, raw in enumerate(form.get("entities") or []):
+        raw = dict(raw)
+        attrs = raw.get("attributes")
+        if isinstance(attrs, dict) and "_confirmed" in attrs:
+            attrs = dict(attrs)
+            del attrs["_confirmed"]   # reserved — inference can't confirm
+            raw["attributes"] = attrs
+            errors.append({"section": "entities", "index": i,
+                           "error": "reserved attribute '_confirmed' "
+                                    "stripped"})
         try:
             ent = apply_entity(db, user_id, EntityIn(**raw))
             seen_entities.add(ent.entity_key)
             receipt["entities"].append(ent.entity_key)
+        except HTTPException as exc:
+            if not _conflict(exc, "entities", i):
+                errors.append({"section": "entities", "index": i,
+                               "error": exc.detail})
         except (ValidationError, TypeError) as exc:
             errors.append({"section": "entities", "index": i,
                            "error": str(exc)[:300]})
@@ -305,13 +329,26 @@ def _apply_form(db: Session, user_id: int,
     # 2. relationships ----------------------------------------------------
     for i, raw in enumerate(form.get("relationships") or []):
         raw = dict(raw)
+        if is_confirmed_source(str(raw.get("source") or "")):
+            raw["source"] = ""            # reserved prefix — strip
+            errors.append({"section": "relationships", "index": i,
+                           "error": "reserved confirmed source stripped"})
+        prov = raw.get("provenance")
+        if isinstance(prov, dict) and "confirmed" in prov:
+            prov = dict(prov)
+            del prov["confirmed"]
+            raw["provenance"] = prov
+            errors.append({"section": "relationships", "index": i,
+                           "error": "reserved provenance.confirmed "
+                                    "stripped"})
         try:
             rel = apply_relationship(
                 db, user_id, RelationshipIn(**raw))
             receipt["relationships"].append(rel.id)
         except HTTPException as exc:
-            errors.append({"section": "relationships", "index": i,
-                           "error": exc.detail})
+            if not _conflict(exc, "relationships", i):
+                errors.append({"section": "relationships", "index": i,
+                               "error": exc.detail})
         except (ValidationError, TypeError) as exc:
             errors.append({"section": "relationships", "index": i,
                            "error": str(exc)[:300]})
@@ -343,18 +380,26 @@ def _apply_form(db: Session, user_id: int,
         refs = raw.pop("evidence_refs", []) or []
         raw["evidence_ids"] = [str(ref_to_id[r]) for r in refs
                                if r in ref_to_id]
+        if is_confirmed_source(str(raw.get("estimator") or "")):
+            raw["estimator"] = ""         # LLM can't self-assert confirmed
+            errors.append({"section": "states", "index": i,
+                           "error": "reserved confirmed estimator "
+                                    "stripped"})
         if not raw.get("estimator"):
             raw["estimator"] = "openai-context-form/1"
         try:
             st = apply_state(db, user_id, StateIn(**raw))
             receipt["states"].append(st.to_dict())
         except HTTPException as exc:
-            errors.append({"section": "states", "index": i,
-                           "error": exc.detail})
+            if not _conflict(exc, "states", i):
+                errors.append({"section": "states", "index": i,
+                               "error": exc.detail})
         except (ValidationError, TypeError) as exc:
             errors.append({"section": "states", "index": i,
                            "error": str(exc)[:300]})
 
+    if skipped:
+        receipt["skipped"] = skipped
     if errors:
         receipt["errors"] = errors
     return receipt

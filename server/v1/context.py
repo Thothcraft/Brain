@@ -31,6 +31,54 @@ router = APIRouter(prefix="/context", tags=["v1", "context"])
 
 
 # ---------------------------------------------------------------------------
+# Confirmed-fact precedence (FR-SPA-07): user-confirmed facts survive later
+# inference. A fact is "confirmed" when its provenance marks it:
+#   * entity        — attributes["_confirmed"] is true
+#   * relationship  — source or provenance["confirmed"] flags it
+#   * state         — estimator is a reserved confirmed source
+# A non-confirmed write can never overwrite, contradict or resurrect a live
+# confirmed fact; it gets 409 confirmed_fact (or a dedupe no-op). A confirmed
+# write may supersede — that is how the user corrects a confirmed fact.
+# ---------------------------------------------------------------------------
+
+_CONFIRMED_SOURCES = ("user", "confirmed", "manual")
+
+
+def is_confirmed_source(source: Optional[str]) -> bool:
+    """True when ``source``/``estimator`` is a reserved confirmed marker
+    (``user``, ``confirmed``, ``manual`` — bare or ``<prefix>/…``/``:…``)."""
+    s = (source or "").strip().lower()
+    return any(s == p or s.startswith(p + "/") or s.startswith(p + ":")
+               for p in _CONFIRMED_SOURCES)
+
+
+def _entity_is_confirmed(entity: Optional[ContextEntity]) -> bool:
+    if entity is None:
+        return False
+    try:
+        attrs = json.loads(entity.attributes) if entity.attributes else {}
+    except (TypeError, ValueError):
+        return False
+    return isinstance(attrs, dict) and bool(attrs.get("_confirmed"))
+
+
+def _rel_is_confirmed(rel: ContextRelationship) -> bool:
+    if is_confirmed_source(getattr(rel, "source", "") or ""):
+        return True
+    try:
+        prov = json.loads(rel.provenance) if rel.provenance else {}
+    except (TypeError, ValueError):
+        return False
+    return isinstance(prov, dict) and bool(prov.get("confirmed"))
+
+
+def _confirmed_conflict(detail: str, **extra: Any) -> HTTPException:
+    return HTTPException(status_code=409,
+                         detail={"error": "confirmed_fact",
+                                 "detail": detail, **extra})
+
+
+# ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
 
@@ -120,6 +168,13 @@ def apply_entity(db: Session, user_id: int,
         entity = ContextEntity(user_id=user_id,
                                entity_key=body.id, kind=body.kind)
         db.add(entity)
+    elif (_entity_is_confirmed(entity)
+          and not (isinstance(body.attributes, dict)
+                   and body.attributes.get("_confirmed") is True)):
+        # Confirmed entity — only a write that carries the marker back
+        # may mutate it; inference cannot rewrite confirmed attributes.
+        raise _confirmed_conflict(
+            "entity attributes are user-confirmed", entity=body.id)
     entity.retired_at = None  # resurrect if previously retired
     entity.name = body.name or entity.name
     entity.attributes = json.dumps(body.attributes or {})
@@ -203,10 +258,35 @@ def apply_relationship(db: Session, user_id: int,
                         "missing": missing,
                         "hint": "create the entities first or set "
                                 "allow_unresolved=true"})
+    now = time.time()
+    incoming_confirmed = (is_confirmed_source(body.source)
+                          or bool((body.provenance or {}).get("confirmed")))
+    live = db.query(ContextRelationship).filter(
+        ContextRelationship.user_id == user_id,
+        ContextRelationship.subject == body.subject,
+        ContextRelationship.predicate == body.predicate,
+        ContextRelationship.valid_from <= now,
+        (ContextRelationship.valid_until.is_(None)) |
+        (ContextRelationship.valid_until > now)).all()
+    confirmed = [r for r in live if _rel_is_confirmed(r)]
+    if confirmed and not incoming_confirmed:
+        same = next((r for r in confirmed if r.object == body.object), None)
+        if same is not None:
+            return same          # re-assertion of a confirmed edge — dedupe
+        raise _confirmed_conflict(
+            "a confirmed relationship already holds for this "
+            "subject/predicate",
+            subject=body.subject, predicate=body.predicate)
+    if incoming_confirmed:
+        # A confirmed correction supersedes live confirmed edges on the
+        # same subject+predicate pointing at a different object.
+        for r in confirmed:
+            if r.object != body.object:
+                r.valid_until = now
     rel = ContextRelationship(
         user_id=user_id,
         subject=body.subject, predicate=body.predicate, object=body.object,
-        valid_from=body.valid_from or time.time(),
+        valid_from=body.valid_from or now,
         valid_until=body.valid_until,
         confidence=body.confidence, source=body.source,
         provenance=json.dumps(body.provenance or {}))
@@ -434,6 +514,16 @@ def apply_state(db: Session, user_id: int,
         ContextState.user_id == user_id,
         ContextState.state_key == body.key,
         ContextState.entity_id == entity_id).first()
+    # Confirmed-fact precedence: a live confirmed state blocks inferred
+    # overwrites until it expires (valid_until) or a confirmed write
+    # supersedes it. Expired confirmed states are fair game again.
+    if (state is not None
+            and (state.valid_until is None or state.valid_until > now)
+            and is_confirmed_source(state.estimator or "")
+            and not is_confirmed_source(body.estimator)):
+        raise _confirmed_conflict(
+            "state is user-confirmed and still valid",
+            key=body.key, entity_id=entity_id)
     previous = None
     event_type = ""
     if state is None:
