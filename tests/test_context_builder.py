@@ -99,8 +99,15 @@ def test_bundle_surfaces_textual_scenes_from_node_uplinks(db):
                 "scene": scene,
                 "predictions": {"builtin:occupancy-radar": {
                     "label": "occupied", "confidence": 0.91}},
+                "location": {"lat": 43.65, "lon": -79.38,
+                             "site": "43 Hillsmount"},
+                "estimates": [{"key": "occupancy.v1",
+                               "subject": "device:dev-1",
+                               "value": {"occupied": False},
+                               "confidence": 0.62}],
                 "sensors": {
                     "radar-1": {"type": "radar", "n": 20,
+                                "rate_hz": 10.0, "age_s": 0.2,
                                 "text": "radar: high motion",
                                 "cues": {"motion": "high"},
                                 "fields": {"snr_db": {"mean": 1.0}}},
@@ -113,10 +120,32 @@ def test_bundle_surfaces_textual_scenes_from_node_uplinks(db):
     sc = bundle["scenes"][0]
     assert sc["scene"] == "radar: high motion" and sc["age_s"] == 5.0
     assert sc["sensors"]["mic-1"]["cues"]["speech"]["text"] == "lights off"
-    assert "fields" not in sc["sensors"]["radar-1"]
+    # physical descriptors must reach the model — radar fields are the
+    # whole point of the uplink
+    assert sc["sensors"]["radar-1"]["fields"]["snr_db"]["mean"] == 1.0
+    assert sc["sensors"]["radar-1"]["n"] == 20
+    assert sc["location"]["site"] == "43 Hillsmount"
+    assert sc["estimates"][0]["key"] == "occupancy.v1"
     assert sc["predictions"]["builtin:occupancy-radar"]["label"] == "occupied"
     assert all(a["key"] != "context.descriptors.v1"
                for a in bundle["descriptors"])
+
+
+def test_bundle_aggregates_geo_evidence(db):
+    """location.geo.v1 rows aggregate like any descriptor — the chat
+    agent and builder both see where the reporting node is."""
+    session, _ = db
+    session.add(ContextEvidence(
+        user_id=1, evidence_key="location.geo.v1", device_id="dev-1",
+        timestamp=T0,
+        value=json.dumps({"lat": 43.65, "lon": -79.38,
+                          "site": "43 Hillsmount", "city": "Toronto"})))
+    session.commit()
+    bundle = cb.build_bundle(session, 1, T0)
+    agg = next(a for a in bundle["descriptors"]
+               if a["key"] == "location.geo.v1")
+    assert agg["latest"]["site"] == "43 Hillsmount"
+    assert agg["fields"]["lat"]["mean"] == 43.65
 
 
 def test_build_applies_map_and_seeds_devices(db):

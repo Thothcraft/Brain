@@ -247,9 +247,9 @@ MAX_SCENES = 12
 
 def _scenes(rows: List[ContextEvidence], now: float) -> List[Dict[str, Any]]:
     """Latest node uplink per device → textual cues (scene line, per-
-    sensor sentences + cues, predictions). This is the richest, most
-    LLM-friendly evidence: speech transcripts, people/face identities,
-    motion levels — already summarised on the node."""
+    sensor sentences + cues, predictions) PLUS the physical descriptors
+    (fields mean/min/max, emitter scans) — the numeric evidence the
+    model needs for judgements like "radar flat → room empty"."""
     latest: Dict[str, ContextEvidence] = {}
     for row in rows:
         dev = row.device_id or ""
@@ -266,15 +266,35 @@ def _scenes(rows: List[ContextEvidence], now: float) -> List[Dict[str, Any]]:
         for sid, d in (v.get("sensors") or {}).items():
             if not isinstance(d, dict):
                 continue
-            entry = {"type": d.get("type"), "text": d.get("text")}
+            entry: Dict[str, Any] = {"type": d.get("type"),
+                                     "text": d.get("text")}
+            for k in ("n", "rate_hz", "age_s", "state"):
+                if d.get(k) is not None:
+                    entry[k] = d[k]
+            if d.get("fields"):
+                entry["fields"] = _round(d["fields"])
+            if d.get("scan"):
+                entry["scan"] = _round(d["scan"])
             if d.get("cues"):
                 entry["cues"] = _round(d["cues"])
             sensors[sid] = entry
-        out.append({"device": dev or None,
-                    "age_s": round(now - row.timestamp, 1),
-                    "scene": v.get("scene"),
-                    "predictions": _round(v.get("predictions") or {}),
-                    "sensors": sensors})
+        scene: Dict[str, Any] = {"device": dev or None,
+                                 "age_s": round(now - row.timestamp, 1),
+                                 "scene": v.get("scene"),
+                                 "predictions": _round(
+                                     v.get("predictions") or {}),
+                                 "sensors": sensors}
+        # Node-reported geo + site — how "this node is at <address>"
+        # reaches the map. ``estimates`` carry the node's own
+        # occupancy/zone/activity states verbatim.
+        if v.get("location"):
+            scene["location"] = _round(v["location"])
+        if v.get("estimates"):
+            scene["estimates"] = _round(
+                [e for e in v["estimates"] if isinstance(e, dict)][:16])
+        if v.get("room"):
+            scene["room"] = _round(v["room"])
+        out.append(scene)
     return out[:MAX_SCENES]
 
 
@@ -384,15 +404,30 @@ data. You get:
     computed on the device: a one-line `scene`, a sentence per sensor
     (`text`) and structured `cues` (speech transcript, people count,
     recognized face identity, motion level, strongest radio emitter),
-    plus on-device `predictions`. Prefer these — they are the most
-    direct evidence.
+    plus on-device `predictions`. Each sensor entry ALSO carries its
+    physical `fields` (per-field mean/min/max/n — e.g. radar `snr_db`,
+    `range`, CSI amplitude variance, RSSI, audio level) with `n`,
+    `rate_hz` and `age_s`, plus the node's `estimates` (its own
+    occupancy/zone/activity verdicts) and `location` (self-resolved geo
+    + user-set `site` address + `room`). Prefer these — they are the
+    most direct evidence.
   * `descriptors` — compact physical aggregates per (evidence key,
     device): counts, field mean/min/max, latest value, mean confidence,
-    age.
+    age. `location.geo.v1` entries describe where a node is (lat/lon,
+    postal_code, city, site).
 Typical keys: occupancy/presence probabilities, radar SNR and range,
 CSI amplitude variance, BLE/Wi-Fi RSSI sightings (with decoded beacon
 identities), IMU motion variance, face/person detections, audio level,
 model predictions (key 'prediction'), device metadata/room placement.
+
+A `site` on a node's location is a user-set address — anchor it: create
+or reuse a `place:` entity for the site (e.g. place:home named after
+the address), relate the reporting `device:` with `located_in`, and
+relate other persons/devices the node observes there when the evidence
+supports it. When radar/CSI fields are flat (low variance, no target
+SNR, zero emitters) while the node is fresh and reporting, that is
+positive evidence the space is EMPTY — set occupancy.v1
+{"occupied": false} on the place with matching confidence.
 
 Update the map by calling update_context_map exactly once:
   * Reuse existing entity ids from `map` whenever they match — never

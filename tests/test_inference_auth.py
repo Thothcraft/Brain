@@ -150,7 +150,7 @@ def test_infer_endpoint_is_metered_and_usage_endpoint_reports(api,
     r = client.post("/v1/context/infer", json={"descriptors": {}})
     assert r.status_code == 200
     rows = _usage_rows(session)
-    assert len(rows) == 1 and rows[0].kind == "context_infer"
+    assert len(rows) == 1 and rows[0].kind == "context_infer:standard"
     assert _status(rows[0]) == "ok"
 
     u = client.get("/v1/context/inference/usage")

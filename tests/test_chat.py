@@ -97,6 +97,48 @@ def test_chat_requires_message_or_attachment(api):
     assert client.post("/v1/chat", json={}).status_code == 422
 
 
+def test_chat_bundle_carries_radar_fields_and_site(api, monkeypatch):
+    """Regression: the app agent must SEE physical descriptors (radar
+    snr/range, csi variance) and the node's site — not just text cues."""
+    client, session = api
+    from server.db import ContextEvidence
+    session.add(ContextEvidence(
+        user_id=1, evidence_key="context.descriptors.v1",
+        device_id="dev-1", timestamp=__import__("time").time(),
+        value=json.dumps({"value": {
+            "scene": "quiet room",
+            "location": {"lat": 43.65, "lon": -79.38,
+                         "site": "43 Hillsmount"},
+            "sensors": {
+                "radar-a316": {"type": "radar", "n": 40, "rate_hz": 10.0,
+                               "fields": {"snr_db": {"mean": 0.3},
+                                          "range_m": {"mean": 0.0}}},
+                "csi-bb8b": {"type": "wifi_csi", "n": 90,
+                             "fields": {"amplitude_var": {
+                                 "mean": 0.004}}}}}})))
+    session.commit()
+    seen = {}
+
+    def fake_answer(messages, usage_out=None):
+        seen["bundle"] = json.loads(
+            messages[1]["content"].split("\n", 1)[1])
+        return {"answer": "The room looks empty — radar SNR is flat.",
+                "widgets": [
+                    {"type": "states", "title": "Evidence", "items": [
+                        {"key": "occupancy.v1", "entity": "place:bedroom",
+                         "value": {"occupied": False},
+                         "confidence": 0.7, "confirmed": False}]}]}
+    monkeypatch.setattr(chat, "_openai_answer", fake_answer)
+
+    r = client.post("/v1/chat", json={"message": "is the room empty?"})
+    assert r.status_code == 200, r.text
+    scene = seen["bundle"]["scenes"][0]
+    radar = scene["sensors"]["radar-a316"]
+    assert radar["fields"]["snr_db"]["mean"] == 0.3
+    assert scene["location"]["site"] == "43 Hillsmount"
+    assert "empty" in r.json()["answer"]
+
+
 def test_chat_over_quota_402s(api, monkeypatch):
     client, session = api
     monkeypatch.setenv("INFERENCE_MONTHLY_QUOTA", "0")
