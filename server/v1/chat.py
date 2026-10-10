@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["v1", "chat"])
 
 _DEFAULT_MODEL = "gpt-4o-mini"
+_ADVANCED_MODEL = "gpt-4o"
+_TIERS = ("standard", "advanced")
 _MAX_HISTORY = 12
 _MAX_HISTORY_CHARS = 2000
 _MAX_ATTACHMENTS = 5
@@ -83,6 +85,11 @@ class ChatRequest(BaseModel):
     history: List[ChatMessage] = Field(default_factory=list)
     attachments: List[AttachmentIn] = Field(default_factory=list)
     include_context: bool = True
+    model: str = Field(
+        default="standard",
+        description="Answer tier: 'standard' (fast, default) or "
+                    "'advanced' (gpt-4o-class reasoning + a much larger "
+                    "context bundle). Bogus tier → 422.")
 
 
 class TtsRequest(BaseModel):
@@ -95,11 +102,13 @@ class TtsRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _chat_context(db: Session, user_id: int, user: Optional[User],
-                  now: Optional[float] = None) -> Dict[str, Any]:
+                  now: Optional[float] = None, *,
+                  detail: str = "standard") -> Dict[str, Any]:
     """The evidence bundle behind an answer — semantic map + fresh
     descriptor aggregates + builder status + quota. Identical inputs to
     the context builder's own bundle so the assistant sees what the map
-    sees."""
+    sees. ``advanced`` widens every cap — more descriptor groups, more
+    scenes and the builder's last proposal — for the bigger model."""
     now = now or time.time()
     bundle = build_bundle(db, user_id, now, window_s=900.0)
     builder_ent = db.query(ContextEntity).filter(
@@ -111,18 +120,27 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
             battrs = json.loads(builder_ent.attributes)
         except (TypeError, ValueError):
             battrs = {}
+    advanced = detail == "advanced"
+    builder: Dict[str, Any] = {
+        "builds": battrs.get("builds", 0),
+        "last_build_at": battrs.get("last_build_at"),
+        "last_summary": battrs.get("last_summary"),
+        "pending": len(battrs.get("pending", {}) or {}),
+    }
+    if advanced:
+        builder["last_proposal"] = battrs.get("last_proposal")
     return {
         "generated_at": now,
         "window_s": bundle.get("window_s", 900.0),
         "map": bundle["map"],
-        "descriptors": (bundle.get("descriptors") or [])[:8],
-        "scenes": (bundle.get("scenes") or [])[:3],
-        "builder": {
-            "builds": battrs.get("builds", 0),
-            "last_build_at": battrs.get("last_build_at"),
-            "last_summary": battrs.get("last_summary"),
-            "pending": len(battrs.get("pending", {}) or {}),
-        },
+        "devices": (bundle.get("devices") or [])
+                   [:30 if advanced else 12],
+        "descriptors": (bundle.get("descriptors") or [])
+                       [:32 if advanced else 12],
+        "scenes": (bundle.get("scenes") or [])
+                  [:10 if advanced else 5],
+        "reference": bundle.get("reference"),
+        "builder": builder,
         "usage": inference_status(db, user) if user else None,
     }
 
@@ -200,8 +218,16 @@ You are the Thothcraft assistant answering questions about the user's
 physical spaces, devices and activity. You receive a context bundle —
 the same semantic map the context builder maintains (entities,
 relationships, derived states; entries marked `confirmed: true` are
-user-confirmed facts), recent evidence descriptor aggregates and scene
-summaries — then the user's question and optional attachments.
+user-confirmed facts), a `devices` registry telling you which physical
+machine each `device:<uuid>` / scene `device` id is (name, type, MAC,
+hardware — anything not listed is an unknown emitter), recent evidence
+descriptor aggregates and scene summaries — sensor entries carry
+physical `fields` (mean/min/max/n for radar SNR, CSI variance, RSSI,
+audio level…) plus node `estimates` and `location`, and `reference` —
+measured empty-vs-occupied stats for the radar/CSI fields (E1 rig:
+empty room snr mean ~7.6 dB tight, occupancy shows as snr_max spikes
+>15-40 dB + map-mean lifts — a modest median SNR alone is weak) — then
+the user's question and optional attachments.
 
 Rules:
   * Answer ONLY from the bundle + attachments + conversation — never
@@ -233,7 +259,22 @@ follow-ups. `answer` is always required; widgets may be an empty array.
 """
 
 
+def _model_for_tier(tier: str) -> str:
+    """Slider tier → concrete model id, env-overridable per tier
+    (``CHAT_MODEL``, ``CHAT_MODEL_ADVANCED``). Unknown → 422."""
+    tier = (tier or "standard").lower()
+    if tier == "standard":
+        return (os.getenv("CHAT_MODEL")
+                or os.getenv("CONTEXT_INFER_MODEL")
+                or os.getenv("MODEL_NAME") or _DEFAULT_MODEL)
+    if tier == "advanced":
+        return os.getenv("CHAT_MODEL_ADVANCED") or _ADVANCED_MODEL
+    raise HTTPException(422, f"unknown model tier {tier!r} "
+                             f"— one of {list(_TIERS)}")
+
+
 def _openai_answer(messages: List[Dict[str, Any]], *,
+                   tier: str = "standard",
                    usage_out: Optional[Dict[str, Any]] = None
                    ) -> Dict[str, Any]:
     """One JSON-mode completion → parsed rich answer."""
@@ -244,8 +285,7 @@ def _openai_answer(messages: List[Dict[str, Any]], *,
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(503, "OPENAI_API_KEY not configured")
-    model = (os.getenv("CHAT_MODEL") or os.getenv("CONTEXT_INFER_MODEL")
-             or os.getenv("MODEL_NAME") or _DEFAULT_MODEL)
+    model = _model_for_tier(tier)
     client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
         model=model, messages=messages, temperature=0.3,
@@ -313,7 +353,12 @@ async def chat(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Question (+ attachments) → context-grounded rich answer."""
-    context_used = (_chat_context(db, current_user.userId, current_user)
+    tier = (body.model or "standard").lower()
+    if tier not in _TIERS:
+        raise HTTPException(422, f"unknown model tier {tier!r} "
+                                 f"— one of {list(_TIERS)}")
+    context_used = (_chat_context(db, current_user.userId, current_user,
+                                  detail=tier)
                     if body.include_context else None)
 
     messages: List[Dict[str, Any]] = [
@@ -322,7 +367,8 @@ async def chat(
         messages.append({
             "role": "user",
             "content": "[context bundle]\n"
-                       + json.dumps(context_used, default=str)[:60_000]})
+                       + json.dumps(context_used, default=str)
+                       [:120_000 if tier == "advanced" else 60_000]})
         messages.append({"role": "assistant",
                          "content": "Understood — I will answer only from "
                                     "that bundle plus what you send."})
@@ -348,13 +394,15 @@ async def chat(
                      or parts[0]["type"] != "text" else text})
 
     with inference_call(db, current_user, kind="chat_query") as meter:
-        parsed = _openai_answer(messages, usage_out=meter)
+        parsed = _openai_answer(messages, tier=tier, usage_out=meter)
 
     return {
         "answer": parsed["answer"],
         "widgets": parsed["widgets"],
         "context_used": context_used,
         "attachments": attachment_notes,
+        "model": {"tier": tier,
+                  "id": _model_for_tier(tier)},
         "generated_at": time.time(),
     }
 

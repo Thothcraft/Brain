@@ -54,8 +54,9 @@ def test_chat_returns_rich_answer_and_echoes_context(api, monkeypatch):
     client, session = api
     seen = {}
 
-    def fake_answer(messages, usage_out=None):
+    def fake_answer(messages, tier="standard", usage_out=None):
         seen["messages"] = messages
+        seen["tier"] = tier
         return {"answer": "Gad is in the living room.",
                 "widgets": [{"type": "questions",
                              "items": ["Since when?"]}]}
@@ -78,6 +79,8 @@ def test_chat_returns_rich_answer_and_echoes_context(api, monkeypatch):
     assert roles[0] == "system"
     assert "context bundle" in seen["messages"][1]["content"]
     assert roles.count("system") == 1        # injected role filtered out
+    assert seen["tier"] == "standard"
+    assert r.json()["model"]["tier"] == "standard"
     assert _usage(session, "chat_query")
 
 
@@ -86,10 +89,53 @@ def test_chat_context_endpoint_shows_bundle_for_free(api):
     r = client.get("/v1/chat/context")
     assert r.status_code == 200
     body = r.json()
-    assert set(("map", "descriptors", "scenes", "builder",
+    assert set(("map", "devices", "descriptors", "scenes", "builder",
                 "usage", "generated_at")) <= set(body)
     assert body["usage"]["plan"] == "free"
     assert not _usage(session)                    # preview costs nothing
+
+
+def test_chat_model_tier_routes_and_422s(api, monkeypatch):
+    """The app's Fast/Advanced slider selects the model — advanced also
+    widens the context bundle; a bogus tier is rejected."""
+    client, _ = api
+    seen = {}
+
+    def fake_answer(messages, tier="standard", usage_out=None):
+        seen["tier"] = tier
+        seen["bundle"] = json.loads(
+            messages[1]["content"].split("\n", 1)[1])
+        return {"answer": "ok", "widgets": []}
+    monkeypatch.setattr(chat, "_openai_answer", fake_answer)
+
+    r = client.post("/v1/chat",
+                    json={"message": "hi", "model": "advanced"})
+    assert r.status_code == 200, r.text
+    assert seen["tier"] == "advanced"
+    assert r.json()["model"]["id"] == chat._ADVANCED_MODEL
+
+    r = client.post("/v1/chat",
+                    json={"message": "hi", "model": "gpt-99"})
+    assert r.status_code == 422
+
+
+def test_chat_advanced_widens_the_bundle(db, monkeypatch):
+    """Advanced detail ships more descriptors/scenes + the builder's
+    last proposal; standard stays compact."""
+    session, _ = db
+    from server.db import ContextEvidence
+    for i in range(20):
+        session.add(ContextEvidence(
+            user_id=1, evidence_key=f"k{i}.v1", device_id="d",
+            value=json.dumps({"v": i}),
+            timestamp=__import__("time").time(), confidence=0.5))
+    session.commit()
+    user = session.get(User, 1)
+    std = chat._chat_context(session, 1, user)
+    adv = chat._chat_context(session, 1, user, detail="advanced")
+    assert len(std["descriptors"]) == 12
+    assert len(adv["descriptors"]) == 20
+    assert "devices" in std and "devices" in adv
 
 
 def test_chat_requires_message_or_attachment(api):
@@ -119,7 +165,7 @@ def test_chat_bundle_carries_radar_fields_and_site(api, monkeypatch):
     session.commit()
     seen = {}
 
-    def fake_answer(messages, usage_out=None):
+    def fake_answer(messages, tier="standard", usage_out=None):
         seen["bundle"] = json.loads(
             messages[1]["content"].split("\n", 1)[1])
         return {"answer": "The room looks empty — radar SNR is flat.",
@@ -173,7 +219,7 @@ def test_chat_sends_images_to_vision(api, monkeypatch):
     client, _ = api
     seen = {}
 
-    def fake_answer(messages, usage_out=None):
+    def fake_answer(messages, tier="standard", usage_out=None):
         seen["messages"] = messages
         return {"answer": "a cat", "widgets": []}
     monkeypatch.setattr(chat, "_openai_answer", fake_answer)
