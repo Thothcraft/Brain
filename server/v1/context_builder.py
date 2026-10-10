@@ -74,10 +74,18 @@ REL_TTL_S = 1800.0
 STATE_TTL_S = 1800.0
 DEFAULT_WINDOW_S = 900.0
 MAX_EVIDENCE_ROWS = 3000
-MAX_AGGREGATES = 60
-MAX_FIELDS = 8
+MAX_AGGREGATES = 80
+MAX_FIELDS = 12
 
-_DEFAULT_MODEL = "gpt-4o-mini"
+# The builder reads a lot of physical evidence — a tier above the
+# infer path pays for itself in map quality. Env-overridable per
+# deployment; the actual model used is metered on every call.
+_DEFAULT_MODEL = "gpt-4o"
+
+# How much of the model's input/output text is retained on the
+# map:builder entity for audit ("what the model saw / produced").
+INPUT_KEEP = 12000
+PROPOSAL_KEEP = 8000
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +253,37 @@ DESCRIPTOR_KEY = "context.descriptors.v1"
 MAX_SCENES = 12
 
 
+def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
+    """The device registry, keyed by the map entity id each scene's
+    `device` uuid joins to — so the model always knows which physical
+    machine a uuid is (name, type, MAC, hardware) and can tell a
+    registered node from an unknown emitter seen only in scans."""
+    out = []
+    for dev in db.query(Device).filter(Device.userId == user_id).all():
+        hw: Dict[str, Any] = {}
+        if dev.hardware_info:
+            try:
+                parsed = json.loads(dev.hardware_info)
+                if isinstance(parsed, dict):
+                    hw = parsed
+            except (TypeError, ValueError):
+                hw = {}
+        out.append({
+            "entity": f"device:{dev.device_uuid}",
+            "uuid": dev.device_uuid,
+            "name": dev.device_name,
+            "type": dev.device_type,
+            "mac": dev.mac_address,
+            "online": bool(dev.online),
+            "last_seen": (dev.last_seen.isoformat() + "Z"
+                          if dev.last_seen else None),
+            "hardware": {k: hw.get(k) for k in
+                         ("hostname", "model", "os", "platform",
+                          "chip") if hw.get(k)},
+        })
+    return out
+
+
 def _scenes(rows: List[ContextEvidence], now: float) -> List[Dict[str, Any]]:
     """Latest node uplink per device → textual cues (scene line, per-
     sensor sentences + cues, predictions) PLUS the physical descriptors
@@ -314,6 +353,7 @@ def build_bundle(db: Session, user_id: int, now: float,
         "now": now,
         "window_s": window_s,
         "evidence_rows": len(rows),
+        "devices": _devices(db, user_id),
         "scenes": _scenes(uplinks, now),
         "descriptors": aggregates,
         "map": map_snapshot(db, user_id, now),
@@ -346,7 +386,13 @@ def _map_tool_schema() -> Dict[str, Any]:
                                    "description": "<kind>:<slug>, e.g. "
                                                   "person:gad, place:kitchen"},
                             "kind": {"type": "string", "enum": list(KINDS)},
-                            "name": {"type": "string"},
+                            "name": {"type": "string",
+                                     "description": "human name — set or "
+                                                    "refine it whenever "
+                                                    "metadata (MAC vendor, "
+                                                    "hostname, beacon id) "
+                                                    "identifies the thing "
+                                                    "better than its id"},
                             "aliases": {"type": "array",
                                         "items": {"type": "string"}},
                             "attributes": {"type": "object"},
@@ -397,9 +443,27 @@ def _map_tool_schema() -> Dict[str, Any]:
 
 
 _SYSTEM_PROMPT = """\
-You maintain a STABLE semantic context map of persons, places, devices,
-activities and objects for one household/lab. You never see raw sensor
-data. You get:
+You are the MAP BUILDER model in a Thoth deployment. The system: edge
+nodes (the user's registered devices) sample radar, CSI, radio (BLE/
+Wi-Fi/Zigbee), camera, microphone and IMU, compute physical sensor
+descriptors on-device, and uplink them to Brain as evidence rows.
+Brain aggregates those rows into this bundle once per build tick. Your
+role: fuse that physical evidence into ONE stable semantic map of
+persons, places, devices, activities and objects — the shared context
+every downstream agent reads. You never see raw sensor data.
+
+`devices` lists the user's REGISTERED nodes: `entity` is the map id
+each scene's `device` uuid joins to, and name/type/mac/hardware say
+which physical machine it is (e.g. which Pi runs radar+CSI, which
+laptop runs camera+mic). Emitters and MACs inside sensor `scan`s that
+match no registered device and no existing alias are UNKNOWN devices
+— for persistent unknowns propose `device:`/`object:`/`person:`
+entities (keep the raw MAC/beacon id in `aliases`). You may also refine
+a known device: propose the same device:<uuid> id with a better `name`
+or identifying `attributes` (hostname, MAC vendor, model) — the
+registry remains the anchor, never create a second entity for it.
+
+You get:
   * `scenes` — the latest uplink per node with TEXTUAL cues already
     computed on the device: a one-line `scene`, a sentence per sensor
     (`text`) and structured `cues` (speech transcript, people count,
@@ -415,6 +479,8 @@ data. You get:
     device): counts, field mean/min/max, latest value, mean confidence,
     age. `location.geo.v1` entries describe where a node is (lat/lon,
     postal_code, city, site).
+  * `devices` — the device registry (see above); `map` — the current
+    semantic map snapshot you are updating.
 Typical keys: occupancy/presence probabilities, radar SNR and range,
 CSI amplitude variance, BLE/Wi-Fi RSSI sightings (with decoded beacon
 identities), IMU motion variance, face/person detections, audio level,
@@ -535,10 +601,19 @@ class _Memory:
     def clear(self, slot: str) -> None:
         self.data["pending"].pop(slot, None)
 
-    def save(self, summary: str, now: float) -> None:
+    def save(self, summary: str, now: float, *,
+             bundle: Optional[Dict[str, Any]] = None,
+             proposal: Optional[Dict[str, Any]] = None) -> None:
         self.data["builds"] = int(self.data.get("builds", 0)) + 1
         self.data["last_build_at"] = now
         self.data["last_summary"] = summary
+        # Audit trail — what the model saw and what it produced.
+        if bundle is not None:
+            self.data["last_input"] = json.dumps(
+                bundle, default=str)[:INPUT_KEEP]
+        if proposal is not None:
+            self.data["last_proposal"] = json.dumps(
+                proposal, default=str)[:PROPOSAL_KEEP]
         self.entity.attributes = json.dumps(self.data, default=str)
         self.db.commit()
 
@@ -629,9 +704,13 @@ def _new_rel(db: Session, user_id: int, s: str, p: str, o: str,
 
 
 def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
-                     now: Optional[float] = None) -> Dict[str, Any]:
+                     now: Optional[float] = None, *,
+                     bundle: Optional[Dict[str, Any]] = None
+                     ) -> Dict[str, Any]:
     """Apply a proposed update with alias resolution, hysteresis and
-    decay. Returns a receipt of what changed and what is pending."""
+    decay. Returns a receipt of what changed and what is pending.
+    ``bundle`` is retained on the builder entity alongside the proposal
+    so both sides of the last build stay auditable."""
     now = now or time.time()
     mem = _Memory(db, user_id)
     receipt: Dict[str, Any] = {"entities": [], "merged": [], "retired": [],
@@ -835,7 +914,8 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
 
     # 6. decay
     receipt["decayed"] = decay(db, user_id, now)
-    mem.save(str(update.get("summary") or ""), now)
+    mem.save(str(update.get("summary") or ""), now,
+             bundle=bundle, proposal=update)
     receipt["summary"] = update.get("summary")
     return receipt
 
@@ -889,7 +969,8 @@ def run_build(db: Session, user_id: int, *, now: Optional[float] = None,
                               "descriptor_groups": len(bundle["descriptors"]),
                               "proposal": update}
     if not dry_run:
-        result["receipt"] = apply_map_update(db, user_id, update, now)
+        result["receipt"] = apply_map_update(db, user_id, update, now,
+                                             bundle=bundle)
     return result
 
 
@@ -914,6 +995,8 @@ def grouped_map(db: Session, user_id: int,
         "builder": {"builds": battrs.get("builds", 0),
                     "last_build_at": battrs.get("last_build_at"),
                     "last_summary": battrs.get("last_summary"),
+                    "last_input": battrs.get("last_input"),
+                    "last_proposal": battrs.get("last_proposal"),
                     "pending": len(battrs.get("pending", {}))},
         "generated_at": now,
     }

@@ -87,6 +87,11 @@ def test_bundle_aggregates_descriptors_not_raw(db):
     ids = {e["id"] for e in bundle["map"]["entities"]}
     assert "device:dev-1" in ids
     assert "map:builder" not in ids
+    # The registry block tells the model which machine each uuid is —
+    # and by absence, which emitters in scans are unknown devices.
+    devs = {d["entity"]: d for d in bundle["devices"]}
+    assert devs["device:dev-1"]["name"] == "thoth-chen"
+    assert devs["device:dev-1"]["uuid"] == "dev-1"
 
 
 def test_bundle_surfaces_textual_scenes_from_node_uplinks(db):
@@ -161,6 +166,11 @@ def test_build_applies_map_and_seeds_devices(db):
     assert m["devices"][0]["name"] == "thoth-chen"
     assert {p["id"] for p in m["places"]} == {"place:living-room"}
     assert m["builder"]["builds"] == 1
+    # Audit trail — what the model saw and what it produced.
+    inp = json.loads(m["builder"]["last_input"])
+    assert "scenes" in inp and "descriptors" in inp
+    prop = json.loads(m["builder"]["last_proposal"])
+    assert prop["summary"] == "gad in place:living-room"
 
 
 def test_repeated_identical_builds_are_stable(db):
