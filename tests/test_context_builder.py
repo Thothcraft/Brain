@@ -164,7 +164,9 @@ def test_build_applies_map_and_seeds_devices(db):
     m = cb.grouped_map(session, 1, T0)
     assert [d["id"] for d in m["devices"]] == ["device:dev-1"]
     assert m["devices"][0]["name"] == "thoth-chen"
-    assert {p["id"] for p in m["places"]} == {"place:living-room"}
+    # the address anchor is seeded — the model's place joins it
+    assert {p["id"] for p in m["places"]} == {
+        "place:living-room", "place:home"}
     assert m["builder"]["builds"] == 1
     # Audit trail — what the model saw and what it produced.
     inp = json.loads(m["builder"]["last_input"])
@@ -179,9 +181,11 @@ def test_repeated_identical_builds_are_stable(db):
         cb.run_build(session, 1, now=T0 + i * 60, llm=lambda b: _proposal())
     assert session.query(ContextRelationship).count() == 3
     assert len(_active_rel(session, "person:gad", "located_in")) == 1
+    # dev-1 + person:gad + place:living-room + activity:sitting +
+    # the two seeded anchors (person:owner, place:home)
     assert session.query(ContextEntity).filter(
         ContextEntity.retired_at.is_(None),
-        ContextEntity.kind != "system").count() == 4
+        ContextEntity.kind != "system").count() == 6
 
 
 def test_exclusive_relationship_needs_confirmation(db):
@@ -235,7 +239,8 @@ def test_alias_resolution_prevents_forks(db):
             rel["subject"] = "gad"
     cb.run_build(session, 1, now=T0 + 60, llm=lambda b: renamed)
     persons = session.query(ContextEntity).filter_by(kind="person").all()
-    assert [e.entity_key for e in persons] == ["person:gad"]
+    assert {e.entity_key for e in persons} == {
+        "person:gad", "person:owner"}
     assert len(_active_rel(session, "person:gad", "located_in")) == 1
 
 
@@ -282,6 +287,41 @@ def test_merge_moves_aliases_and_edges(db):
     assert "person:g" in json.loads(gad.attributes)["aliases"]
 
 
+def test_device_fingerprint_resolution_prevents_duplicates(db):
+    """A proposal naming the same MAC/hostname as a registered device
+    resolves onto device:<uuid> — the model may rename/refine it but can
+    never fork a second entity for the same hardware."""
+    session, _ = db
+    dev = session.query(Device).one()
+    dev.mac_address = "d8:3a:dd:11:22:33"
+    session.commit()
+    p = _proposal()
+    p["entities"].append({
+        "id": "device:random-slug", "kind": "device",
+        "name": "esp32 beacon",
+        "attributes": {"mac": "d8:3a:dd:11:22:33"},
+        "confidence": 0.9})
+    cb.run_build(session, 1, now=T0, llm=lambda b: p)
+    devs = {e.entity_key for e in session.query(ContextEntity).filter_by(
+        kind="device").all()}
+    assert devs == {"device:dev-1"}
+    ent = session.query(ContextEntity).filter_by(
+        entity_key="device:dev-1").one()
+    aliases = json.loads(ent.attributes)["aliases"]
+    assert "device:random-slug" in aliases
+
+
+def test_seeded_owner_person_and_home_place(db):
+    session, _ = db
+    cb.seed_devices(session, 1, T0)
+    owner = session.query(ContextEntity).filter_by(
+        entity_key="person:owner").one()
+    assert owner.kind == "person"
+    home = session.query(ContextEntity).filter_by(
+        entity_key="place:home").one()
+    assert home.kind == "place"
+
+
 def test_registry_device_cannot_be_retired_by_llm(db):
     session, _ = db
     cb.run_build(session, 1, now=T0, llm=lambda b: {
@@ -317,7 +357,8 @@ def test_rebuild_and_map_endpoints(api, monkeypatch):
     monkeypatch.setattr(cb, "_llm_update", lambda b, **_: _proposal())
     r = client.post("/v1/context/rebuild", json={"window_s": 3600})
     assert r.status_code == 200, r.text
-    assert r.json()["map"]["persons"][0]["id"] == "person:gad"
+    assert "person:gad" in {p["id"]
+                            for p in r.json()["map"]["persons"]}
     m = client.get("/v1/context/map").json()
     assert m["builder"]["builds"] == 1
     assert m["relationships"]

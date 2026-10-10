@@ -39,6 +39,9 @@ from .context import (
     apply_entity, apply_evidence_items, apply_relationship, apply_state,
     is_confirmed_source,
 )
+from .context_builder import (
+    _FP_ATTR_KEYS, _device_fp_index, _resolve_device,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/context", tags=["v1", "context"])
@@ -328,6 +331,170 @@ def _ctx_tool_schema() -> Dict[str, Any]:
                             },
                             "required": ["subject", "text"],
                         }},
+                    "devices": {
+                        "type": "array",
+                        "description": "The device inventory as YOU see "
+                                       "it — every registered node and "
+                                       "every persistent unknown "
+                                       "emitter, ONE entry per physical "
+                                       "device (fingerprints dedup "
+                                       "server-side; never emit two "
+                                       "entries for the same MAC/uuid/"
+                                       "hostname). Reuse the canonical "
+                                       "ref (device:<uuid> when "
+                                       "registered) and carry the "
+                                       "richest name the metadata "
+                                       "supports.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "device": {
+                                    "type": "string",
+                                    "description": "canonical ref — "
+                                                   "device:<uuid>, uuid, "
+                                                   "MAC or beacon id"},
+                                "name": {
+                                    "type": "string",
+                                    "description": "rich human name "
+                                                   "from MAC vendor + "
+                                                   "advertised name + "
+                                                   "hostname + observed "
+                                                   "behavior, e.g. "
+                                                   "'living-room radar "
+                                                   "rig (thoth-chen, "
+                                                   "d8:3a:dd)'"},
+                                "kind": {
+                                    "type": "string",
+                                    "description": "device | object | "
+                                                   "person — what the "
+                                                   "emitter most likely "
+                                                   "is"},
+                                "role": {
+                                    "type": "string",
+                                    "description": "inferred function: "
+                                                   "radar-node | phone | "
+                                                   "watch | laptop | tv | "
+                                                   "beacon | unknown-"
+                                                   "emitter"},
+                                "mac": {"type": "string"},
+                                "vendor": {"type": "string"},
+                                "hostname": {"type": "string"},
+                                "model": {"type": "string"},
+                                "attributes": {
+                                    "type": "object",
+                                    "description": "extra inferred "
+                                                   "facts (os, transport, "
+                                                   "seen_near, sensors)"},
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0, "maximum": 1},
+                                "rationale": {"type": "string"},
+                            },
+                            "required": ["device", "name"],
+                        }},
+                    "persons": {
+                        "type": "array",
+                        "description": "Who is where — always include "
+                                       "person:owner (the user). "
+                                       "associated_devices are the "
+                                       "carried devices (watch/phone/"
+                                       "laptop); location resolves "
+                                       "geo evidence against the "
+                                       "place addresses, then radar/"
+                                       "BLE/CSI narrows it to a room.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string",
+                                       "description": "person:<slug>"},
+                                "name": {"type": "string"},
+                                "is_user": {"type": "boolean"},
+                                "address": {
+                                    "type": "string",
+                                    "description": "the person's home "
+                                                   "address"},
+                                "associated_devices": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "entity refs of "
+                                                   "carried devices "
+                                                   "(watch/phone/laptop)"},
+                                "location": {
+                                    "type": "object",
+                                    "description": "{place, room — "
+                                                   "entity ids; "
+                                                   "address; "
+                                                   "granularity: "
+                                                   "indoor_room | "
+                                                   "building | address | "
+                                                   "street | unknown; "
+                                                   "on_street bool}"},
+                                "activity": {"type": "string"},
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0, "maximum": 1},
+                                "rationale": {"type": "string"},
+                            },
+                            "required": ["id"],
+                        }},
+                    "places": {
+                        "type": "array",
+                        "description": "Buildings and the indoor spaces "
+                                       "inside them. A place with an "
+                                       "`address` is a building; its "
+                                       "`rooms` carry layout + manual "
+                                       "device placement/orientation "
+                                       "(user-set entries are "
+                                       "authoritative — echo them "
+                                       "verbatim).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string",
+                                       "description": "place:<slug>"},
+                                "name": {"type": "string"},
+                                "address": {"type": "string"},
+                                "kind": {
+                                    "type": "string",
+                                    "description": "building | room | "
+                                                   "outdoor"},
+                                "parent": {
+                                    "type": "string",
+                                    "description": "building place id "
+                                                   "for rooms"},
+                                "rooms": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string"},
+                                            "name": {"type": "string"},
+                                            "layout": {"type": "object"},
+                                            "devices": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "ref": {
+                                                            "type": "string"},
+                                                        "placement": {
+                                                            "type": "object"},
+                                                        "orientation": {
+                                                            "type": "object"},
+                                                        "manual": {
+                                                            "type": "boolean"},
+                                                    },
+                                                    "required": ["ref"],
+                                                }},
+                                        },
+                                    }},
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0, "maximum": 1},
+                                "rationale": {"type": "string"},
+                            },
+                            "required": ["id"],
+                        }},
                     "device_updates": {
                         "type": "array",
                         "description": "Device identification / "
@@ -443,14 +610,28 @@ EMPTY; a stale or missing sensor contributes nothing, not a vote for
 empty. Weight camera face/person detections, BLE/RSSI of carried
 devices, and audio activity as corroborating signals.
 
-DEVICE IDENTITY — you have room to name things. Registered nodes keep
-their registry anchor (device:<uuid>) but may get a better
-`proposed_name` via device_updates when metadata justifies it
-(hostname, MAC vendor, model). Unknown emitters (MACs, beacon ids,
-advertised names in scans) get device_updates entries keyed by their
-MAC/id with a proposed_name (e.g. "Sarah's iPhone", "living-room TV"),
-a proposed_kind, and a rationale naming the evidence — the platform
-lands these as proposals the user can confirm.
+IDENTITY LAW — one entity per physical device. A MAC, hostname, uuid or
+beacon id is a FINGERPRINT: an emitter matching any fingerprint of an
+existing entity IS that entity — reference it by its canonical
+device:<uuid> (or existing map id), never mint a second id. Emitters in
+scans that match nothing get ONE entry keyed by their best stable id
+(prefer the MAC). Every device entry carries the richest name the
+metadata supports — compose it from MAC vendor (OUI), advertised name,
+hostname, model and observed role/traffic ("thoth-chen — Pi5 radar rig",
+"Sarah's iPhone 15 (Apple, -58 dBm, carried)") — plus a rationale
+naming the evidence.
+
+PLACES & PEOPLE — the account owns at least `person:owner` (the user)
+and `place:home` (the user's address). A place with an `address` is a
+building; rooms inside it are places with `parent` set to the building
+id and carry `layout` plus `devices` with {ref, placement, orientation,
+manual} — user-set placement/orientation is authoritative, echo it
+verbatim. Resolve WHERE things are top-down: current geo evidence
+(GPS/`location.geo.v1`) versus each place's `address` decides which
+building (or "outside — on-street/different address"); inside the
+building, radar/CSI occupancy + BLE RSSI of carried devices narrows to
+a `room`. persons[].location.granularity says how far you resolved:
+indoor_room | building | address | street | unknown.
 
 Output rules for submit_context_form:
   * `analysis` — a few sentences of plain-language reasoning for the
@@ -464,7 +645,14 @@ Output rules for submit_context_form:
     probabilities, descriptors, calibration references).
   * entities[]/relationships[] — WHO/WHERE/WHAT the window implies;
     create when confident, omit when unsupported.
-  * device_updates[] — naming/identification proposals (see above).
+  * devices[] — the deduplicated inventory: every registered node and
+    persistent unknown emitter, fingerprint-keyed, richly named.
+  * persons[] — who is where (person:owner always present), with
+    associated carried devices and resolved location.
+  * places[] — buildings (addressed) and rooms (layout + manual
+    device placement preserved).
+  * device_updates[] — legacy naming/identification proposals; prefer
+    devices[] for new submissions.
   * uncertainties[]/questions[]/notes[] — what you considered but
     couldn't support, the observations that would resolve it, and
     durable facts for future windows. Silent ambiguity is worse than
@@ -533,9 +721,13 @@ def _assemble_payload(request: InferRequest, db: Session,
     if request.devices:
         payload["devices"] = request.devices
     if request.gather_window_s > 0:
-        from .context_builder import build_bundle
-        bundle = build_bundle(db, user_id, time.time(),
-                              request.gather_window_s)
+        from .context_builder import build_bundle, seed_devices
+        now = time.time()
+        # Same anchors the builder maintains: registered device entities
+        # (with MAC/hostname fingerprints) plus person:owner/place:home —
+        # the map the model reasons against is seeded, not empty.
+        seed_devices(db, user_id, now)
+        bundle = build_bundle(db, user_id, now, request.gather_window_s)
         devices = []
         for dev in bundle.get("devices") or []:
             d = dict(dev)
@@ -642,6 +834,62 @@ def _openai_form(request: InferRequest, *,
     raise HTTPException(
         502, "model did not call submit_context_form "
              f"(finish_reason={resp.choices[0].finish_reason})")
+
+
+def _merge_rooms(existing: Any, proposed: List[Any],
+                 fp_idx: Dict[str, str]) -> List[Dict[str, Any]]:
+    """Fold proposed place.rooms[] into the stored set, keyed by room id
+    or name. Device refs resolve through fingerprints (a MAC/beacon ref
+    lands on the canonical device:<uuid>); user-set ``manual`` placement/
+    orientation entries are authoritative and survive any proposal."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in existing or []:
+        if isinstance(r, dict):
+            key = str(r.get("id") or r.get("name") or "").lower()
+            if key:
+                out[key] = dict(r)
+    for r in proposed or []:
+        if not isinstance(r, dict):
+            continue
+        key = str(r.get("id") or r.get("name") or "").lower()
+        if not key:
+            continue
+        prev = out.get(key, {})
+        devs: Dict[str, Dict[str, Any]] = {}
+        for d in prev.get("devices") or []:
+            if isinstance(d, dict):
+                ref = str(d.get("ref") or d.get("device") or "")
+                canon = _resolve_device(fp_idx, ref) or ref
+                if canon:
+                    devs[canon] = {**d, "ref": canon}
+        for d in r.get("devices") or []:
+            if isinstance(d, dict):
+                ref = str(d.get("ref") or d.get("device") or "")
+                canon = _resolve_device(fp_idx, ref) or ref
+                if not canon:
+                    continue
+                base = devs.get(canon, {})
+                base.update({k: v for k, v in d.items()
+                             if v is not None})
+                base["ref"] = canon
+                devs[canon] = base
+        merged = {**prev,
+                  **{k: v for k, v in r.items() if v is not None}}
+        if devs:
+            merged["devices"] = list(devs.values())
+        out[key] = merged
+    return list(out.values())
+
+
+def _load_attrs(db: Session, user_id: int, key: str) -> Dict[str, Any]:
+    row = db.query(ContextEntity).filter(
+        ContextEntity.user_id == user_id,
+        ContextEntity.entity_key == key).first()
+    try:
+        a = json.loads(row.attributes) if row and row.attributes else {}
+    except (TypeError, ValueError):
+        a = {}
+    return a if isinstance(a, dict) else {}
 
 
 def _apply_form(db: Session, user_id: int,
@@ -788,63 +1036,237 @@ def _apply_form(db: Session, user_id: int,
             errors.append({"section": section, "index": 0,
                            "error": exc.detail})
 
-    # 6. device_updates — the model's room to name things. Each
-    # proposal lands as an entity upsert: registry devices keep their
-    # device:<uuid> anchor (name + identification attrs merged into the
-    # existing attributes — apply_entity replaces attributes wholesale,
-    # so we merge first), unknown emitters get a new device:<slug>
-    # entity carrying the MAC in attributes + aliases. Confirmed
-    # entities are protected by apply_entity → skipped.
-    for i, raw in enumerate(form.get("device_updates") or []):
+    fp_idx = _device_fp_index(db, user_id)
+
+    # 6. places — buildings (address) and the rooms inside them. Room
+    # data merges into the building entity's ``rooms`` attr AND lands as
+    # its own place entity (part_of the building) so located_in edges
+    # can point at rooms directly. User-set manual placement/orientation
+    # on room devices is preserved by _merge_rooms.
+    for i, raw in enumerate(form.get("places") or []):
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        pid = str(raw.get("id") or "").strip()
+        if not pid:
+            errors.append({"section": "places", "index": i,
+                           "error": "id required"})
+            continue
+        attrs = _load_attrs(db, user_id, pid)
+        for k in ("address", "kind", "parent", "building", "layout"):
+            if raw.get(k) is not None:
+                attrs[k] = raw[k]
+        rooms = [r for r in (raw.get("rooms") or [])
+                 if isinstance(r, dict)]
+        if rooms:
+            attrs["rooms"] = _merge_rooms(attrs.get("rooms"), rooms,
+                                          fp_idx)
+        if raw.get("confidence") is not None:
+            attrs["infer_confidence"] = raw["confidence"]
+        if raw.get("rationale"):
+            attrs["infer_rationale"] = raw["rationale"]
+        try:
+            ent = apply_entity(db, user_id, EntityIn(
+                id=pid, kind="place",
+                name=str(raw.get("name")) if raw.get("name") else None,
+                attributes=attrs))
+            receipt.setdefault("places", []).append(ent.entity_key)
+        except HTTPException as exc:
+            if not _conflict(exc, "places", i):
+                errors.append({"section": "places", "index": i,
+                               "error": exc.detail})
+            continue
+        except (ValidationError, TypeError) as exc:
+            errors.append({"section": "places", "index": i,
+                           "error": str(exc)[:300]})
+            continue
+        for room in rooms:
+            rid = str(room.get("id") or "").strip()
+            rname = str(room.get("name") or "").strip()
+            if not rid and rname:
+                rid = f"{pid}-" + re.sub(
+                    r"[^a-z0-9]+", "-", rname.lower()).strip("-")
+            if not rid or rid == pid:
+                continue
+            rattrs = _load_attrs(db, user_id, rid)
+            rattrs["building"] = pid
+            if room.get("layout") is not None:
+                rattrs["layout"] = room["layout"]
+            rdevs = []
+            for d in room.get("devices") or []:
+                if isinstance(d, dict):
+                    ref = str(d.get("ref") or d.get("device") or "")
+                    canon = _resolve_device(fp_idx, ref) or ref
+                    if canon:
+                        rdevs.append({**d, "ref": canon})
+            if rdevs:
+                rattrs["devices"] = rdevs
+            try:
+                apply_entity(db, user_id, EntityIn(
+                    id=rid, kind="place",
+                    name=rname or None, attributes=rattrs))
+                rel = apply_relationship(db, user_id, RelationshipIn(
+                    subject=rid, predicate="part_of", object=pid,
+                    confidence=float(raw.get("confidence") or 0.6),
+                    source="openai-context-form"))
+                receipt["relationships"].append(rel.id)
+            except HTTPException as exc:
+                if not _conflict(exc, "places", i):
+                    errors.append({"section": "places", "index": i,
+                                   "error": exc.detail})
+            except (ValidationError, TypeError) as exc:
+                errors.append({"section": "places", "index": i,
+                               "error": str(exc)[:300]})
+
+    # 7. persons — WHO is where. associated_devices resolve through
+    # fingerprints (watch/phone/laptop land on canonical ids); the
+    # resolved location becomes a located_in edge + location.v1 state.
+    for i, raw in enumerate(form.get("persons") or []):
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        pid = str(raw.get("id") or "").strip()
+        if not pid:
+            errors.append({"section": "persons", "index": i,
+                           "error": "id required"})
+            continue
+        attrs = _load_attrs(db, user_id, pid)
+        if raw.get("address"):
+            attrs["address"] = raw["address"]
+        if raw.get("is_user") is not None:
+            attrs["is_user"] = bool(raw["is_user"])
+        assoc = raw.get("associated_devices")
+        if isinstance(assoc, list):
+            attrs["associated_devices"] = [
+                _resolve_device(fp_idx, d) or str(d)
+                for d in assoc if d]
+        if raw.get("activity"):
+            attrs["activity"] = raw["activity"]
+        if raw.get("confidence") is not None:
+            attrs["infer_confidence"] = raw["confidence"]
+        if raw.get("rationale"):
+            attrs["infer_rationale"] = raw["rationale"]
+        try:
+            ent = apply_entity(db, user_id, EntityIn(
+                id=pid, kind="person",
+                name=str(raw.get("name")) if raw.get("name") else None,
+                attributes=attrs))
+            receipt.setdefault("persons", []).append(ent.entity_key)
+        except HTTPException as exc:
+            if not _conflict(exc, "persons", i):
+                errors.append({"section": "persons", "index": i,
+                               "error": exc.detail})
+            continue
+        except (ValidationError, TypeError) as exc:
+            errors.append({"section": "persons", "index": i,
+                           "error": str(exc)[:300]})
+            continue
+        loc = raw.get("location")
+        if isinstance(loc, dict):
+            loc = dict(loc)
+        elif isinstance(loc, str) and loc.strip():
+            loc = {"place": loc.strip()}
+        else:
+            loc = {}
+        target = loc.get("room") or loc.get("place")
+        conf = float(raw.get("confidence") or 0.6)
+        if target and str(target) != pid:
+            try:
+                rel = apply_relationship(db, user_id, RelationshipIn(
+                    subject=pid, predicate="located_in",
+                    object=str(target), confidence=conf,
+                    source="openai-context-form"))
+                receipt["relationships"].append(rel.id)
+            except HTTPException as exc:
+                if not _conflict(exc, "persons", i):
+                    errors.append({"section": "persons", "index": i,
+                                   "error": exc.detail})
+            except (ValidationError, TypeError) as exc:
+                errors.append({"section": "persons", "index": i,
+                               "error": str(exc)[:300]})
+        if loc:
+            try:
+                st = apply_state(db, user_id, StateIn(
+                    key="location.v1", entity_id=pid, value=loc,
+                    confidence=conf,
+                    estimator="openai-context-form/1"))
+                receipt["states"].append(st.to_dict())
+            except HTTPException as exc:
+                if not _conflict(exc, "persons", i):
+                    errors.append({"section": "persons", "index": i,
+                                   "error": exc.detail})
+            except (ValidationError, TypeError) as exc:
+                errors.append({"section": "persons", "index": i,
+                               "error": str(exc)[:300]})
+
+    # 8. devices + legacy device_updates — the model's room to name
+    # things. Each entry lands as an entity upsert on the CANONICAL key:
+    # fingerprints (uuid/mac/hostname/name) resolve refs onto existing
+    # entities BEFORE any slug is minted, so the same hardware can't be
+    # registered twice under different spellings. Registry devices keep
+    # their device:<uuid> anchor; unknown emitters get device:<slug>
+    # carrying the MAC in attributes + aliases. Confirmed entities are
+    # protected by apply_entity → skipped.
+    dev_items = ([(i, raw, "devices")
+                  for i, raw in enumerate(form.get("devices") or [])]
+                 + [(i, raw, "device_updates")
+                    for i, raw in enumerate(
+                        form.get("device_updates") or [])])
+    for i, raw, section in dev_items:
         raw = dict(raw) if isinstance(raw, dict) else {"device": str(raw)}
         ref = str(raw.get("device") or raw.get("id")
                   or raw.get("mac") or "").strip()
-        name = str(raw.get("proposed_name")
-                   or raw.get("name") or "").strip()
+        name = str(raw.get("name") or raw.get("proposed_name")
+                   or "").strip()
         if not ref or not name:
-            errors.append({"section": "device_updates", "index": i,
-                           "error": "device + proposed_name required"})
+            errors.append({"section": section, "index": i,
+                           "error": "device + name required"})
             continue
-        key = ref if ref.startswith("device:") else \
-            "device:" + re.sub(r"[^A-Za-z0-9_.-]+", "-", ref)\
-                             .strip("-").lower()
-        existing = db.query(ContextEntity).filter(
-            ContextEntity.user_id == user_id,
-            ContextEntity.entity_key == key).first()
-        try:
-            attrs = (json.loads(existing.attributes)
-                     if existing and existing.attributes else {})
-        except (TypeError, ValueError):
-            attrs = {}
-        if not isinstance(attrs, dict):
-            attrs = {}
+        extra_attrs = raw.get("attributes")
+        fp_refs = [ref, raw.get("mac"), raw.get("hostname")]
+        if isinstance(extra_attrs, dict):
+            fp_refs += [extra_attrs.get(k) for k in _FP_ATTR_KEYS]
+        fp_hit = _resolve_device(fp_idx, *fp_refs)
+        if fp_hit:
+            key = fp_hit
+        else:
+            key = ref if ref.startswith("device:") else \
+                "device:" + re.sub(r"[^A-Za-z0-9_.-]+", "-", ref)\
+                                 .strip("-").lower()
+        attrs = _load_attrs(db, user_id, key)
         aliases = set(attrs.get("aliases") or [])
         if ref != key:
             aliases.add(ref)
+        for k in ("mac", "hostname", "model"):
+            if isinstance(raw.get(k), str) and raw[k]:
+                aliases.add(raw[k])
+        extra_attrs = raw.get("attributes")
+        if isinstance(extra_attrs, dict):
+            for k, v in extra_attrs.items():
+                if v is not None:
+                    attrs[k] = v
         attrs.update({
             "aliases": sorted(a for a in aliases if a and a != key),
             "proposed_name": name,
             "identified_by": "context_infer",
             "identified_at": time.time(),
         })
-        for k in ("rationale", "mac", "vendor", "hostname"):
-            if raw.get(k):
+        for k in ("rationale", "mac", "vendor", "hostname", "model",
+                  "role", "registered"):
+            if raw.get(k) is not None:
                 attrs[k] = raw[k]
         if raw.get("confidence") is not None:
             attrs["identification_confidence"] = raw["confidence"]
-        kind = str(raw.get("proposed_kind") or "device")
+        kind = str(raw.get("kind") or raw.get("proposed_kind")
+                   or "device")
         try:
             ent = apply_entity(db, user_id, EntityIn(
                 id=key, kind=kind, name=name, attributes=attrs))
             receipt.setdefault("device_updates", []).append({
                 "entity": ent.entity_key, "name": name,
-                "ref": ref})
+                "ref": ref, "resolved": fp_hit})
         except HTTPException as exc:
-            if not _conflict(exc, "device_updates", i):
-                errors.append({"section": "device_updates", "index": i,
+            if not _conflict(exc, section, i):
+                errors.append({"section": section, "index": i,
                                "error": exc.detail})
         except (ValidationError, TypeError) as exc:
-            errors.append({"section": "device_updates", "index": i,
+            errors.append({"section": section, "index": i,
                            "error": str(exc)[:300]})
 
     if skipped:

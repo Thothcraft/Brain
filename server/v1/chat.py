@@ -49,7 +49,17 @@ router = APIRouter(prefix="/chat", tags=["v1", "chat"])
 
 _DEFAULT_MODEL = "gpt-4o-mini"
 _ADVANCED_MODEL = "gpt-4o"
-_TIERS = ("standard", "advanced")
+# Numbered user-facing model picks — the app/hub chooser sends "4"|"5"|"6";
+# each maps to a concrete chat model, env-overridable per pick
+# (CHAT_MODEL_4 / CHAT_MODEL_5 / CHAT_MODEL_6).
+_TIER_MODELS = {
+    "4": "gpt-4o",
+    "5": "gpt-5",
+    "6": "gpt-6",
+}
+_TIERS = ("standard", "advanced", *_TIER_MODELS)
+# Picks that get the widened context bundle + bigger message budget.
+_WIDE_TIERS = frozenset({"advanced", "5", "6"})
 _MAX_HISTORY = 12
 _MAX_HISTORY_CHARS = 2000
 _MAX_ATTACHMENTS = 5
@@ -87,9 +97,10 @@ class ChatRequest(BaseModel):
     include_context: bool = True
     model: str = Field(
         default="standard",
-        description="Answer tier: 'standard' (fast, default) or "
-                    "'advanced' (gpt-4o-class reasoning + a much larger "
-                    "context bundle). Bogus tier → 422.")
+        description="Model pick: '4'|'5'|'6' (user-facing chooser — "
+                    "4 = gpt-4o-class fast, 5/6 = deeper reasoning + a "
+                    "much larger context bundle) or the legacy tiers "
+                    "'standard'/'advanced'. Bogus pick → 422.")
 
 
 class TtsRequest(BaseModel):
@@ -120,7 +131,7 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
             battrs = json.loads(builder_ent.attributes)
         except (TypeError, ValueError):
             battrs = {}
-    advanced = detail == "advanced"
+    advanced = detail in _WIDE_TIERS
     builder: Dict[str, Any] = {
         "builds": battrs.get("builds", 0),
         "last_build_at": battrs.get("last_build_at"),
@@ -269,6 +280,9 @@ def _model_for_tier(tier: str) -> str:
                 or os.getenv("MODEL_NAME") or _DEFAULT_MODEL)
     if tier == "advanced":
         return os.getenv("CHAT_MODEL_ADVANCED") or _ADVANCED_MODEL
+    if tier in _TIER_MODELS:
+        return (os.getenv(f"CHAT_MODEL_{tier}")
+                or _TIER_MODELS[tier])
     raise HTTPException(422, f"unknown model tier {tier!r} "
                              f"— one of {list(_TIERS)}")
 
@@ -368,7 +382,7 @@ async def chat(
             "role": "user",
             "content": "[context bundle]\n"
                        + json.dumps(context_used, default=str)
-                       [:120_000 if tier == "advanced" else 60_000]})
+                       [:120_000 if tier in _WIDE_TIERS else 60_000]})
         messages.append({"role": "assistant",
                          "content": "Understood — I will answer only from "
                                     "that bundle plus what you send."})

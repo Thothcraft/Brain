@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from server.auth import get_current_user
 from server.db import (
     Base, ContextEntity, ContextEvent, ContextEvidence,
-    ContextRelationship, ContextState, User, get_db,
+    ContextRelationship, ContextState, Device, User, get_db,
 )
 from server.v1.context import router as context_router
 from server.v1.context_infer import router as infer_router
@@ -632,6 +632,107 @@ def test_device_updates_land_as_entity_proposals(api, monkeypatch):
     assert led.name == "kitchen LED strip"
     assert attrs["identified_by"] == "context_infer"
     assert "AA:BB:CC:DD:EE:FF" in attrs["aliases"]
+
+
+def test_devices_section_resolves_mac_to_registered_anchor(api,
+                                                           monkeypatch):
+    """devices[] keyed by a registered MAC lands on device:<uuid> —
+    one entity per physical device, never a MAC-slug fork."""
+    client, session, _ = api
+    session.add(Device(userId=1, device_uuid="uuid-radar-pi",
+                       device_name="thoth-chen", device_type="thoth",
+                       mac_address="d8:3a:dd:11:22:33"))
+    session.commit()
+    form = {"summary": "s", "states": [],
+            "devices": [
+                {"device": "D8:3A:DD:11:22:33",
+                 "name": "thoth-chen — Pi5 radar rig",
+                 "role": "radar-node", "vendor": "Raspberry Pi",
+                 "confidence": 0.9},
+                {"device": "AA:BB:CC:DD:EE:FF",
+                 "name": "kitchen LED strip", "kind": "device",
+                 "confidence": 0.7}]}
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: form)
+    r = client.post("/v1/context/infer", json=REQ)
+    assert r.status_code == 200
+    updates = {u["ref"]: u for u in r.json()["receipt"]["device_updates"]}
+    assert updates["D8:3A:DD:11:22:33"]["entity"] == \
+        "device:uuid-radar-pi"
+    assert updates["D8:3A:DD:11:22:33"]["resolved"] == \
+        "device:uuid-radar-pi"
+    # exactly one entity per piece of hardware — no MAC-slug fork
+    keys = {e.entity_key for e in
+            session.query(ContextEntity).filter_by(kind="device").all()}
+    assert keys == {"device:uuid-radar-pi",
+                    "device:aa-bb-cc-dd-ee-ff"}
+    ent = session.query(ContextEntity).filter_by(
+        entity_key="device:uuid-radar-pi").one()
+    attrs = json.loads(ent.attributes)
+    assert ent.name == "thoth-chen — Pi5 radar rig"
+    assert attrs["role"] == "radar-node"
+
+
+def test_persons_and_places_sections(api, monkeypatch):
+    """The structured form: place building→room hierarchy, person
+    associated devices resolved via fingerprints, located_in edge +
+    location.v1 state for the person."""
+    client, session, _ = api
+    session.add(Device(userId=1, device_uuid="uuid-radar-pi",
+                       device_name="thoth-chen", device_type="thoth",
+                       mac_address="d8:3a:dd:11:22:33"))
+    session.commit()
+    form = {"summary": "s", "states": [],
+            "places": [{
+                "id": "place:home", "name": "home",
+                "address": "43 Hillsmount", "kind": "building",
+                "rooms": [{"id": "place:home-living",
+                           "name": "living room",
+                           "layout": {"dims_m": [5, 4]},
+                           "devices": [{"ref": "device:uuid-radar-pi",
+                                        "placement": {"corner": "ne"},
+                                        "manual": True}]}],
+                "confidence": 0.8}],
+            "persons": [{
+                "id": "person:owner", "name": "Gad", "is_user": True,
+                "address": "43 Hillsmount",
+                "associated_devices": ["D8:3A:DD:11:22:33"],
+                "location": {"place": "place:home",
+                             "room": "place:home-living",
+                             "granularity": "indoor_room"},
+                "confidence": 0.8}]}
+    monkeypatch.setattr(infer, "_openai_form", lambda req, **_: form)
+    r = client.post("/v1/context/infer", json=REQ)
+    assert r.status_code == 200
+    rec = r.json()["receipt"]
+    assert rec["places"] == ["place:home"]
+    assert rec["persons"] == ["person:owner"]
+
+    home = session.query(ContextEntity).filter_by(
+        entity_key="place:home").one()
+    hattrs = json.loads(home.attributes)
+    assert hattrs["address"] == "43 Hillsmount"
+    assert hattrs["rooms"][0]["devices"][0]["ref"] == \
+        "device:uuid-radar-pi"          # manual placement survives
+    assert hattrs["rooms"][0]["devices"][0]["manual"] is True
+
+    room = session.query(ContextEntity).filter_by(
+        entity_key="place:home-living").one()
+    assert room.kind == "place"
+    rel = session.query(ContextRelationship).filter_by(
+        subject="place:home-living", predicate="part_of").one()
+    assert rel.object == "place:home"
+
+    owner = session.query(ContextEntity).filter_by(
+        entity_key="person:owner").one()
+    oattrs = json.loads(owner.attributes)
+    assert oattrs["address"] == "43 Hillsmount"
+    assert oattrs["associated_devices"] == ["device:uuid-radar-pi"]
+    loc = session.query(ContextRelationship).filter_by(
+        subject="person:owner", predicate="located_in").one()
+    assert loc.object == "place:home-living"   # deepest place wins
+    st = session.query(ContextState).filter_by(
+        state_key="location.v1", entity_id="person:owner").one()
+    assert json.loads(st.value)["granularity"] == "indoor_room"
 
 
 def test_options_and_last_endpoints(api, monkeypatch):

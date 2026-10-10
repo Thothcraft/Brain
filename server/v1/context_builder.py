@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -215,7 +216,12 @@ def map_snapshot(db: Session, user_id: int,
 
 
 def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
-    """Devices come from the registry, not the LLM — stable anchors."""
+    """Devices come from the registry, not the LLM — stable anchors.
+
+    MAC and hostname join the alias set so a fingerprint (``aa:bb:…``,
+    ``rpi-e1``) proposed by either model resolves onto the registered
+    ``device:<uuid>`` anchor instead of forking a second entity.
+    """
     seeded = []
     for dev in db.query(Device).filter(Device.userId == user_id).all():
         key = f"device:{dev.device_uuid}"
@@ -236,7 +242,17 @@ def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
             continue
         attrs = _entity_attrs(ent)
         aliases = set(attrs.get("aliases", []))
-        aliases.update({dev.device_uuid, dev.device_name})
+        aliases.update({dev.device_uuid, dev.device_name, dev.mac_address})
+        if dev.hardware_info:
+            try:
+                hw = json.loads(dev.hardware_info)
+                if isinstance(hw, dict):
+                    aliases.add(hw.get("hostname"))
+                    aliases.add(hw.get("mac"))
+                    aliases.add(hw.get("mac_address"))
+            except (TypeError, ValueError):
+                pass
+        aliases.update({m for m in (_norm_mac(a) for a in aliases) if m})
         attrs.update({"aliases": sorted(a for a in aliases if a),
                       "device_type": dev.device_type,
                       "registry": True, "confidence": 1.0})
@@ -245,8 +261,133 @@ def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
         ent.retired_at = None
         ent.attributes = json.dumps(attrs)
         seeded.append(key)
+    # Account anchors — every user owns at least one person (themselves)
+    # and one indoor place (their address). Seeded unconfirmed so the
+    # model refines/renames them as site/geo evidence lands.
+    owner = db.query(ContextEntity).filter(
+        ContextEntity.user_id == user_id,
+        ContextEntity.entity_key == "person:owner").first()
+    if owner is None:
+        name = None
+        try:
+            user = db.query(User).filter(User.userId == user_id).first()
+            if user is not None:
+                name = (user.username or (user.email or "").split("@")[0]
+                        or None)
+        except Exception:
+            name = None
+        owner = ContextEntity(
+            user_id=user_id, entity_key="person:owner", kind="person",
+            name=name or "owner",
+            attributes=json.dumps(
+                {"owner": True, "seeded": True,
+                 "associated_devices": [], "last_seen": now}))
+        db.add(owner)
+    else:
+        attrs = _entity_attrs(owner)
+        attrs["last_seen"] = now
+        owner.attributes = json.dumps(attrs, default=str)
+        owner.retired_at = None
+    home = db.query(ContextEntity).filter(
+        ContextEntity.user_id == user_id,
+        ContextEntity.entity_key == "place:home").first()
+    if home is None:
+        home = ContextEntity(
+            user_id=user_id, entity_key="place:home", kind="place",
+            name="home",
+            attributes=json.dumps(
+                {"seeded": True, "role": "primary_address",
+                 "rooms": [], "last_seen": now}))
+        db.add(home)
+    else:
+        attrs = _entity_attrs(home)
+        attrs["last_seen"] = now
+        home.attributes = json.dumps(attrs, default=str)
+        home.retired_at = None
+    seeded += ["person:owner", "place:home"]
     db.commit()
     return seeded
+
+
+# ---------------------------------------------------------------------------
+# Device fingerprints — one entity per physical device
+# ---------------------------------------------------------------------------
+
+_MAC_RE = re.compile(r"(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}", re.I)
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+# Attribute keys that hold hardware identifiers — folded into aliases so
+# any later proposal naming the same hardware resolves, not duplicates.
+_FP_ATTR_KEYS = ("mac", "mac_address", "bluetooth_address", "bt_mac",
+                 "wifi_mac", "bssid", "uuid", "serial", "hostname")
+
+
+def _norm_mac(value: Any) -> Optional[str]:
+    """Canonical MAC (lowercase, ``:`` separators) or None."""
+    if not isinstance(value, str):
+        return None
+    m = _MAC_RE.search(value.lower().replace("-", ":"))
+    return m.group(0) if m else None
+
+
+def _fingerprints(*values: Any) -> List[str]:
+    """Fingerprint keys for a ref/attr value: mac:/uuid:/name:/id:."""
+    out: List[str] = []
+    for v in values:
+        if not isinstance(v, str) or not v.strip():
+            continue
+        s = v.strip().lower()
+        mac = _norm_mac(s)
+        if mac:
+            out.append(f"mac:{mac}")
+        else:
+            for m in _UUID_RE.findall(s):
+                out.append(f"uuid:{m}")
+            s2 = s.split(":", 1)[-1] if s.startswith(("device:", "ble:",
+                                                      "wifi:", "bt:")) else s
+            out.append(f"id:{s2}")
+            out.append(f"name:{s2}")
+    return out
+
+
+def _device_fp_index(db: Session, user_id: int) -> Dict[str, str]:
+    """fingerprint -> canonical entity_key, from the live map (device
+    kind only — persons/places sharing a hostname is not a match) plus
+    the registry (so unseeded ``device:<uuid>`` anchors still resolve)."""
+    idx: Dict[str, str] = {}
+    for e in _live_entities(db, user_id):
+        if e.kind != "device":
+            continue
+        attrs = _entity_attrs(e)
+        refs = [e.entity_key, e.name] + list(attrs.get("aliases") or [])
+        refs += [attrs.get(k) for k in _FP_ATTR_KEYS]
+        for fp in _fingerprints(*refs):
+            # first claim wins — registered anchors were seeded earlier
+            idx.setdefault(fp, e.entity_key)
+    for dev in db.query(Device).filter(Device.userId == user_id).all():
+        key = f"device:{dev.device_uuid}"
+        refs = [dev.device_uuid, dev.device_name, dev.mac_address, key]
+        if dev.hardware_info:
+            try:
+                hw = json.loads(dev.hardware_info)
+                if isinstance(hw, dict):
+                    refs += [hw.get("hostname"), hw.get("mac"),
+                             hw.get("mac_address")]
+            except (TypeError, ValueError):
+                pass
+        for fp in _fingerprints(*refs):
+            idx.setdefault(fp, key)
+    return idx
+
+
+def _resolve_device(fp_idx: Dict[str, str], *refs: Any) -> Optional[str]:
+    """Best-effort map of a device ref (id, uuid, MAC, hostname, beacon
+    id, name) onto the canonical entity_key — None when nothing matches."""
+    for fp in _fingerprints(*refs):
+        hit = fp_idx.get(fp)
+        if hit:
+            return hit
+    return None
 
 
 DESCRIPTOR_KEY = "context.descriptors.v1"
@@ -338,6 +479,7 @@ def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
     machine a uuid is (name, type, MAC, hardware) and can tell a
     registered node from an unknown emitter seen only in scans."""
     out = []
+    seen_fp: Dict[str, str] = {}
     for dev in db.query(Device).filter(Device.userId == user_id).all():
         hw: Dict[str, Any] = {}
         if dev.hardware_info:
@@ -347,8 +489,9 @@ def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
                     hw = parsed
             except (TypeError, ValueError):
                 hw = {}
-        out.append({
-            "entity": f"device:{dev.device_uuid}",
+        key = f"device:{dev.device_uuid}"
+        entry: Dict[str, Any] = {
+            "entity": key,
             "uuid": dev.device_uuid,
             "name": dev.device_name,
             "type": dev.device_type,
@@ -359,7 +502,18 @@ def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
             "hardware": {k: hw.get(k) for k in
                          ("hostname", "model", "os", "platform",
                           "chip") if hw.get(k)},
-        })
+        }
+        # Two registry rows with the same fingerprint = the same physical
+        # device double-registered — flag the earlier entry as canonical
+        # so the model never treats them as two machines.
+        for fp in _fingerprints(dev.device_uuid, dev.mac_address,
+                                hw.get("mac"), hw.get("mac_address"),
+                                hw.get("hostname")):
+            if fp in seen_fp:
+                entry["duplicate_of"] = seen_fp[fp]
+                break
+            seen_fp[fp] = key
+        out.append(entry)
     return out
 
 
@@ -475,7 +629,23 @@ def _map_tool_schema() -> Dict[str, Any]:
                                                     "better than its id"},
                             "aliases": {"type": "array",
                                         "items": {"type": "string"}},
-                            "attributes": {"type": "object"},
+                            "attributes": {
+                                "type": "object",
+                                "description": "Kind-shaped facts. "
+                                    "device: mac, vendor, hostname, "
+                                    "inferred_model, role. person: "
+                                    "address (home address), "
+                                    "associated_devices (carried "
+                                    "watch/phone/laptop entity ids). "
+                                    "place: address (buildings), "
+                                    "building (parent place id for "
+                                    "rooms), rooms[] each "
+                                    "{name, layout, devices[] each "
+                                    "{ref, placement, orientation, "
+                                    "manual}} — user-set "
+                                    "placement/orientation is "
+                                    "authoritative, carry it "
+                                    "forward verbatim."},
                             "confidence": conf,
                         },
                         "required": ["id", "kind", "confidence"]}},
@@ -542,6 +712,34 @@ entities (keep the raw MAC/beacon id in `aliases`). You may also refine
 a known device: propose the same device:<uuid> id with a better `name`
 or identifying `attributes` (hostname, MAC vendor, model) — the
 registry remains the anchor, never create a second entity for it.
+
+IDENTITY LAW — one entity per physical device. A MAC, hostname, uuid,
+or beacon id is a FINGERPRINT: any emitter matching a fingerprint of an
+existing entity (check `map` aliases and `devices` uuid/mac/hardware)
+IS that entity — reuse its id, add the new identifier to `aliases`,
+and fold richer metadata into `attributes` (vendor from the MAC OUI,
+model/role from advertised name + observed traffic). Never propose a
+second entity for hardware already on the map; never create
+`device:<mac-slug>` beside a `device:<uuid>` carrying that MAC. When
+two map entities are provably one device, use `merges` — never let
+duplicates stand. Refine `name` whenever metadata identifies the thing
+better ("b8:27:eb" → "thoth-april — living-room Pi3").
+
+PLACES — a `place:` with an `address` is a building; `place:`s inside
+it (rooms) carry `building` (the parent's id) plus `layout` and
+`devices` (each {ref, placement, orientation, manual}) — user-set
+placement/orientation entries are authoritative, preserve them
+verbatim. Current `location.geo.v1`/geo evidence versus the place
+address decides where things ARE: a device/person whose geo sits
+outside every known address is `located_in` a different/unknown place
+(on-street/away), and inside the address, radar/CSI/BLE evidence
+narrows it to a specific room.
+
+PERSONS — the account always owns at least `person:owner` (the user,
+pre-seeded) and `place:home` (their address). Track who the carried
+devices belong to via `associated_devices` (watch, phone, laptop), and
+keep `presence.v1`/`location.v1` states + `located_in` edges current
+for every person the evidence supports.
 
 You get:
   * `scenes` — the latest uplink per node with TEXTUAL cues already
@@ -756,6 +954,17 @@ def _upsert_entity(db: Session, user_id: int, raw: Dict[str, Any],
         for k, v in extra.items():
             if k not in ("aliases", "registry", "pending"):
                 attrs[k] = v
+        # Hardware identifiers become aliases — any later proposal naming
+        # the same MAC/hostname/uuid resolves onto THIS entity instead of
+        # forking a duplicate.
+        if ent.kind == "device":
+            for k in _FP_ATTR_KEYS:
+                v = extra.get(k)
+                if isinstance(v, str) and v:
+                    aliases.add(v)
+                    mac = _norm_mac(v)
+                    if mac:
+                        aliases.add(mac)
     prev = attrs.get("confidence")
     c = float(raw.get("confidence") or 0)
     attrs["confidence"] = round(c if prev is None else 0.7 * prev + 0.3 * c, 3)
@@ -809,6 +1018,7 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
 
     entities = _live_entities(db, user_id)
     idx = _alias_index(entities)
+    fp_idx = _device_fp_index(db, user_id)
 
     # 1. entities — resolve proposals onto existing ids first
     for raw in update.get("entities") or []:
@@ -817,7 +1027,18 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
                                        "reason": "low confidence"})
             continue
         raw = dict(raw)
-        resolved = _resolve(idx, raw.get("id"))
+        attrs = raw.get("attributes") if isinstance(
+            raw.get("attributes"), dict) else {}
+        # Device fingerprints outrank plain alias resolution: a proposal
+        # that names the same MAC/hostname/uuid as an existing device IS
+        # that device, whatever id slug the model invented. Device-only —
+        # a person/place must never collapse onto hardware.
+        fp_hit = None
+        if raw.get("kind") == "device" or _norm_mac(str(raw.get("id"))):
+            fp_hit = _resolve_device(
+                fp_idx, raw.get("id"), *(raw.get("aliases") or []),
+                *(attrs.get(k) for k in _FP_ATTR_KEYS))
+        resolved = fp_hit or _resolve(idx, raw.get("id"))
         if resolved != raw.get("id"):
             raw["aliases"] = list(raw.get("aliases") or []) + [raw["id"]]
             raw["id"] = resolved
