@@ -252,6 +252,85 @@ def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
 DESCRIPTOR_KEY = "context.descriptors.v1"
 MAX_SCENES = 12
 
+# Dataset-derived empty-vs-occupied reference for the physical fields
+# nodes actually uplink. Source: E1 multilink capture (desktop/radar/E1,
+# Oct 2026) — BGT60TR13C mmWave @ ~10 Hz + dual-link CSI, 5 s windows,
+# 2154 empty / 2160 occupied windows, RF cv_acc ~1.0.
+# A prior for THIS sensor class, not per-site calibration: absolute map
+# means are mount-dependent (the legacy rig reversed ra_mean's
+# direction) — the transferable shape is that medians barely move while
+# occupancy lives in the window TAIL (snr_max spikes, std90 spreads
+# widen ~2x, ra/re/xy means lift ~+0.1-0.2 log-power).
+RADAR_REFERENCE: Dict[str, Any] = {
+    "dataset": "e1_multilink_5s",
+    "sensor": "BGT60TR13C mmWave radar + Wi-Fi CSI",
+    "windows": {"empty": 2154, "occupied": 2160, "window_s": 5,
+                "frame_hz": 10},
+    "how_to_read": (
+        "empty-room stats are TIGHT (snr_db.mean p95<8, max<8.3; "
+        "snr_db.max never >~13); occupancy shows in the TAIL of the "
+        "window — snr_db.max spikes >15-40 dB, ra/re/xy map means lift "
+        "~+0.1-0.2, *std90 spreads widen ~2x. A modest snr mean alone "
+        "is weak (AUC~0.7): call occupied on spikes + map lifts, not a "
+        "fixed median threshold. Compare a node's lift vs ITS OWN empty "
+        "baseline — absolute values shift with mounting."),
+    "fields": {
+        # node `fields.snr_db.{mean,max}` == window snr_mean/snr_max
+        "snr_db.mean": {"empty": {"mean": 7.62, "std": 0.20,
+                                  "p95": 7.93, "max": 8.28},
+                        "occupied": {"p50": 7.80, "p75": 8.47,
+                                     "p95": 22.37, "max": 31.69},
+                        "d": 0.63, "auc": 0.71},
+        "snr_db.max": {"empty": {"mean": 10.07, "std": 0.62,
+                                  "p95": 11.23, "max": 12.88},
+                       "occupied": {"p50": 10.59, "p75": 17.77,
+                                    "p95": 40.60, "max": 51.89},
+                       "d": 0.80, "auc": 0.71},
+        # range-azimuth / range-elevation / xy map window means
+        "ra_mean": {"empty": {"p50": 5.693, "p95": 5.734,
+                              "max": 5.750},
+                    "occupied": {"p50": 5.830, "p75": 5.888,
+                                 "p95": 5.982},
+                    "d": 3.08, "auc": 1.00},
+        "re_mean": {"empty": {"p50": 5.788, "p95": 5.808},
+                    "occupied": {"p50": 5.926, "p75": 5.970,
+                                 "p95": 6.080},
+                    "d": 2.91, "auc": 0.99},
+        "xy_mean": {"empty": {"p50": 3.400, "p95": 3.412},
+                    "occupied": {"p50": 3.446, "p75": 3.476,
+                                 "p95": 3.506},
+                    "d": 2.04, "auc": 0.94},
+        "re_p90": {"empty": {"p50": 7.822, "p95": 8.058},
+                   "occupied": {"p50": 8.316, "p75": 8.417,
+                                "p95": 8.654},
+                   "d": 1.98, "auc": 0.92},
+        "xy_peak": {"empty": {"p50": 14.184, "p95": 14.202},
+                    "occupied": {"p50": 14.212, "p75": 14.218,
+                                 "p95": 14.223},
+                    "d": 1.88, "auc": 0.90},
+        # within-window spread of the map tails — ~2x wider when occupied
+        "re_std90": {"empty": {"p50": 0.108, "p95": 0.113},
+                     "occupied": {"p50": 0.220, "p75": 0.330,
+                                  "p95": 0.873},
+                     "d": 1.14, "auc": 0.97},
+        "xy_std90": {"empty": {"p50": 0.108, "p95": 0.112},
+                     "occupied": {"p50": 0.145, "p75": 0.185,
+                                  "p95": 0.444},
+                     "d": 0.99, "auc": 0.98},
+        "rd_mean": {"empty": {"p50": 6.597, "p95": 6.613},
+                    "occupied": {"p50": 6.610, "p75": 6.624,
+                                 "p95": 6.715},
+                    "d": 0.82},
+        # CSI amplitude mean DROPPED under occupancy on this rig
+        # (shadowing) — direction flips with link geometry, treat as
+        # magnitude-of-change evidence only
+        "csi_amp_mean": {"empty": {"p50": 27.65, "p95": 38.12},
+                         "occupied": {"p50": 24.81, "p95": 29.91},
+                         "d": -1.54, "auc": 0.88,
+                         "direction": "mount-dependent"},
+    },
+}
+
 
 def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
     """The device registry, keyed by the map entity id each scene's
@@ -357,6 +436,7 @@ def build_bundle(db: Session, user_id: int, now: float,
         "scenes": _scenes(uplinks, now),
         "descriptors": aggregates,
         "map": map_snapshot(db, user_id, now),
+        "reference": {"radar_occupancy": RADAR_REFERENCE},
     }
 
 
@@ -480,7 +560,12 @@ You get:
     age. `location.geo.v1` entries describe where a node is (lat/lon,
     postal_code, city, site).
   * `devices` — the device registry (see above); `map` — the current
-    semantic map snapshot you are updating.
+    semantic map snapshot you are updating; `reference` — measured
+    empty-vs-occupied stats for the radar/CSI fields (E1 rig): treat as
+    the default prior — absolute map means are mount-dependent, so weigh
+    a node's lift vs ITS OWN empty baseline; the transferable shape is
+    occupancy-in-the-tail (snr spikes + std90 spread + map-mean lifts),
+    not a higher median.
 Typical keys: occupancy/presence probabilities, radar SNR and range,
 CSI amplitude variance, BLE/Wi-Fi RSSI sightings (with decoded beacon
 identities), IMU motion variance, face/person detections, audio level,
@@ -490,10 +575,13 @@ A `site` on a node's location is a user-set address — anchor it: create
 or reuse a `place:` entity for the site (e.g. place:home named after
 the address), relate the reporting `device:` with `located_in`, and
 relate other persons/devices the node observes there when the evidence
-supports it. When radar/CSI fields are flat (low variance, no target
-SNR, zero emitters) while the node is fresh and reporting, that is
-positive evidence the space is EMPTY — set occupancy.v1
-{"occupied": false} on the place with matching confidence.
+supports it. When radar/CSI fields are flat — snr_db.max under ~13 dB,
+tight range profile, near-zero CSI variance, zero emitters — while the
+node is fresh and reporting, that is positive evidence the space is
+EMPTY — set occupancy.v1 {"occupied": false} on the place with matching
+confidence. (Reference: on the E1 rig an empty room reads snr mean
+~7.6 dB, p95 <8; occupancy appears as window snr_max spikes >15-40 dB
+and ra/re/xy map lifts — see `reference.radar_occupancy`.)
 
 Update the map by calling update_context_map exactly once:
   * Reuse existing entity ids from `map` whenever they match — never

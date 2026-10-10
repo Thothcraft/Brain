@@ -423,16 +423,25 @@ For each request you receive some of:
     `map` — the current semantic map (entities carry `confirmed`:
     user-confirmed facts you must not contradict); `context` — caller-
     supplied account/device/digital context; `history` — prior windows.
+  * `reference` — built-in dataset prior: measured empty-vs-occupied
+    stats for the radar/CSI fields (E1 rig, BGT60TR13C). When the
+    caller left `calibration` empty it is seeded FROM this reference —
+    treat it as the default class distributions.
   * `coverage` — if non-empty, fill only the named form sections.
 
-READING OCCUPANCY. Radar `snr_db` sustained above ~4-6 dB with a stable
-xy_map peak = a present target; flat range profiles, near-zero CSI
-variance and no emitter churn while the reporting sensors are fresh
-(small age_s) is positive evidence the space is EMPTY. Absence of
-evidence is not absence unless the relevant sensor was live — a stale
-or missing sensor contributes nothing, not a vote for empty. Weight
-camera face/person detections, BLE/RSSI of carried devices, and audio
-activity as corroborating signals.
+READING OCCUPANCY. The `reference` prior (E1 rig, BGT60TR13C @ ~10 Hz,
+5 s windows, ~2150 windows per class): an EMPTY room reads snr mean
+~7.6 dB and stays TIGHT (p95 <8, max 8.3; window snr_max ~10 dB, never
+>~13); OCCUPANCY lives in the tail — window snr_max spikes >15-40 dB
+(occupied p95 ~40.6), snr mean p95 ~22 dB, and the ra/re/xy map means
+lift ~+0.1-0.2 log-power while *std90 spreads widen ~2x. A modest
+median snr alone is weak evidence (AUC ~0.7 — medians barely move);
+call occupied on peak spikes + map-mean lifts vs the node's own empty
+baseline, not on a fixed threshold. Flat fields while the reporting
+sensors are fresh (small age_s) is positive evidence the space is
+EMPTY; a stale or missing sensor contributes nothing, not a vote for
+empty. Weight camera face/person detections, BLE/RSSI of carried
+devices, and audio activity as corroborating signals.
 
 DEVICE IDENTITY — you have room to name things. Registered nodes keep
 their registry anchor (device:<uuid>) but may get a better
@@ -538,6 +547,13 @@ def _assemble_payload(request: InferRequest, db: Session,
         payload["map"] = bundle.get("map") or {}
         payload["gathered_window_s"] = bundle.get("window_s")
         payload["evidence_rows"] = bundle.get("evidence_rows")
+        reference = bundle.get("reference") or {}
+        if reference:
+            payload["reference"] = reference
+            # The dataset prior is the default calibration — a caller-
+            # supplied calibration always wins.
+            if not payload["calibration"]:
+                payload["calibration"] = reference
     return payload
 
 
