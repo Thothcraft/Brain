@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -31,7 +32,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from server.auth import get_current_user, get_scoped_principal
-from server.db import User, get_db
+from server.db import ContextEntity, User, get_db
 from server.inference_auth import inference_call, inference_status
 from .context import (
     EntityIn, EvidenceIn, RelationshipIn, StateIn,
@@ -43,6 +44,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/context", tags=["v1", "context"])
 
 _DEFAULT_MODEL = "gpt-4o-mini"
+
+# Models the caller may pick explicitly (the "meter" the user sets —
+# gpt-4o class or better, all ≥128k context). Env-overridable comma list.
+_MODEL_SET_ENV = "CONTEXT_INFER_MODELS"
+_DEFAULT_MODEL_SET = (
+    "gpt-4o-mini", "gpt-4o",
+    "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+    "o4-mini",
+)
+
+# Auditable trail on the ``infer:last`` system entity — what the model
+# saw and what it produced, for the UI.
+LAST_ENTITY = "infer:last"
+INPUT_KEEP = 24000
+OUTPUT_KEEP = 12000
+SEEN_KEEP = 220000  # response echo budget
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +115,28 @@ class InferRequest(BaseModel):
                     " fast), 'standard' (default), 'deep' (harder "
                     "reconciliation; billed the same per call but "
                     "uses the CONTEXT_INFER_MODEL_DEEP model)")
+    model: Optional[str] = Field(
+        default=None,
+        description="User-set explicit model id — overrides the tier "
+                    "route. Must be one of the allowed set "
+                    "(GET /context/infer/options); 422 otherwise.")
+    devices: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Caller-supplied device roster — which device is "
+                    "which. Entries carry {entity/uuid/name/type/mac/"
+                    "hardware/association}; association 'registered' "
+                    "(or 'user') marks account-owned nodes, anything "
+                    "else (e.g. 'unknown', 'observed') marks emitters "
+                    "only seen in scans.")
+    gather_window_s: float = Field(
+        default=0.0, ge=0.0, le=86400.0,
+        description="When >0, Brain assembles the comprehensive bundle "
+                    "server-side from stored evidence: the registered "
+                    "device roster, the latest per-node scene uplinks "
+                    "(sensor text, cues, fields incl. radar snr_db/"
+                    "range/xy stats, radio scans, digital context), "
+                    "per-key descriptor aggregates and the current "
+                    "context map — the model sees all of it.")
     entity_hint: Optional[str] = Field(
         default=None,
         description="Canonical entity id the window concerns "
@@ -105,6 +144,12 @@ class InferRequest(BaseModel):
     dry_run: bool = Field(
         default=False,
         description="Return the predicted form without writing it")
+
+
+def _allowed_models() -> List[str]:
+    raw = os.getenv(_MODEL_SET_ENV, "")
+    items = [m.strip() for m in raw.split(",") if m.strip()]
+    return items or list(_DEFAULT_MODEL_SET)
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +178,15 @@ def _ctx_tool_schema() -> Dict[str, Any]:
                         "type": "string",
                         "description": "One sentence: what the window "
                                        "most likely depicts."},
+                    "analysis": {
+                        "type": "string",
+                        "description": "A short plain-language "
+                                       "narrative of your reasoning — "
+                                       "which sensors drove the call, "
+                                       "which devices you identified, "
+                                       "what stayed ambiguous. This is "
+                                       "the text the UI shows the "
+                                       "user."},
                     "entities": {
                         "type": "array",
                         "description": "Canonical objects the window "
@@ -274,6 +328,49 @@ def _ctx_tool_schema() -> Dict[str, Any]:
                             },
                             "required": ["subject", "text"],
                         }},
+                    "device_updates": {
+                        "type": "array",
+                        "description": "Device identification / "
+                                       "naming proposals — your room "
+                                       "to update device names from "
+                                       "MAC vendors, advertised names, "
+                                       "hostnames or other metadata. "
+                                       "Reference a registered device "
+                                       "by its entity id (device:<uuid>) "
+                                       "or uuid; reference an unknown "
+                                       "emitter by its MAC/beacon id.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "device": {
+                                    "type": "string",
+                                    "description": "device:<uuid>, raw "
+                                                   "uuid, MAC or beacon "
+                                                   "id being named"},
+                                "proposed_name": {
+                                    "type": "string",
+                                    "description": "human-readable name "
+                                                   "the evidence "
+                                                   "supports"},
+                                "proposed_kind": {
+                                    "type": "string",
+                                    "description": "device | object | "
+                                                   "person — what the "
+                                                   "emitter most likely "
+                                                   "is (phone, watch, "
+                                                   "TV, beacon...)"},
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0, "maximum": 1},
+                                "rationale": {
+                                    "type": "string",
+                                    "description": "why — the MAC "
+                                                   "vendor, advertised "
+                                                   "name, hostname, "
+                                                   "behavioral pattern"},
+                            },
+                            "required": ["device", "proposed_name"],
+                        }},
                 },
                 "required": ["summary", "states"],
             },
@@ -282,45 +379,87 @@ def _ctx_tool_schema() -> Dict[str, Any]:
 
 
 _SYSTEM_PROMPT = """\
-You are the context-layer estimator for a sensor-fusion platform. For
-each request you receive:
-  * `calibration` — the REFERENCE distributions: statistics of the
-    target classes learned during calibration. Entries carry per-class
-    feature mean/std/count; RSSI fingerprints are {anchor: {mean,std,
-    count}}; radar descriptors carry per-range-bin/angle statistics.
-    Judge a window by its distance to these references — a descriptor
-    several std from every class centroid is a low-confidence or
-    unknown classification, never a forced label.
-  * `descriptors` — physical descriptors of ONE time window from the
-    sensors (CSI/radar/BLE/IMU summaries, RSSI values, variances,
-    packet counts, spectral features).
-  * `context` — the account's assets around the window: entity
-    inventory (names/kinds/confirmed attributes), device metadata
-    (platform, capabilities, firmware), digital context (app/network/
-    peripheral state, traffic summaries). Device type/state may be
-    INFERRED from metadata + traffic — land it as a proposal entity
-    attribute, never confirmed.
-  * `history` — recent prior windows/forms, for temporal consistency
-    (a label that contradicts the last stable window needs stronger
-    evidence).
-  * `coverage` — if non-empty, fill only the named form sections.
-  * `window` — the window's bounds and provenance.
+You are the CONTEXT ESTIMATOR of a Thoth deployment — the model that
+turns one observation window into a structured context-layer form.
 
-Classify the window against the calibration references, then respond
-ONLY by calling submit_context_form. Do not emit plain text. Rules:
-  * states[] must contain one entry per target class key the platform
-    uses (e.g. occupancy.v1, activity.v1, location.v1); value is the
-    predicted label/object, confidence is calibrated by distance to the
-    class statistics — not raw probability.
-  * evidence[] records what you based the prediction on (the model
-    probabilities, the descriptors, the calibration reference).
-  * entities[] and relationships[] describe WHO/WHERE/WHAT the window
-    implies — create them when confident, omit when unsupported.
-  * uncertainties[] reports claims you considered but rejected — what
-    was unresolved and why; questions[] asks for the specific
-    observations that would resolve them; notes[] records durable
-    entity/relationship observations for future windows. Use these
-    channels — silent ambiguity is worse than an explicit question.
+THE SYSTEM. Thoth is a sensor-fusion platform. Edge "nodes" — the
+user's registered devices (Raspberry Pis, laptops, phones) — run sensor
+adapters: mmWave radar (BGT60TR13C: snr_db, range_profile, xy_map),
+Wi-Fi CSI amplitude, BLE/Wi-Fi/Zigbee radio scans (MAC, RSSI, advertised
+names), cameras (face/person detectors), microphones (level, speech),
+IMU and host telemetry. On-device models emit predictions; nodes uplink
+physical descriptors (per-field mean/min/max stats), predictions and
+digital context (foreground app, network state, battery) to Brain.
+Brain keeps a context layer — entities (persons, spaces, devices),
+relationships, evidence, derived states — that agents and automations
+read. Your role: fuse this window's evidence into occupancy, presence,
+activity, location and device-identity answers, then submit them via
+submit_context_form — your ONLY output channel. You never see raw
+sensor frames, only descriptors and stats.
+
+For each request you receive some of:
+  * `window`/`entity_hint` — the window's bounds and the entity it
+    concerns.
+  * `calibration` — REFERENCE distributions learned during calibration
+    (per-class feature mean/std/count; RSSI fingerprints {anchor:
+    {mean,std,count}}). Judge a window by distance to these — a
+    descriptor several std from every class centroid is low-confidence
+    or unknown, never a forced label.
+  * `descriptors` — physical descriptors of THIS window (radar stats,
+    CSI variance, RSSI, audio level, per-sensor fields).
+  * `devices` — the user's REGISTERED nodes: entity (device:<uuid>),
+    name, type, mac, hardware, online, association="registered". These
+    tell you which physical machine each `device` id/uuid in the data
+    is. Emitters appearing in radio scans that match NO registered
+    device and NO existing map entity are UNKNOWN devices — candidates
+    for device_updates, not silently-owned hardware.
+  * `scenes` — the latest uplink per node: a one-line scene summary,
+    per-sensor `text` + structured `cues` (speech, people count,
+    recognized face, motion, strongest emitter) + physical `fields`
+    (per-field mean/min/max/n — e.g. radar snr_db/range/xy, CSI
+    amplitude variance, RSSI) with n/rate_hz/age_s, on-device
+    `predictions`, `estimates`, `location` and `room`.
+  * `observations` — aggregated evidence stats per (key, device);
+    `map` — the current semantic map (entities carry `confirmed`:
+    user-confirmed facts you must not contradict); `context` — caller-
+    supplied account/device/digital context; `history` — prior windows.
+  * `coverage` — if non-empty, fill only the named form sections.
+
+READING OCCUPANCY. Radar `snr_db` sustained above ~4-6 dB with a stable
+xy_map peak = a present target; flat range profiles, near-zero CSI
+variance and no emitter churn while the reporting sensors are fresh
+(small age_s) is positive evidence the space is EMPTY. Absence of
+evidence is not absence unless the relevant sensor was live — a stale
+or missing sensor contributes nothing, not a vote for empty. Weight
+camera face/person detections, BLE/RSSI of carried devices, and audio
+activity as corroborating signals.
+
+DEVICE IDENTITY — you have room to name things. Registered nodes keep
+their registry anchor (device:<uuid>) but may get a better
+`proposed_name` via device_updates when metadata justifies it
+(hostname, MAC vendor, model). Unknown emitters (MACs, beacon ids,
+advertised names in scans) get device_updates entries keyed by their
+MAC/id with a proposed_name (e.g. "Sarah's iPhone", "living-room TV"),
+a proposed_kind, and a rationale naming the evidence — the platform
+lands these as proposals the user can confirm.
+
+Output rules for submit_context_form:
+  * `analysis` — a few sentences of plain-language reasoning for the
+    UI: which sensors drove the call, which devices you identified,
+    what stayed ambiguous.
+  * states[] — one entry per target key (occupancy.v1, activity.v1,
+    location.v1, presence.v1); value = predicted label/object;
+    confidence calibrated by distance to class statistics and sensor
+    freshness, not raw probability.
+  * evidence[] — what you based each prediction on (model
+    probabilities, descriptors, calibration references).
+  * entities[]/relationships[] — WHO/WHERE/WHAT the window implies;
+    create when confident, omit when unsupported.
+  * device_updates[] — naming/identification proposals (see above).
+  * uncertainties[]/questions[]/notes[] — what you considered but
+    couldn't support, the observations that would resolve it, and
+    durable facts for future windows. Silent ambiguity is worse than
+    an explicit question.
   * All numbers are floats (epoch seconds); no prose inside values.
 """
 
@@ -332,13 +471,24 @@ ONLY by calling submit_context_form. Do not emit plain text. Rules:
 _THINKING_TIERS = ("quick", "standard", "deep")
 
 
-def _model_for_tier(tier: str) -> str:
-    """Resolve a thinking tier to a concrete model id.
+def _model_for_tier(tier: str, explicit: Optional[str] = None) -> str:
+    """Resolve a thinking tier — or the user's explicit pick — to a
+    concrete model id.
 
-    ``standard`` keeps the historical env knobs
-    (``CONTEXT_INFER_MODEL`` → ``MODEL_NAME`` → default); ``quick``
-    and ``deep`` have their own overrides so operators can price the
-    meter. Unknown tiers are a client error."""
+    An explicit ``model`` (the meter the user sets) wins over the tier
+    route but must belong to the allowed set — every entry is a
+    large-context (≥128k) gpt-4o-class model or better. ``standard``
+    keeps the historical env knobs (``CONTEXT_INFER_MODEL`` →
+    ``MODEL_NAME`` → default); ``quick``/``deep`` have their own
+    overrides so operators can price the meter. Unknown tiers and
+    disallowed models are client errors."""
+    if explicit:
+        allowed = _allowed_models()
+        if explicit not in allowed:
+            raise HTTPException(
+                422, f"model {explicit!r} is not in the allowed set "
+                     f"{allowed} (env {_MODEL_SET_ENV})")
+        return explicit
     tier = (tier or "standard").lower()
     if tier == "standard":
         return (os.getenv("CONTEXT_INFER_MODEL")
@@ -353,24 +503,16 @@ def _model_for_tier(tier: str) -> str:
              f"— one of {list(_THINKING_TIERS)}")
 
 
-def _openai_form(request: InferRequest, *,
-                 usage_out: Optional[Dict[str, Any]] = None
-                 ) -> Dict[str, Any]:
-    """Force the model to fill the form — returns parsed tool args.
+def _assemble_payload(request: InferRequest, db: Session,
+                      user_id: int) -> Dict[str, Any]:
+    """Build the exact user-message payload the model sees.
 
-    ``usage_out``, when supplied, is filled with metering fields
-    (``model_id``, ``tokens``, ``tier``) for the inference ledger."""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise HTTPException(503, "openai package not installed")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(503, "OPENAI_API_KEY not configured")
-    model = _model_for_tier(request.thinking)
-
-    client = OpenAI(api_key=api_key)
-    user_msg = json.dumps({
+    Caller-supplied sections are always honored. When
+    ``gather_window_s`` > 0 the comprehensive bundle (registered device
+    roster, latest per-node scenes with radar/CSI/radio stats, per-key
+    evidence aggregates, the context map) is assembled server-side from
+    stored evidence — the same bundle the context builder reads."""
+    payload: Dict[str, Any] = {
         "window": request.window,
         "entity_hint": request.entity_hint,
         "calibration": request.calibration,
@@ -378,29 +520,106 @@ def _openai_form(request: InferRequest, *,
         "context": request.context,
         "history": request.history[:20],
         "coverage": request.coverage,
-    }, default=str)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
+    }
+    if request.devices:
+        payload["devices"] = request.devices
+    if request.gather_window_s > 0:
+        from .context_builder import build_bundle
+        bundle = build_bundle(db, user_id, time.time(),
+                              request.gather_window_s)
+        devices = []
+        for dev in bundle.get("devices") or []:
+            d = dict(dev)
+            d.setdefault("association", "registered")
+            devices.append(d)
+        payload["devices"] = (request.devices or []) + devices
+        payload["scenes"] = bundle.get("scenes") or []
+        payload["observations"] = bundle.get("descriptors") or []
+        payload["map"] = bundle.get("map") or {}
+        payload["gathered_window_s"] = bundle.get("window_s")
+        payload["evidence_rows"] = bundle.get("evidence_rows")
+    return payload
+
+
+def _bounded_seen(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Response echo of what the model saw — the full payload unless it
+    exceeds the response budget, then per-section sizes so the UI can
+    still show what was included."""
+    try:
+        size = len(json.dumps(payload, default=str))
+    except (TypeError, ValueError):
+        return {"_error": "payload not serializable"}
+    if size <= SEEN_KEEP:
+        return payload
+    return {"_truncated": True, "bytes": size,
+            "sections": {k: len(json.dumps(v, default=str))
+                         for k, v in payload.items()}}
+
+
+def _openai_form(request: InferRequest, *,
+                 payload: Optional[Dict[str, Any]] = None,
+                 usage_out: Optional[Dict[str, Any]] = None
+                 ) -> Dict[str, Any]:
+    """Force the model to fill the form — returns ``{"form": args,
+    "model_text": <any stray assistant text>}``.
+
+    ``payload`` is the assembled user message (from
+    ``_assemble_payload``); when omitted a minimal payload is built
+    from the request fields. ``usage_out``, when supplied, is filled
+    with metering fields (``model_id``, ``tokens``, ``tier``) for the
+    inference ledger."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise HTTPException(503, "openai package not installed")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "OPENAI_API_KEY not configured")
+    model = _model_for_tier(request.thinking, request.model)
+
+    if payload is None:
+        payload = {
+            "window": request.window,
+            "entity_hint": request.entity_hint,
+            "calibration": request.calibration,
+            "descriptors": request.descriptors,
+            "context": request.context,
+            "history": request.history[:20],
+            "coverage": request.coverage,
+            "devices": request.devices,
+        }
+    client = OpenAI(api_key=api_key)
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
+            {"role": "user", "content": json.dumps(payload, default=str)},
         ],
-        tools=[_ctx_tool_schema()],
-        tool_choice={"type": "function",
-                     "function": {"name": "submit_context_form"}},
-        temperature=0.2,
-    )
+        "tools": [_ctx_tool_schema()],
+        "tool_choice": {"type": "function",
+                        "function": {"name": "submit_context_form"}},
+        "temperature": 0.2,
+        # room for analysis + device_updates + big forms
+        "max_tokens": 8192,
+    }
+    if re.match(r"^o\d", model):
+        # reasoning family: no custom temperature, different token knob
+        kwargs.pop("temperature")
+        kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+    resp = client.chat.completions.create(**kwargs)
     if usage_out is not None:
         usage_out["model_id"] = model
         usage_out["tier"] = request.thinking
         usage_out["tokens"] = getattr(
             getattr(resp, "usage", None), "total_tokens", None)
     msg = resp.choices[0].message
+    model_text = msg.content or None
     calls = msg.tool_calls or []
     for call in calls:
         if call.function.name == "submit_context_form":
             try:
-                return json.loads(call.function.arguments or "{}")
+                form = json.loads(call.function.arguments or "{}")
+                return {"form": form, "model_text": model_text}
             except json.JSONDecodeError as exc:
                 raise HTTPException(
                     502, f"model returned malformed form JSON: {exc}")
@@ -553,6 +772,65 @@ def _apply_form(db: Session, user_id: int,
             errors.append({"section": section, "index": 0,
                            "error": exc.detail})
 
+    # 6. device_updates — the model's room to name things. Each
+    # proposal lands as an entity upsert: registry devices keep their
+    # device:<uuid> anchor (name + identification attrs merged into the
+    # existing attributes — apply_entity replaces attributes wholesale,
+    # so we merge first), unknown emitters get a new device:<slug>
+    # entity carrying the MAC in attributes + aliases. Confirmed
+    # entities are protected by apply_entity → skipped.
+    for i, raw in enumerate(form.get("device_updates") or []):
+        raw = dict(raw) if isinstance(raw, dict) else {"device": str(raw)}
+        ref = str(raw.get("device") or raw.get("id")
+                  or raw.get("mac") or "").strip()
+        name = str(raw.get("proposed_name")
+                   or raw.get("name") or "").strip()
+        if not ref or not name:
+            errors.append({"section": "device_updates", "index": i,
+                           "error": "device + proposed_name required"})
+            continue
+        key = ref if ref.startswith("device:") else \
+            "device:" + re.sub(r"[^A-Za-z0-9_.-]+", "-", ref)\
+                             .strip("-").lower()
+        existing = db.query(ContextEntity).filter(
+            ContextEntity.user_id == user_id,
+            ContextEntity.entity_key == key).first()
+        try:
+            attrs = (json.loads(existing.attributes)
+                     if existing and existing.attributes else {})
+        except (TypeError, ValueError):
+            attrs = {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        aliases = set(attrs.get("aliases") or [])
+        if ref != key:
+            aliases.add(ref)
+        attrs.update({
+            "aliases": sorted(a for a in aliases if a and a != key),
+            "proposed_name": name,
+            "identified_by": "context_infer",
+            "identified_at": time.time(),
+        })
+        for k in ("rationale", "mac", "vendor", "hostname"):
+            if raw.get(k):
+                attrs[k] = raw[k]
+        if raw.get("confidence") is not None:
+            attrs["identification_confidence"] = raw["confidence"]
+        kind = str(raw.get("proposed_kind") or "device")
+        try:
+            ent = apply_entity(db, user_id, EntityIn(
+                id=key, kind=kind, name=name, attributes=attrs))
+            receipt.setdefault("device_updates", []).append({
+                "entity": ent.entity_key, "name": name,
+                "ref": ref})
+        except HTTPException as exc:
+            if not _conflict(exc, "device_updates", i):
+                errors.append({"section": "device_updates", "index": i,
+                               "error": exc.detail})
+        except (ValidationError, TypeError) as exc:
+            errors.append({"section": "device_updates", "index": i,
+                           "error": str(exc)[:300]})
+
     if skipped:
         receipt["skipped"] = skipped
     if errors:
@@ -560,9 +838,81 @@ def _apply_form(db: Session, user_id: int,
     return receipt
 
 
+def _persist_last(db: Session, user_id: int, *,
+                  payload: Dict[str, Any], result: Dict[str, Any],
+                  now: float) -> None:
+    """Retain what the model saw + produced on the ``infer:last``
+    system entity — the audit the UI renders (bounded, never
+    authoritative)."""
+    ent = db.query(ContextEntity).filter(
+        ContextEntity.user_id == user_id,
+        ContextEntity.entity_key == LAST_ENTITY).first()
+    if ent is None:
+        ent = ContextEntity(user_id=user_id, entity_key=LAST_ENTITY,
+                            kind="system", name="context infer — last run",
+                            attributes="{}")
+        db.add(ent)
+    try:
+        attrs = json.loads(ent.attributes) if ent.attributes else {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+    except (TypeError, ValueError):
+        attrs = {}
+    attrs.update({
+        "at": now,
+        "model_id": result.get("model_id"),
+        "tier": result.get("thinking"),
+        "dry_run": bool(result.get("dry_run")),
+        "summary": result.get("summary"),
+        "analysis": result.get("analysis"),
+        "input": json.dumps(payload, default=str)[:INPUT_KEEP],
+        "output": json.dumps(result.get("form") or {},
+                             default=str)[:OUTPUT_KEEP],
+        "model_text": (result.get("model_text") or "")[:4000],
+    })
+    ent.attributes = json.dumps(attrs, default=str)
+    ent.retired_at = None
+    db.commit()
+
+
 # ---------------------------------------------------------------------------
-# Endpoint
+# Endpoints
 # ---------------------------------------------------------------------------
+
+@router.get("/infer/options")
+async def infer_options(
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """What the UI needs to drive /infer: the reasoning tiers, the
+    user-selectable model set (all large-context), and the resolved
+    default per tier."""
+    return {
+        "tiers": list(_THINKING_TIERS),
+        "models": _allowed_models(),
+        "defaults": {t: _model_for_tier(t) for t in _THINKING_TIERS},
+        "gather_default_s": 900,
+    }
+
+
+@router.get("/infer/last")
+async def infer_last(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """The last infer run's retained input/output — what the model saw
+    and what it produced — or 404 before the first run."""
+    ent = db.query(ContextEntity).filter(
+        ContextEntity.user_id == current_user.userId,
+        ContextEntity.entity_key == LAST_ENTITY).first()
+    if ent is None or not ent.attributes:
+        raise HTTPException(404, "no infer run recorded yet")
+    try:
+        attrs = json.loads(ent.attributes)
+    except (TypeError, ValueError):
+        attrs = {}
+    return {"entity": LAST_ENTITY, **(attrs if isinstance(attrs, dict)
+                                      else {})}
+
 
 @router.post("/infer")
 async def infer_context(
@@ -579,26 +929,46 @@ async def infer_context(
     the store because every section is validated against the same
     models as the REST endpoints.
 
+    ``gather_window_s`` > 0 makes Brain assemble the comprehensive
+    sensor bundle server-side (device roster, node scenes with radar/
+    radio stats, evidence aggregates, context map). The response echoes
+    ``seen`` — the exact payload the model received — plus ``analysis``
+    and ``model_text`` (what the model produced), and the run is
+    retained on the ``infer:last`` entity for the UI.
+
     This is a hosted-inference boundary: the call is authorized and
     metered through ``server.inference_auth`` before the model runs.
     """
-    model_id = _model_for_tier(body.thinking)  # 422 on bogus tier
+    # 422 on bogus tier/model BEFORE quota reservation.
+    model_id = _model_for_tier(body.thinking, body.model)
+    payload = _assemble_payload(body, db, current_user.userId)
     with inference_call(db, current_user,
                         kind=f"context_infer:{body.thinking}",
                         model_id=model_id) as meter:
-        form = _openai_form(body, usage_out=meter)
+        out = _openai_form(body, payload=payload, usage_out=meter)
+    # Test seams may return a bare form; the real call returns
+    # {"form", "model_text"}.
+    form = out.get("form", out) if isinstance(out, dict) else {}
+    model_text = out.get("model_text") if isinstance(out, dict) else None
     result: Dict[str, Any] = {
         "form": form,
         "summary": form.get("summary"),
+        "analysis": form.get("analysis"),
+        "model_text": model_text,
+        "seen": _bounded_seen(payload),
         "thinking": body.thinking,
         "model_id": model_id,
         "questions": form.get("questions") or [],
         "uncertainties": form.get("uncertainties") or [],
+        "device_updates": form.get("device_updates") or [],
         "dry_run": body.dry_run,
         "generated_at": time.time(),
     }
     if not body.dry_run:
         result["receipt"] = _apply_form(db, current_user.userId, form)
+    _persist_last(db, current_user.userId,
+                  payload=payload, result=result,
+                  now=result["generated_at"])
     return result
 
 

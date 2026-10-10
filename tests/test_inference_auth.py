@@ -145,7 +145,7 @@ def test_infer_endpoint_is_metered_and_usage_endpoint_reports(api,
                                                               monkeypatch):
     client, session = api
     monkeypatch.setattr(infer, "_openai_form",
-                        lambda req, usage_out=None: {
+                        lambda req, usage_out=None, **_: {
                             "summary": "s", "states": []})
     r = client.post("/v1/context/infer", json={"descriptors": {}})
     assert r.status_code == 200
@@ -164,7 +164,7 @@ def test_infer_endpoint_402s_over_quota(api, monkeypatch):
     client, session = api
     monkeypatch.setenv("INFERENCE_MONTHLY_QUOTA", "1")
     monkeypatch.setattr(infer, "_openai_form",
-                        lambda req, usage_out=None: {
+                        lambda req, usage_out=None, **_: {
                             "summary": "s", "states": []})
     assert client.post("/v1/context/infer", json={}).status_code == 200
     r = client.post("/v1/context/infer", json={})
