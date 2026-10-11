@@ -542,6 +542,67 @@ RADAR_REFERENCE: Dict[str, Any] = {
     },
 }
 
+# Wi-Fi CSI half of the same E1 calibration rig — the link-level view.
+# CSI amplitude responds to people CROSSING between an AP<->node pair,
+# so its empty baseline depends on which physical link is sampled: only
+# the magnitude-of-change shape transfers between mounts.
+CSI_REFERENCE: Dict[str, Any] = {
+    "dataset": "e1_multilink_5s",
+    "sensor": "Wi-Fi CSI, dual link (amp per-subcarrier aggregates)",
+    "how_to_read": (
+        "empty-room CSI amplitude is stable within a few dB; occupancy "
+        "shows as a step in the WINDOW aggregate — mean drops or lifts "
+        "(sign flips with link geometry: bodies shadow OR focus the "
+        "pair) while spread widens. Never threshold the absolute mean "
+        "across sites; compare against the node's own empty baseline. "
+        "Combine with radar snr tail-spikes before calling occupied."),
+    "fields": {
+        "csi_amp_mean": {"empty": {"p50": 27.65, "p95": 38.12},
+                         "occupied": {"p50": 24.81, "p95": 29.91},
+                         "d": -1.54, "auc": 0.88,
+                         "direction": "mount-dependent"},
+    },
+}
+
+# Watch IMU worn/unworn reference. `unworn_*` numbers are MEASURED on
+# this fleet's hardware — 5 min of BMA421 accel captured Oct 11 2026
+# (watch face-up on a desk, stamped-motion stream, 3178 samples,
+# ~10.5 Hz, watch_imu_capture.py --from-brain). `worn_*` values are the
+# physically expected signature (micro-tremor floor), not yet a
+# measured set — treat them as a prior until a worn capture lands.
+IMU_REFERENCE: Dict[str, Any] = {
+    "dataset": "watch_flat_5min_2026-10-11",
+    "sensor": "PineTime BMA421 accel, g units, ~10.5 Hz (char 00030003)",
+    "source": "watch_imu_capture.py, phone-relayed pinetime-motion",
+    "how_to_read": (
+        "an unworn watch on a surface sits at the sensor noise floor: "
+        "per-axis std ~0.0015 g, |a| ~1.02 g on one FIXED gravity axis, "
+        "axes nearly constant. A WORN wrist never reaches that stillness "
+        "— micro-tremor alone lifts per-axis std toward ~0.01-0.05 g, "
+        "gestures/walking push 0.1+ g with periodic structure, and the "
+        "gravity axis WANDERS as the wrist re-orients. Judge worn by "
+        "acc_std plus gravity-axis drift — |a| ~= 1 g alone means "
+        "nothing (resting watches read it too). The phone relay's "
+        "watch.worn.v1 already applies 0.008/0.02 hysteresis on acc_std; "
+        "these baselines explain why those bands work."),
+    "fields": {
+        "acc_std_per_axis_g": {
+            "unworn_measured": {"x": 0.0015, "y": 0.0015, "z": 0.0015},
+            "unworn_floor": "<= 0.008",
+            "worn_prior": ">= 0.02 (hysteresis band used by "
+                          "watch.worn.v1)",
+            "worn_moving_prior": "0.1+ (gait bursts)",
+        },
+        "gravity_axis_g": {
+            "unworn_measured": {"x_mean": -0.0254, "y_mean": -0.0041,
+                                "z_mean": -1.0189, "mag_mean": 1.0192},
+            "note": "fixed pose -> one axis holds ~+-1 g; worn wrists "
+                    "re-orient -> gravity axis drifts across axes",
+        },
+        "rate_hz": {"observed": 10.5},
+    },
+}
+
 
 def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
     """The device registry, keyed by the map entity id each scene's
@@ -660,7 +721,9 @@ def build_bundle(db: Session, user_id: int, now: float,
         "scenes": _scenes(uplinks, now),
         "descriptors": aggregates,
         "map": map_snapshot(db, user_id, now),
-        "reference": {"radar_occupancy": RADAR_REFERENCE},
+        "reference": {"radar_occupancy": RADAR_REFERENCE,
+                      "csi_link": CSI_REFERENCE,
+                      "watch_imu_worn": IMU_REFERENCE},
     }
 
 

@@ -335,6 +335,31 @@ def test_transcribe_rejects_empty(api):
     assert r.status_code == 422
 
 
+def test_calibration_is_flat_and_covers_imu_radar_csi(api, monkeypatch):
+    """Regression: calibration surfaced as
+    {radar_occupancy:{radar_occupancy:{…}}} — the reference map IS the
+    calibration; all three blocks must sit at top level."""
+    client, _ = api
+    seen = {}
+
+    def fake_answer(messages, tier="standard", usage_out=None):
+        seen["bundle"] = json.loads(
+            messages[1]["content"].split("\n", 1)[1])
+        return {"answer": "ok", "widgets": []}
+    monkeypatch.setattr(chat, "_openai_answer", fake_answer)
+
+    r = client.post("/v1/chat", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    cal = seen["bundle"]["calibration"]
+    assert set(cal) == {"radar_occupancy", "csi_link", "watch_imu_worn"}
+    ref = seen["bundle"]["reference"]
+    assert set(ref) == set(cal)
+    unworn = cal["watch_imu_worn"]["fields"]["acc_std_per_axis_g"][
+        "unworn_measured"]
+    assert unworn["z"] == pytest.approx(0.0015)
+    assert "occupied" in cal["csi_link"]["fields"]["csi_amp_mean"]
+
+
 def test_prompt_is_unbiased_and_schema_is_strict():
     """No measured numbers/placeholders baked into the prompt — the
     bundle carries calibration data; the prompt carries method. The

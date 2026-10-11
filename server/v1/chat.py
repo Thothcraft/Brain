@@ -218,7 +218,10 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
 
     calibration: Dict[str, Any] = {}
     if cfg.include_reference and bundle.get("reference"):
-        calibration["radar_occupancy"] = bundle["reference"]
+        # The reference map IS the calibration — radar_occupancy /
+        # csi_link / watch_imu_worn at top level (the old extra wrap
+        # buried everything one level deeper than the prompt promises).
+        calibration = dict(bundle["reference"])
 
     out: Dict[str, Any] = {
         "generated_at": now,
@@ -338,9 +341,13 @@ hardware — anything not listed is an unknown emitter), recent evidence
 descriptor aggregates and scene summaries — sensor entries carry
 physical `fields` (mean/std/min/max/n for radar SNR, CSI variance,
 RSSI, IMU, audio level…) plus node `estimates` and `location`, and
-`reference`/`calibration` — measured empty-vs-occupied stats for the
-radar/CSI fields (compare the current window's tail — max spikes,
-widened std — against those stats; the median alone is weak evidence)
+`reference`/`calibration` — measured baselines the judgements stand
+on (`calibration.radar_occupancy` + `calibration.csi_link`: empty-vs-
+occupied stats for the radar/CSI fields — compare the current
+window's tail, max spikes and widened std, against them; the median
+alone is weak evidence. `calibration.watch_imu_worn`: measured
+unworn-watch IMU baseline plus the worn signature to compare `acc_std`
+and gravity-axis behaviour against)
 — then the user's question and optional attachments.
 
 Identity — WHO and WHICH THINGS belong to the account:
