@@ -248,3 +248,35 @@ def test_events_and_usage_rest_fallback(api):
     res = client.get('/v1/events?device_id=other-device',
                      headers=_user_headers())
     assert res.status_code == 404
+
+
+def test_rest_uplink_marks_device_online(api):
+    """A node whose WS is down but whose REST fallback works must not
+    read offline: device-JWT /events and /usage posts refresh
+    last_seen + online (regression — the device list lied about a
+    live node)."""
+    client, factory, _user = api
+    device_auth = {'Authorization': f'Bearer {_device_token()}'}
+    with factory() as s:
+        d = s.query(Device).filter(Device.device_uuid == 'dev-1').one()
+        assert d.online is False
+
+    res = client.post('/v1/events',
+                      json={'kind': 'trigger_fired',
+                            'data': {'automation': 'a1'}},
+                      headers=device_auth)
+    assert res.status_code == 201
+    with factory() as s:
+        d = s.query(Device).filter(Device.device_uuid == 'dev-1').one()
+        assert d.online is True
+        first_seen = d.last_seen
+        assert first_seen is not None
+
+    res = client.post('/v1/usage',
+                      json={'kind': 'prediction', 'source': 'node'},
+                      headers=device_auth)
+    assert res.status_code == 201
+    with factory() as s:
+        d = s.query(Device).filter(Device.device_uuid == 'dev-1').one()
+        assert d.online is True
+        assert d.last_seen >= first_seen
