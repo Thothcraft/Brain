@@ -95,6 +95,52 @@ def test_chat_context_endpoint_shows_bundle_for_free(api):
     assert not _usage(session)                    # preview costs nothing
 
 
+def test_chat_context_provenance_ownership(api):
+    """The bundle documents itself: provenance names every section the
+    model saw; registry devices are marked owned by person:owner; the
+    seeded persons/places anchors are listed."""
+    client, _ = api
+    body = client.get("/v1/chat/context").json()
+    prov = body["provenance"]
+    assert "sections" in prov
+    for s in ("map", "devices", "descriptors", "scenes", "reference",
+              "builder", "usage"):
+        assert s in prov["sections"], s
+    assert prov["history"]["max_turns"] == 12
+    assert prov["attachments"]["max"] == 5
+    # every registry device is owned by person:owner + links its entity
+    for d in body["devices"]:
+        assert d["owned"] is True and d["owner"] == "person:owner"
+    ids = {e["id"] for e in body.get("persons", [])}
+    assert "person:owner" in ids
+    ids = {e["id"] for e in body.get("places", [])}
+    assert "place:home" in ids
+
+
+def test_chat_config_roundtrip_and_gates(api):
+    """PUT /v1/chat/config persists; the context payload echoes it and
+    honors section toggles + the custom window."""
+    client, _ = api
+    cfg = {"window_s": 300.0, "max_bundle_chars": 0,
+           "include_scenes": False, "include_descriptors": False,
+           "include_reference": True, "include_builder": True,
+           "include_usage": True, "include_persons_places": True}
+    r = client.put("/v1/chat/config", json=cfg)
+    assert r.status_code == 200, r.text
+    got = client.get("/v1/chat/config").json()["config"]
+    assert got["window_s"] == 300.0 and got["include_scenes"] is False
+
+    body = client.get("/v1/chat/context").json()
+    assert body["window_s"] == 300.0
+    assert "scenes" not in body
+    assert "descriptors" not in body
+    assert "scenes" not in body["provenance"]["sections"]
+    # restore defaults so later tests aren't order-dependent
+    client.put("/v1/chat/config", json={**cfg, "include_scenes": True,
+                                        "include_descriptors": True,
+                                        "window_s": 900.0})
+
+
 def test_chat_model_tier_routes_and_422s(api, monkeypatch):
     """The app's model chooser selects the model — numbered picks map to
     concrete ids and widen the bundle for 5/6; a bogus tier is rejected."""
@@ -125,6 +171,26 @@ def test_chat_model_tier_routes_and_422s(api, monkeypatch):
     r = client.post("/v1/chat",
                     json={"message": "hi", "model": "gpt-99"})
     assert r.status_code == 422
+
+
+def test_chat_returns_assessments(api, monkeypatch):
+    """Model's probabilistic claims ride the response — actionable."""
+    client, _ = api
+
+    def fake_answer(messages, tier="standard", usage_out=None):
+        return {"answer": "The room looks empty.",
+                "assessments": [
+                    {"claim": "room is unoccupied", "probability": 0.82,
+                     "basis": "reference snr_db.max ~10 dB vs 40 spikes"},
+                    "not-a-dict"],
+                "widgets": []}
+    monkeypatch.setattr(chat, "_openai_answer", fake_answer)
+
+    r = client.post("/v1/chat", json={"message": "is anyone home?"})
+    assert r.status_code == 200
+    asmts = r.json()["assessments"]
+    assert len(asmts) == 1
+    assert asmts[0]["claim"] == "room is unoccupied"
 
 
 def test_chat_advanced_widens_the_bundle(db, monkeypatch):

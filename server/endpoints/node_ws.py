@@ -766,6 +766,68 @@ async def list_events(
     return {"events": events, "count": len(events)}
 
 
+def _sse(evt: Dict[str, Any]) -> str:
+    """One SSE frame — id/event/data fields, matching the app EventFeed
+    parser (kind rides the `event:` field, the doc rides `data:`)."""
+    eid = str(evt.get("id") or "")
+    kind = str(evt.get("kind") or "event")
+    return f"id: {eid}\nevent: {kind}\ndata: {json.dumps(evt)}\n\n"
+
+
+@router.get("/events/stream")
+async def stream_events(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Server-sent event feed — live NodeEvent fan-out via the process
+    event bus plus ``Last-Event-ID`` replay for dropped connections.
+    ``notification`` kind events are what the app's local-notification
+    bridge listens for."""
+    user_id = current_user.userId
+
+    last_id = 0
+    hdr = request.headers.get("Last-Event-ID") or \
+        request.query_params.get("lastEventId")
+    try:
+        last_id = int(hdr) if hdr else 0
+    except (TypeError, ValueError):
+        last_id = 0
+
+    async def gen():
+        queue = event_bus.subscribe(user_id)
+        try:
+            # Replay persisted events newer than the cursor (bounded).
+            try:
+                rows = db.query(NodeEvent).filter(
+                    NodeEvent.user_id == user_id,
+                    NodeEvent.id > last_id).order_by(
+                    NodeEvent.id.asc()).limit(limit).all()
+                for row in rows:
+                    yield _sse(row.to_dict())
+            except Exception:  # replay is best-effort — live feed wins
+                pass
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    evt = await asyncio.wait_for(queue.get(), timeout=25.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield _sse(evt)
+        finally:
+            event_bus.unsubscribe(user_id, queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache",
+                 "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive"})
+
+
 # ---------------------------------------------------------------------------
 # API usage metering (§4)
 # ---------------------------------------------------------------------------

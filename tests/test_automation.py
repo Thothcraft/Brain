@@ -15,6 +15,7 @@ from server.automation import AutomationEngine
 from server.db import Base, User, get_db
 from server.v1.automation import router as automation_router
 from server.v1.context import router as context_router
+from server.endpoints.node_ws import router as node_ws_router
 
 
 @pytest.fixture
@@ -30,6 +31,7 @@ def api():
         app = FastAPI()
         app.include_router(automation_router, prefix='/v1')
         app.include_router(context_router, prefix='/v1')
+        app.include_router(node_ws_router, prefix='/v1')
         app.dependency_overrides[get_current_user] = lambda: user
         app.dependency_overrides[get_db] = lambda: session
         with TestClient(app) as client:
@@ -71,6 +73,74 @@ def test_engine_rejects_malformed_rule():
     engine = AutomationEngine()
     with pytest.raises(ValueError):
         engine.add_rule({"name": "r"})
+
+
+def test_engine_extended_comparators():
+    """min/max on scalars or {distance_m}-dicts, contains on dicts/
+    strings/lists, not_equals, field selector."""
+    fired = []
+    engine = AutomationEngine(
+        actuate=lambda aid, cmd: fired.append((aid, cmd))
+        or {"status": "succeeded"})
+    engine.add_rule({
+        "name": "near", "when": {"key": "proximity.v1",
+                                 "field": "distance_m", "max": 10},
+        "then": {"actuator_id": "light-1", "operation": "set_color"}})
+    engine.add_rule({
+        "name": "linked", "when": {"key": "watch.link.v1",
+                                   "contains": {"connected": True}},
+        "then": {"actuator_id": "light-1", "operation": "set_color",
+                 "params": {"rgb": [255, 0, 0]}}})
+    engine.add_rule({
+        "name": "face", "when": {"key": "prediction",
+                                 "not_equals": "no_face"},
+        "then": {"actuator_id": "light-1", "operation": "set_color",
+                 "params": {"rgb": [255, 255, 0]}}})
+
+    # distance 4.5 < 10 → 'near' matches; watch connected → 'linked';
+    # prediction "Gad" != "no_face" → 'face'.
+    snap = {"states": [
+        {"key": "proximity.v1", "value": {"distance_m": 4.5}},
+        {"key": "watch.link.v1",
+         "value": {"connected": True, "rssi": -61}},
+        {"key": "prediction", "value": "Gad"}]}
+    fired_names = {r["rule"] for r in engine.evaluate(snap)}
+    assert fired_names == {"near", "linked", "face"}
+
+    engine2 = AutomationEngine()
+    engine2.add_rule({"name": "near", "when": {"key": "proximity.v1",
+                                               "field": "distance_m",
+                                               "max": 10},
+                      "then": {"actuator_id": "a", "operation": "o"}})
+    # 12 m → beyond the threshold → no fire
+    assert engine2.evaluate({"states": [
+        {"key": "proximity.v1", "value": {"distance_m": 12.0}}]}) == []
+
+
+def test_notify_actuator_publishes_event(api):
+    """actuator_id 'notify' → ActionRequest succeeds immediately and a
+    `notification` NodeEvent is persisted (SSE fan-out + replay)."""
+    client, session, _ = api
+    client.post("/v1/automation/rules", json={
+        "name": "room-occupied-ping",
+        "when": {"key": "occupancy.v1", "equals": "occupied"},
+        "then": {"actuator_id": "notify", "operation": "notify",
+                 "params": {"title": "Occupied",
+                            "body": "Someone is in the room"}}})
+    client.post("/v1/context/state", json={
+        "key": "occupancy.v1", "value": "occupied",
+        "entity_id": "place:home", "estimator": "occ-v1"})
+    actions = client.get("/v1/automation/actions").json()["actions"]
+    assert len(actions) == 1
+    assert actions[0]["actuator_id"] == "notify"
+    assert actions[0]["status"] == "succeeded"
+    events = client.get("/v1/events?kind=notification").json()["events"]
+    assert len(events) == 1
+    assert events[0]["data"]["title"] == "Occupied"
+    # idempotent — a second evaluation doesn't re-notify while matched
+    client.post("/v1/automation/evaluate")
+    assert len(client.get("/v1/events?kind=notification")
+               .json()["events"]) == 1
 
 
 # --- API --------------------------------------------------------------------

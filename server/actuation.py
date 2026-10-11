@@ -30,6 +30,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import ActionRequest, Device
@@ -97,6 +98,53 @@ def dispatch_action(db: Session, action: ActionRequest,
         action.result_json = json.dumps({
             "status": "failed",
             "detail": f"max attempts ({action.max_attempts}) reached"})
+        db.commit()
+        return action
+
+    # Pseudo-actuator "notify" — no node round-trip: the action fans out
+    # as a `notification` event on the user's SSE bus; every subscribed
+    # surface (phone app EventFeed → system notification, portal toasts)
+    # displays it. Delivered immediately, marked succeeded.
+    if action.actuator_id == "notify":
+        try:
+            params = json.loads(action.params or "{}")
+        except (TypeError, ValueError):
+            params = {}
+        from . import event_bus
+        from .db import NodeEvent
+        import time as _t
+        payload = {"title": params.get("title") or "Thoth",
+                   "body": params.get("body") or "",
+                   "severity": params.get("severity") or "info",
+                   "origin": action.origin,
+                   "action_id": action.action_id}
+        # Persist as a node event — lands in GET /v1/events history and
+        # replays to late SSE subscribers (Last-Event-ID), not just live
+        # ones.
+        row = NodeEvent(
+            user_id=action.user_id,
+            device_id=action.device_id or "brain",
+            kind="notification",
+            data=json.dumps(payload),
+            ts=_t.time(),
+            external_id=f"action:{action.action_id}")
+        try:
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            doc = row.to_dict()
+        except IntegrityError:
+            db.rollback()
+            doc = {"id": action.action_id, "kind": "notification",
+                   "data": payload}
+        delivered = event_bus.publish(action.user_id, doc)
+        action.attempts += 1
+        action.dispatched_at = now
+        action.status = "succeeded"
+        action.completed_at = now
+        action.result_json = json.dumps({
+            "status": "succeeded",
+            "detail": f"notification published to {delivered} subscriber(s)"})
         db.commit()
         return action
 

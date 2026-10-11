@@ -43,7 +43,8 @@ from server.inference_auth import (
     INFERENCE_SOURCE, inference_call, inference_status,
 )
 from .context_builder import (
-    BUILDER_ENTITY, build_bundle, seed_devices,
+    BUILDER_ENTITY, _device_fp_index, _fingerprints, build_bundle,
+    seed_devices,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,24 +111,65 @@ class TtsRequest(BaseModel):
     voice: Optional[str] = None
 
 
+class ChatConfig(BaseModel):
+    """Per-user assistant tuning — what the bundle covers. Persisted on
+    the ``chat:config`` system entity so the app/hub surfaces stay in
+    sync; the context payload echoes it under ``config`` and documents
+    every bound under ``provenance``."""
+    window_s: float = Field(default=900.0, ge=60.0, le=86400.0)
+    max_bundle_chars: int = Field(default=0, ge=0, le=250_000,
+        description="0 = use the per-tier cap (60k / 120k wide)")
+    include_scenes: bool = True
+    include_descriptors: bool = True
+    include_reference: bool = True
+    include_builder: bool = True
+    include_usage: bool = True
+    include_persons_places: bool = True
+
+
+_CONFIG_ENTITY = "chat:config"
+
+
+def _load_config(db: Session, user_id: int) -> ChatConfig:
+    ent = db.query(ContextEntity).filter(
+        ContextEntity.user_id == user_id,
+        ContextEntity.entity_key == _CONFIG_ENTITY).first()
+    if not ent or not ent.attributes:
+        return ChatConfig()
+    try:
+        raw = json.loads(ent.attributes)
+    except (TypeError, ValueError):
+        return ChatConfig()
+    try:
+        return ChatConfig(**raw) if isinstance(raw, dict) else ChatConfig()
+    except Exception:
+        return ChatConfig()
+
+
 # ---------------------------------------------------------------------------
 # The context bundle the model sees
 # ---------------------------------------------------------------------------
 
 def _chat_context(db: Session, user_id: int, user: Optional[User],
                   now: Optional[float] = None, *,
-                  detail: str = "standard") -> Dict[str, Any]:
+                  detail: str = "standard",
+                  cfg: Optional[ChatConfig] = None,
+                  ) -> Dict[str, Any]:
     """The evidence bundle behind an answer — semantic map + fresh
     descriptor aggregates + builder status + quota. Identical inputs to
     the context builder's own bundle so the assistant sees what the map
     sees. ``advanced`` widens every cap — more descriptor groups, more
-    scenes and the builder's last proposal — for the bigger model."""
+    scenes and the builder's last proposal — for the bigger model.
+    Per-user ``cfg`` sets the evidence window and section toggles; the
+    result echoes it plus a ``provenance`` block naming every section
+    the model was actually shown."""
+    cfg = cfg or _load_config(db, user_id)
     now = now or time.time()
     # Same anchors the builder maintains — registry devices (with MAC/
     # hostname fingerprints) + person:owner/place:home — so the assistant
     # never answers against an unseeded map.
     seed_devices(db, user_id, now)
-    bundle = build_bundle(db, user_id, now, window_s=900.0)
+    bundle = build_bundle(db, user_id, now, window_s=cfg.window_s)
     builder_ent = db.query(ContextEntity).filter(
         ContextEntity.user_id == user_id,
         ContextEntity.entity_key == BUILDER_ENTITY).first()
@@ -146,20 +188,75 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
     }
     if advanced:
         builder["last_proposal"] = battrs.get("last_proposal")
-    return {
+
+    # Devices + fingerprint table → which emitter is already KNOWN and
+    # WHO owns it. Registry devices belong to the account owner by
+    # definition; the fingerprint index links each registry row to its
+    # canonical context entity (so "device:aa-bb" sightings fold onto
+    # "device:<uuid>" the user owns).
+    fp_idx = _device_fp_index(db, user_id)
+    devices: List[Dict[str, Any]] = []
+    for d in (bundle.get("devices") or [])[:30 if advanced else 12]:
+        d = dict(d)
+        refs = [str(d.get("uuid") or ""), str(d.get("name") or ""),
+                str(d.get("mac") or ""), f"device:{d.get('uuid')}"]
+        hits = [fp_idx.get(fp) for v in refs
+                for fp in _fingerprints(v)]
+        ent_key = next((h for h in hits if h), None)
+        d["entity_key"] = ent_key
+        d["owned"] = True
+        d["owner"] = "person:owner"
+        devices.append(d)
+
+    persons, places = [], []
+    if cfg.include_persons_places:
+        for e in (bundle["map"].get("entities") or []):
+            if e.get("kind") == "person":
+                persons.append(e)
+            elif e.get("kind") == "place":
+                places.append(e)
+
+    calibration: Dict[str, Any] = {}
+    if cfg.include_reference and bundle.get("reference"):
+        calibration["radar_occupancy"] = bundle["reference"]
+
+    out: Dict[str, Any] = {
         "generated_at": now,
-        "window_s": bundle.get("window_s", 900.0),
+        "window_s": cfg.window_s,
         "map": bundle["map"],
-        "devices": (bundle.get("devices") or [])
-                   [:30 if advanced else 12],
-        "descriptors": (bundle.get("descriptors") or [])
-                       [:32 if advanced else 12],
-        "scenes": (bundle.get("scenes") or [])
-                  [:10 if advanced else 5],
-        "reference": bundle.get("reference"),
-        "builder": builder,
-        "usage": inference_status(db, user) if user else None,
+        "devices": devices,
+        "config": cfg.model_dump(),
+        "provenance": {
+            "sections": [],   # filled below — names every block sent
+            "history": {"max_turns": _MAX_HISTORY,
+                        "max_chars_per_turn": _MAX_HISTORY_CHARS},
+            "attachments": {"max": _MAX_ATTACHMENTS,
+                            "image_bytes": _MAX_IMAGE_BYTES,
+                            "file_chars": _MAX_FILE_CHARS},
+            "model_picks": {t: _model_for_tier(t) for t in _TIERS},
+        },
     }
+    if persons:
+        out["persons"] = persons
+    if places:
+        out["places"] = places
+    if cfg.include_descriptors:
+        out["descriptors"] = (bundle.get("descriptors") or []) \
+                             [:32 if advanced else 12]
+    if cfg.include_scenes:
+        out["scenes"] = (bundle.get("scenes") or []) \
+                        [:10 if advanced else 5]
+    if cfg.include_reference:
+        out["reference"] = bundle.get("reference")
+    if calibration:
+        out["calibration"] = calibration
+    if cfg.include_builder:
+        out["builder"] = builder
+    if cfg.include_usage:
+        out["usage"] = inference_status(db, user) if user else None
+    out["provenance"]["sections"] = [k for k in out
+                                     if k not in ("provenance", "config")]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -239,12 +336,25 @@ user-confirmed facts), a `devices` registry telling you which physical
 machine each `device:<uuid>` / scene `device` id is (name, type, MAC,
 hardware — anything not listed is an unknown emitter), recent evidence
 descriptor aggregates and scene summaries — sensor entries carry
-physical `fields` (mean/min/max/n for radar SNR, CSI variance, RSSI,
-audio level…) plus node `estimates` and `location`, and `reference` —
-measured empty-vs-occupied stats for the radar/CSI fields (E1 rig:
-empty room snr mean ~7.6 dB tight, occupancy shows as snr_max spikes
->15-40 dB + map-mean lifts — a modest median SNR alone is weak) — then
-the user's question and optional attachments.
+physical `fields` (mean/std/min/max/n for radar SNR, CSI variance,
+RSSI, IMU, audio level…) plus node `estimates` and `location`, and
+`reference` — measured empty-vs-occupied stats for the radar/CSI
+fields (E1 rig: empty room snr mean ~7.6 dB tight, occupancy shows as
+snr_max spikes >15-40 dB + map-mean lifts — a modest median SNR alone
+is weak) — then the user's question and optional attachments.
+
+Identity — WHO and WHICH THINGS belong to the account:
+  * `persons`/`places` list the account's people and address→building→
+    room hierarchy; `person:owner` is the account owner, `place:home`
+    the home address, its `rooms` the drawn layout.
+  * Every `devices[]` row (registry nodes/apps/watches) is OWNED by
+    `person:owner` unless evidence says otherwise — `entity_key` links
+    it to its `device:<uuid>` map entity. Emitters absent from
+    `devices` are unknowns.
+  * Assume owned devices sit in the owner's identified room/place
+    unless located_in edges or fresher evidence place them elsewhere.
+  * `config`/`provenance` tell you which bundle sections exist and the
+    window/caps the user configured.
 
 Rules:
   * Answer ONLY from the bundle + attachments + conversation — never
@@ -257,6 +367,9 @@ Rules:
 
 Respond ONLY with this JSON shape:
 {"answer": "<markdown text>",
+ "assessments": [{"claim": "<factual statement you made>",
+                  "probability": 0.0,
+                  "basis": "<bundle field/evidence supporting it>"}],
  "widgets": [
    {"type": "list", "title": "…", "items": ["…"]},
    {"type": "key_values", "title": "…",
@@ -268,6 +381,11 @@ Respond ONLY with this JSON shape:
                "confidence": 0.9, "confirmed": true}]},
    {"type": "questions", "items": ["natural follow-up question?"]}
  ]}
+
+Assessments — one entry per consequential factual claim in `answer`,
+with a calibrated probability (0–1) grounded in the bundle: fresh
+direct evidence → high; stale/inferred/absent → low. These make
+answers actionable downstream, so always emit them for factual claims.
 
 Widget guidance — include only what genuinely helps: list for
 enumerations, key_values for summaries, table for comparisons, states
@@ -342,6 +460,9 @@ def _openai_answer(messages: List[Dict[str, Any]], *,
     widgets = parsed.get("widgets")
     parsed["widgets"] = ([w for w in widgets if isinstance(w, dict)]
                          if isinstance(widgets, list) else [])
+    asmts = parsed.get("assessments")
+    parsed["assessments"] = ([a for a in asmts if isinstance(a, dict)]
+                             if isinstance(asmts, list) else [])
     return parsed
 
 
@@ -392,8 +513,10 @@ async def chat(
     if tier not in _TIERS:
         raise HTTPException(422, f"unknown model tier {tier!r} "
                                  f"— one of {list(_TIERS)}")
-    context_used = (_chat_context(db, current_user.userId, current_user,
-                                  detail=tier)
+    context_used = (_chat_context(
+                        db, current_user.userId, current_user,
+                        detail=tier, cfg=_load_config(db,
+                                                      current_user.userId))
                     if body.include_context else None)
 
     messages: List[Dict[str, Any]] = [
@@ -433,6 +556,8 @@ async def chat(
 
     return {
         "answer": parsed["answer"],
+        "assessments": [a for a in (parsed.get("assessments") or [])
+                        if isinstance(a, dict)],
         "widgets": parsed["widgets"],
         "context_used": context_used,
         "attachments": attachment_notes,
@@ -447,8 +572,39 @@ async def chat_context(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """The bundle the assistant would be given — what the model sees."""
-    return _chat_context(db, current_user.userId, current_user)
+    """The bundle the assistant would be given — what the model sees,
+    plus ``config`` and ``provenance`` describing every section."""
+    return _chat_context(db, current_user.userId, current_user,
+                         cfg=_load_config(db, current_user.userId))
+
+
+@router.get("/config")
+async def get_chat_config(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """User's assistant context configuration (see ChatConfig)."""
+    return {"config": _load_config(db, current_user.userId).model_dump()}
+
+
+@router.put("/config")
+async def put_chat_config(
+    body: ChatConfig,
+    current_user: User = Depends(get_scoped_principal("chat:write")),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Persist the user's assistant context configuration."""
+    ent = db.query(ContextEntity).filter(
+        ContextEntity.user_id == current_user.userId,
+        ContextEntity.entity_key == _CONFIG_ENTITY).first()
+    if ent is None:
+        ent = ContextEntity(user_id=current_user.userId,
+                            entity_key=_CONFIG_ENTITY, kind="system",
+                            name="chat config", attributes="{}")
+        db.add(ent)
+    ent.attributes = body.model_dump_json()
+    db.commit()
+    return {"config": body.model_dump()}
 
 
 @router.post("/transcribe")

@@ -142,7 +142,12 @@ def _aggregate(rows: List[ContextEvidence]) -> List[Dict[str, Any]]:
         fields = {}
         for name, xs in list(g["fields"].items())[:MAX_FIELDS]:
             mean = sum(xs) / len(xs)
-            fields[name] = {"mean": round(mean, 3), "min": round(min(xs), 3),
+            # Population std — variance-based classifiers (worn/unworn
+            # IMU, motion stillness) key off this; n==1 → 0.
+            var = (sum((x - mean) ** 2 for x in xs) / len(xs)
+                   if len(xs) > 1 else 0.0)
+            fields[name] = {"mean": round(mean, 3), "std": round(var ** 0.5, 3),
+                            "min": round(min(xs), 3),
                             "max": round(max(xs), 3), "n": len(xs)}
         out.append({
             "key": g["key"], "device": g["device"], "n": g["n"],

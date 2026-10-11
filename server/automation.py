@@ -57,6 +57,35 @@ class AutomationEngine:
         return {"status": "queued", "actuator_id": actuator_id,
                 "command": command}
 
+    @staticmethod
+    def _contains(value: Any, needle: Any) -> bool:
+        """``contains`` comparator — dict-subset / list-membership /
+        case-insensitive substring, falling back to equality."""
+        if isinstance(value, dict) and isinstance(needle, dict):
+            return all(value.get(k) == v for k, v in needle.items())
+        if isinstance(value, (list, tuple)):
+            return needle in value
+        if isinstance(value, str) and isinstance(needle, str):
+            return needle.lower() in value.lower()
+        return value == needle
+
+    @staticmethod
+    def _cmp(value: Any, bound: Any, op: str) -> bool:
+        """Numeric comparison against scalars or single-field dicts
+        ({distance_m}, {est_m}…) — used by min/max thresholds."""
+        if isinstance(value, dict):
+            for f in ("distance_m", "est_m", "value", "rssi", "rssi_dbm"):
+                if f in value:
+                    value = value[f]
+                    break
+            else:
+                return False
+        try:
+            v, b = float(value), float(bound)
+        except (TypeError, ValueError):
+            return False
+        return v >= b if op == "min" else v <= b
+
     def _matches(self, when: Dict[str, Any],
                  states: List[Dict[str, Any]]) -> bool:
         key = when.get("key")
@@ -66,7 +95,19 @@ class AutomationEngine:
                 continue
             if entity and s.get("entity_id") != entity:
                 continue
-            if "equals" in when and s.get("value") != when["equals"]:
+            v = s.get("value")
+            if "field" in when:
+                v = v.get(when["field"]) if isinstance(v, dict) else None
+            if "equals" in when and v != when["equals"]:
+                continue
+            if "not_equals" in when and v == when["not_equals"]:
+                continue
+            if "contains" in when and not self._contains(
+                    v, when["contains"]):
+                continue
+            if "min" in when and not self._cmp(v, when["min"], "min"):
+                continue
+            if "max" in when and not self._cmp(v, when["max"], "max"):
                 continue
             if "min_confidence" in when and \
                     (s.get("confidence") or 0) < when["min_confidence"]:
