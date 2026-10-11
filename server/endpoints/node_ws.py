@@ -780,6 +780,13 @@ async def post_event(
         user_id = principal.userId
     if not request.kind:
         raise HTTPException(status_code=422, detail="kind is required")
+    if kind == "device":
+        # A live node JWT hitting the REST fallback proves the node is
+        # up even when its WS is down — keep the device row fresh so
+        # devices/chat never report a dead node that's still pushing.
+        target.last_seen = datetime.utcnow()
+        target.online = True
+        db.commit()
     row = _write_event(user_id, target.device_uuid, request.kind,
                        request.data, request.ts, request.event_id)
     if request.kind == "prediction":
@@ -920,6 +927,12 @@ async def post_usage(
         raise HTTPException(
             status_code=422,
             detail=f"kind must be one of {sorted(USAGE_KINDS | {'api'})}")
+    if kind == "device":
+        # Usage posts from a node JWT are liveness too — a node billing
+        # inference is obviously up even if its WS flap.
+        target.last_seen = datetime.utcnow()
+        target.online = True
+        db.commit()
     row = _record_usage(
         db, user_id=user_id, device_uuid=target.device_uuid,
         source=request.source if request.source in USAGE_SOURCES else "api",
