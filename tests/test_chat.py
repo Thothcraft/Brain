@@ -96,8 +96,8 @@ def test_chat_context_endpoint_shows_bundle_for_free(api):
 
 
 def test_chat_model_tier_routes_and_422s(api, monkeypatch):
-    """The app's Fast/Advanced slider selects the model — advanced also
-    widens the context bundle; a bogus tier is rejected."""
+    """The app's model chooser selects the model — numbered picks map to
+    concrete ids and widen the bundle for 5/6; a bogus tier is rejected."""
     client, _ = api
     seen = {}
 
@@ -113,6 +113,14 @@ def test_chat_model_tier_routes_and_422s(api, monkeypatch):
     assert r.status_code == 200, r.text
     assert seen["tier"] == "advanced"
     assert r.json()["model"]["id"] == chat._ADVANCED_MODEL
+
+    for pick in ("4", "5", "6"):
+        r = client.post("/v1/chat",
+                        json={"message": "hi", "model": pick})
+        assert r.status_code == 200, r.text
+        assert r.json()["model"] == {"tier": pick,
+                                     "id": chat._TIER_MODELS[pick]}
+        assert seen["tier"] == pick
 
     r = client.post("/v1/chat",
                     json={"message": "hi", "model": "gpt-99"})

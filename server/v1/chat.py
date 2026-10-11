@@ -42,7 +42,9 @@ from server.db import ContextEntity, User, get_db
 from server.inference_auth import (
     INFERENCE_SOURCE, inference_call, inference_status,
 )
-from .context_builder import BUILDER_ENTITY, build_bundle, map_snapshot
+from .context_builder import (
+    BUILDER_ENTITY, build_bundle, seed_devices,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["v1", "chat"])
@@ -54,8 +56,8 @@ _ADVANCED_MODEL = "gpt-4o"
 # (CHAT_MODEL_4 / CHAT_MODEL_5 / CHAT_MODEL_6).
 _TIER_MODELS = {
     "4": "gpt-4o",
-    "5": "gpt-5",
-    "6": "gpt-6",
+    "5": "gpt-4.1",
+    "6": "gpt-5",
 }
 _TIERS = ("standard", "advanced", *_TIER_MODELS)
 # Picks that get the widened context bundle + bigger message budget.
@@ -121,6 +123,10 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
     sees. ``advanced`` widens every cap — more descriptor groups, more
     scenes and the builder's last proposal — for the bigger model."""
     now = now or time.time()
+    # Same anchors the builder maintains — registry devices (with MAC/
+    # hostname fingerprints) + person:owner/place:home — so the assistant
+    # never answers against an unseeded map.
+    seed_devices(db, user_id, now)
     bundle = build_bundle(db, user_id, now, window_s=900.0)
     builder_ent = db.query(ContextEntity).filter(
         ContextEntity.user_id == user_id,
@@ -301,9 +307,24 @@ def _openai_answer(messages: List[Dict[str, Any]], *,
         raise HTTPException(503, "OPENAI_API_KEY not configured")
     model = _model_for_tier(tier)
     client = OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(
-        model=model, messages=messages, temperature=0.3,
-        response_format={"type": "json_object"})
+    kwargs: Dict[str, Any] = {
+        "model": model, "messages": messages,
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"},
+    }
+    # Reasoning-class models (gpt-5, o-series…) reject `temperature`
+    # and/or `response_format` — degrade on BadRequestError instead of
+    # failing the user's turn.
+    from openai import BadRequestError
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except BadRequestError:
+        kwargs.pop("temperature", None)
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except BadRequestError:
+            kwargs.pop("response_format", None)
+            resp = client.chat.completions.create(**kwargs)
     if usage_out is not None:
         usage_out["model_id"] = model
         usage_out["tokens"] = getattr(

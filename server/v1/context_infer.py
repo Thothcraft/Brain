@@ -892,6 +892,17 @@ def _load_attrs(db: Session, user_id: int, key: str) -> Dict[str, Any]:
     return a if isinstance(a, dict) else {}
 
 
+def _norm_entity_id(raw_id: Any, kind: str) -> str:
+    """Model ids must land on the canonical ``<kind>:<slug>`` convention —
+    an unprefixed "home"/"owner" would otherwise mint a sibling entity
+    next to the seeded ``place:home``/``person:owner`` anchors."""
+    rid = str(raw_id or "").strip()
+    if ":" in rid:
+        return rid
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", rid).strip("-").lower()
+    return f"{kind}:{slug}" if slug else ""
+
+
 def _apply_form(db: Session, user_id: int,
                 form: Dict[str, Any]) -> Dict[str, Any]:
     """Validate + persist a predicted form via the shared apply_*
@@ -1045,7 +1056,7 @@ def _apply_form(db: Session, user_id: int,
     # on room devices is preserved by _merge_rooms.
     for i, raw in enumerate(form.get("places") or []):
         raw = dict(raw) if isinstance(raw, dict) else {}
-        pid = str(raw.get("id") or "").strip()
+        pid = _norm_entity_id(raw.get("id"), "place")
         if not pid:
             errors.append({"section": "places", "index": i,
                            "error": "id required"})
@@ -1084,6 +1095,8 @@ def _apply_form(db: Session, user_id: int,
             if not rid and rname:
                 rid = f"{pid}-" + re.sub(
                     r"[^a-z0-9]+", "-", rname.lower()).strip("-")
+            else:
+                rid = _norm_entity_id(rid, "place")
             if not rid or rid == pid:
                 continue
             rattrs = _load_attrs(db, user_id, rid)
@@ -1121,7 +1134,7 @@ def _apply_form(db: Session, user_id: int,
     # resolved location becomes a located_in edge + location.v1 state.
     for i, raw in enumerate(form.get("persons") or []):
         raw = dict(raw) if isinstance(raw, dict) else {}
-        pid = str(raw.get("id") or "").strip()
+        pid = _norm_entity_id(raw.get("id"), "person")
         if not pid:
             errors.append({"section": "persons", "index": i,
                            "error": "id required"})
@@ -1164,9 +1177,10 @@ def _apply_form(db: Session, user_id: int,
             loc = {"place": loc.strip()}
         else:
             loc = {}
-        target = loc.get("room") or loc.get("place")
+        target = _norm_entity_id(
+            loc.get("room") or loc.get("place"), "place")
         conf = float(raw.get("confidence") or 0.6)
-        if target and str(target) != pid:
+        if target and target != pid:
             try:
                 rel = apply_relationship(db, user_id, RelationshipIn(
                     subject=pid, predicate="located_in",
@@ -1226,9 +1240,11 @@ def _apply_form(db: Session, user_id: int,
         if fp_hit:
             key = fp_hit
         else:
-            key = ref if ref.startswith("device:") else \
-                "device:" + re.sub(r"[^A-Za-z0-9_.-]+", "-", ref)\
-                                 .strip("-").lower()
+            # Slugify the tail too — a "device:AA:BB" ref would otherwise
+            # survive with colons/uppercase unlike every other key.
+            tail = re.sub(r"^device:", "", ref)
+            key = "device:" + (re.sub(r"[^A-Za-z0-9_.-]+", "-", tail)
+                               .strip("-").lower() or "unknown")
         attrs = _load_attrs(db, user_id, key)
         aliases = set(attrs.get("aliases") or [])
         if ref != key:
