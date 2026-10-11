@@ -32,7 +32,7 @@ router = APIRouter(prefix="/automation", tags=["v1", "automation"])
 class RuleIn(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     when: Dict[str, Any]
-    then: Dict[str, Any]
+    then: Any  # dict or list[dict] — multi-action rules fan out
     cooldown_s: float = Field(default=0.0, ge=0.0)
     enabled: bool = True
 
@@ -64,12 +64,17 @@ async def upsert_rule(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    if not isinstance(body.when, dict) or not body.when.get("key"):
-        raise HTTPException(status_code=422,
-                            detail="when{} needs at least a state key")
-    if not isinstance(body.then, dict) or not body.then.get("actuator_id"):
-        raise HTTPException(status_code=422,
-                            detail="then{} needs an actuator_id")
+    if not isinstance(body.when, dict) or not any(
+            k in body.when for k in ("key", "all", "any", "expr")):
+        raise HTTPException(
+            status_code=422,
+            detail="when{} needs key, all[], any[], or expr")
+    thens = body.then if isinstance(body.then, list) else [body.then]
+    if not thens or not all(
+            isinstance(t, dict) and t.get("actuator_id") for t in thens):
+        raise HTTPException(
+            status_code=422,
+            detail="each then action needs an actuator_id")
     rule = db.query(AutomationRule).filter(
         AutomationRule.user_id == current_user.userId,
         AutomationRule.name == body.name).first()

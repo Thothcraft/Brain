@@ -48,7 +48,7 @@ class AutomationEngine:
 
     def add_rule(self, rule: Dict[str, Any]) -> Dict[str, Any]:
         if not rule.get("name") or not isinstance(rule.get("when"), dict) \
-                or not isinstance(rule.get("then"), dict):
+                or not isinstance(rule.get("then"), (dict, list)):
             raise ValueError("rule needs name, when{}, and then{}")
         self._rules.append(rule)
         return rule
@@ -132,6 +132,26 @@ class AutomationEngine:
 
     def _matches(self, when: Dict[str, Any],
                  states: List[Dict[str, Any]]) -> bool:
+        # Composed conditions — `all` ANDs, `any` ORs; each sub-clause
+        # uses the same grammar (key/entity/equals/…/expr) and may nest.
+        if "all" in when:
+            clauses = when.get("all")
+            if not isinstance(clauses, list) or not clauses:
+                return False
+            if not all(self._matches(c, states)
+                       for c in clauses if isinstance(c, dict)):
+                return False
+            if not any(k in when for k in ("key", "any", "expr")):
+                return True
+        if "any" in when:
+            clauses = when.get("any")
+            if not isinstance(clauses, list) or not clauses:
+                return False
+            if not any(self._matches(c, states)
+                       for c in clauses if isinstance(c, dict)):
+                return False
+            if not any(k in when for k in ("key", "expr")):
+                return True
         expr = when.get("expr")
         if expr is not None:
             if _whispy_eval is None:
@@ -144,7 +164,7 @@ class AutomationEngine:
         key = when.get("key")
         entity = when.get("entity_id")
         for s in states:
-            if s.get("key") != key:
+            if key and s.get("key") != key:
                 continue
             if entity and s.get("entity_id") != entity:
                 continue
@@ -186,19 +206,31 @@ class AutomationEngine:
                 continue
             if was and cooldown <= 0:
                 continue  # still matched, no re-fire without a transition
-            action = rule["then"]
-            command = {"operation": action.get("operation", ""),
-                       "params": action.get("params") or {},
-                       "device_id": action.get("device_id", ""),
-                       "expires_in_s": action.get("expires_in_s")}
+            then = rule["then"]
+            actions = (then if isinstance(then, list)
+                       else [then])
+            results = []
             self.current_rule_name = name
             try:
-                result = self._actuate(action.get("actuator_id", ""),
-                                       command)
+                for action in actions:
+                    if not isinstance(action, dict):
+                        continue
+                    command = {
+                        "operation": action.get("operation", ""),
+                        "params": action.get("params") or {},
+                        "device_id": action.get("device_id", ""),
+                        "expires_in_s": action.get("expires_in_s")}
+                    result = self._actuate(
+                        action.get("actuator_id", ""), command)
+                    result = dict(result) if isinstance(result, dict) \
+                        else {"status": str(result)}
+                    result["command"] = command
+                    results.append(result)
             finally:
                 self.current_rule_name = None
-            record = {"rule": name, "action": command,
-                      "result": result}
+            record = {"rule": name,
+                      "action": results[0]["command"] if results else {},
+                      "result": results[0] if len(results) == 1 else results}
             self.results.append(record)
             fired.append(record)
             self._last_fired[name] = now
@@ -252,10 +284,12 @@ class PersistentAutomation:
                  ) -> List[Dict[str, Any]]:
         """Evaluate rules against the snapshot; persist everything."""
         self._trigger = dict(trigger or {})
+        self._exec_by_rule: Dict[str, Any] = {}
         try:
             fired = self.engine.evaluate(snapshot)
         finally:
             self._trigger = {}
+            self._exec_by_rule = {}
         self._persist_states()
         return fired
 
@@ -268,44 +302,77 @@ class PersistentAutomation:
 
         rule_name = self.engine.current_rule_name or ""
         rule_row = self._rule_rows.get(rule_name)
-        execution = AutomationExecution(
-            execution_id=uuid.uuid4().hex,
-            rule_id=rule_row.id if rule_row else 0,
-            user_id=self.user_id,
-            rule_name=rule_name,
-            trigger_state_id=self._trigger.get("state_id"),
-            trigger_event_id=self._trigger.get("event_id"),
-            trigger_snapshot=json.dumps(
-                self._trigger.get("state") or {}))
-        self.db.add(execution)
+        execution = getattr(self, "_exec_by_rule", {}).get(rule_name)
+        if execution is None:
+            execution = AutomationExecution(
+                execution_id=uuid.uuid4().hex,
+                rule_id=rule_row.id if rule_row else 0,
+                user_id=self.user_id,
+                rule_name=rule_name,
+                trigger_state_id=self._trigger.get("state_id"),
+                trigger_event_id=self._trigger.get("event_id"),
+                trigger_snapshot=json.dumps(
+                    self._trigger.get("state") or {}))
+            self.db.add(execution)
+            self.db.flush()
+            self._exec_by_rule[rule_name] = execution
 
         expires_in = command.get("expires_in_s")
-        action = ActionRequest(
-            action_id=uuid.uuid4().hex,
-            execution_id=execution.execution_id,
-            user_id=self.user_id,
-            device_id=str(command.get("device_id") or ""),
-            actuator_id=actuator_id,
-            operation=str(command.get("operation") or ""),
-            params=json.dumps(command.get("params") or {}),
-            origin=f"automation:{rule_name}",
-            expires_at=(datetime.utcnow() + timedelta(seconds=float(expires_in))
-                        if expires_in else None),
-            correlation=json.dumps({
-                "evidence_id": self._trigger.get("evidence_id"),
-                "state_id": self._trigger.get("state_id"),
-                "event_id": self._trigger.get("event_id"),
-                "execution_id": execution.execution_id}))
-        self.db.add(action)
-        self.db.commit()
+        requested_dev = str(command.get("device_id") or "")
 
-        dispatch_action(self.db, action)
-        result = json.loads(action.result_json) if action.result_json else {
-            "status": action.status}
-        result = dict(result)
-        result["action_id"] = action.action_id
-        result["execution_id"] = execution.execution_id
-        return result
+        # Generic targeting — a rule needn't name the node. ``device_id``
+        # empty picks the best online node advertising the actuator;
+        # ``"*"`` fans out to every node that does.
+        targets: List[Dict[str, Any]] = []
+        if requested_dev in ("", "*") and actuator_id != "notify":
+            from .actuation import resolve_actuator_targets
+            hits = resolve_actuator_targets(
+                self.db, self.user_id, actuator_id)
+            if requested_dev == "*":
+                targets = [{"device_id": t["device"].device_uuid,
+                            "actuator_id": t["actuator_id"]}
+                           for t in hits]
+            elif hits:
+                targets = [{"device_id": hits[0]["device"].device_uuid,
+                            "actuator_id": hits[0]["actuator_id"]}]
+            else:
+                targets = [{"device_id": "", "actuator_id": actuator_id}]
+        else:
+            targets = [{"device_id": requested_dev,
+                        "actuator_id": actuator_id}]
+
+        results = []
+        for target in targets:
+            action = ActionRequest(
+                action_id=uuid.uuid4().hex,
+                execution_id=execution.execution_id,
+                user_id=self.user_id,
+                device_id=target["device_id"],
+                actuator_id=target["actuator_id"],
+                operation=str(command.get("operation") or ""),
+                params=json.dumps(command.get("params") or {}),
+                origin=f"automation:{rule_name}",
+                expires_at=(datetime.utcnow()
+                            + timedelta(seconds=float(expires_in))
+                            if expires_in else None),
+                correlation=json.dumps({
+                    "evidence_id": self._trigger.get("evidence_id"),
+                    "state_id": self._trigger.get("state_id"),
+                    "event_id": self._trigger.get("event_id"),
+                    "execution_id": execution.execution_id}))
+            self.db.add(action)
+            self.db.commit()
+
+            dispatch_action(self.db, action)
+            result = json.loads(action.result_json) \
+                if action.result_json else {"status": action.status}
+            result = dict(result)
+            result["action_id"] = action.action_id
+            result["execution_id"] = execution.execution_id
+            result["device_id"] = action.device_id
+            results.append(result)
+        return results[0] if len(results) == 1 else \
+            {"status": "fanout", "results": results}
 
     def _persist_states(self) -> None:
         from .db import AutomationRuleState
@@ -334,7 +401,10 @@ def evaluate_user_rules(db, user_id: int,
     is offline.
     """
     from .db import ContextState as _CS
-    rows = db.query(_CS).filter(_CS.user_id == user_id).all()
+    now = time.time()
+    rows = db.query(_CS).filter(
+        _CS.user_id == user_id,
+        (_CS.valid_until.is_(None)) | (_CS.valid_until > now)).all()
     snapshot = {"states": [r.to_dict() for r in rows]}
     return PersistentAutomation(db, user_id).evaluate(
         snapshot, trigger=trigger)

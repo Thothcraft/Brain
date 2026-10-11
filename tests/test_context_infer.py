@@ -566,6 +566,7 @@ def test_gather_assembles_comprehensive_payload(api, monkeypatch):
     session.add(Device(userId=1, device_uuid="uuid-radar-pi",
                        device_name="thoth-chen", device_type="thoth",
                        mac_address="d8:3a:dd:00:11:22",
+                       approved=True,
                        hardware_info='{"model": "Pi5"}'))
     session.add(ContextEvidence(
         user_id=1, device_id="uuid-radar-pi",
@@ -641,7 +642,8 @@ def test_devices_section_resolves_mac_to_registered_anchor(api,
     client, session, _ = api
     session.add(Device(userId=1, device_uuid="uuid-radar-pi",
                        device_name="thoth-chen", device_type="thoth",
-                       mac_address="d8:3a:dd:11:22:33"))
+                       mac_address="d8:3a:dd:11:22:33",
+                       approved=True))
     session.commit()
     form = {"summary": "s", "states": [],
             "devices": [
@@ -679,7 +681,8 @@ def test_persons_and_places_sections(api, monkeypatch):
     client, session, _ = api
     session.add(Device(userId=1, device_uuid="uuid-radar-pi",
                        device_name="thoth-chen", device_type="thoth",
-                       mac_address="d8:3a:dd:11:22:33"))
+                       mac_address="d8:3a:dd:11:22:33",
+                       approved=True))
     session.commit()
     form = {"summary": "s", "states": [],
             "places": [{

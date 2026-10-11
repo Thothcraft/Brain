@@ -41,6 +41,46 @@ TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "unsupported", "expired"})
 
 
+def resolve_actuator_targets(db: Session, user_id: int,
+                             actuator_id: str
+                             ) -> List[Dict[str, Any]]:
+    """Map an actuator reference to the devices that advertise it.
+
+    ``actuator_id`` in a rule may be a concrete actuator id
+    (``light-c483``), a kind (``light``), or a name (``gad-room``) — the
+    node's reported ``hardware_info.actuators`` inventory is searched for
+    all three. Online devices sort first; each hit is
+    ``{"device": Device, "actuator_id": <resolved concrete id>}`` so a
+    rule written against a kind still targets the real actuator id.
+    """
+    if not actuator_id or actuator_id == "notify":
+        return []
+    out: List[Dict[str, Any]] = []
+    rows = db.query(Device).filter(
+        Device.userId == user_id,
+        Device.approved == True).all()  # noqa: E712
+    for dev in rows:
+        try:
+            hw = json.loads(dev.hardware_info) if dev.hardware_info else {}
+        except (TypeError, json.JSONDecodeError):
+            hw = {}
+        acts = hw.get("actuators")
+        if not isinstance(acts, list):
+            continue
+        for a in acts:
+            if not isinstance(a, dict):
+                continue
+            if actuator_id in (a.get("id"), a.get("kind"), a.get("name")):
+                out.append({"device": dev,
+                            "actuator_id": a.get("id") or actuator_id,
+                            "kind": a.get("kind"),
+                            "online": bool(dev.online)})
+                break
+    out.sort(key=lambda t: (not t["online"],
+                            t["device"].device_name or ""))
+    return out
+
+
 def device_endpoint(device: Device) -> Optional[Dict[str, Any]]:
     """Resolve a device's local-API endpoint from its reported inventory."""
     try:
