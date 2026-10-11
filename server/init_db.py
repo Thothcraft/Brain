@@ -626,12 +626,39 @@ def ensure_subscription_schema():
         return False
 
 
+def ensure_calibration_schema():
+    """Apply the descriptor_calibration table — labeled baselines
+    uploaded by nodes (calibration/v1 docs). Idempotent — safe on
+    every startup; without it /v1/calibrations 500s."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS descriptor_calibration (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id),
+                    device_id VARCHAR(255) NOT NULL,
+                    label VARCHAR(120) NOT NULL,
+                    doc TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, label)
+                );
+                CREATE INDEX IF NOT EXISTS idx_descriptor_calibration_user
+                    ON descriptor_calibration(user_id);
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring calibration schema: {e}")
+        return False
+
+
 def initialize_database():
     """Initialize all required database tables."""
     logger.info("[INIT] Starting database initialization")
 
     try:
         results = {
+            "calibration_schema": ensure_calibration_schema(),
             "product_core": ensure_product_core_schema(),
             "trained_model": ensure_trained_model_table(),
             "device.approved": ensure_approved_column(),
