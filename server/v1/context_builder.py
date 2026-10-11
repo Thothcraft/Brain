@@ -1517,9 +1517,9 @@ async def rebuild_context_map(
 
 def _interval_s() -> float:
     try:
-        return float(os.getenv("CONTEXT_BUILDER_INTERVAL_S", "300"))
+        return float(os.getenv("CONTEXT_BUILDER_INTERVAL_S", "600"))
     except ValueError:
-        return 300.0
+        return 600.0
 
 
 def build_due_users(session_factory, now: Optional[float] = None) -> List[int]:
