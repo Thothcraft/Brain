@@ -234,7 +234,25 @@ def seed_devices(db: Session, user_id: int, now: float,
     dry-run builds so a preview writes no relationship rows.
     """
     seeded = []
-    for dev in db.query(Device).filter(Device.userId == user_id).all():
+    rows = (db.query(Device)
+            .filter(Device.userId == user_id,
+                    Device.approved == True)  # noqa: E712
+            .all())
+    # Reinstalls mint a new uuid each time — same device_name = same
+    # physical machine. Seed only the most-recently-seen row per name so
+    # stale registrations never spawn duplicate entities.
+    canonical: Dict[str, Device] = {}
+
+    def _freshness(dev: Device) -> Tuple[float, int]:
+        ts = dev.last_seen.timestamp() if dev.last_seen else 0.0
+        return (ts, int(dev.deviceId or 0))
+
+    for dev in rows:
+        name = (dev.device_name or "").lower()
+        prev = canonical.get(name)
+        if prev is None or _freshness(dev) > _freshness(prev):
+            canonical[name] = dev
+    for dev in canonical.values():
         key = f"device:{dev.device_uuid}"
         ent = db.query(ContextEntity).filter(
             ContextEntity.user_id == user_id,
@@ -614,7 +632,22 @@ def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
     registered node from an unknown emitter seen only in scans."""
     out = []
     seen_fp: Dict[str, str] = {}
-    for dev in db.query(Device).filter(Device.userId == user_id).all():
+    rows = (db.query(Device)
+            .filter(Device.userId == user_id,
+                    Device.approved == True)  # noqa: E712
+            .all())
+
+    def _fresh(dev: Device) -> Tuple[float, int]:
+        ts = dev.last_seen.timestamp() if dev.last_seen else 0.0
+        return (ts, int(dev.deviceId or 0))
+
+    canon: Dict[str, Device] = {}
+    for d in rows:
+        nm = (d.device_name or "").lower()
+        p = canon.get(nm)
+        if p is None or _fresh(d) > _fresh(p):
+            canon[nm] = d
+    for dev in canon.values():
         hw: Dict[str, Any] = {}
         if dev.hardware_info:
             try:

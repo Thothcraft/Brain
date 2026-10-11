@@ -54,7 +54,8 @@ def db():
         session.add(User(userId=1, username="t", email="t@e.invalid",
                          hashed_password="x", role=0, plan="free"))
         session.add(Device(userId=1, device_uuid="dev-1",
-                           device_name="thoth-chen", device_type="thoth"))
+                           device_name="thoth-chen", device_type="thoth",
+                           approved=True))
         session.commit()
         yield session, factory
     engine.dispose()
