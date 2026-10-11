@@ -6,8 +6,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from server.db import Base, ContextEvidence, User
-from server.endpoints.node_ws import ingest_observation_batch
+from server.db import Base, ContextEvidence, ContextState, User
+from server.endpoints.node_ws import (ingest_observation_batch,
+                                      _apply_prediction_context)
 
 
 @pytest.fixture
@@ -100,3 +101,71 @@ def test_empty_and_wrong_frames_noop(session):
     assert ingest_observation_batch(session, 1, "d", {})["stored"] == 0
     assert ingest_observation_batch(
         session, 1, "d", {"items": "x"})["rejected"] == 0
+
+
+def test_state_obs_apply_as_states_before_sampling(session):
+    """context.state.v1 transitions are first-class ContextStates even
+    when the evidence row is sampled out — a fast occupancy flip inside
+    the 60 s interval must still land."""
+    frame = {"items": [
+        _item(schema="context.state.v1", observation_id="s1",
+              value={"key": "occupancy.v1", "entity_id": "lap-1",
+                     "value": {"occupied": True, "distinct_subjects": 1},
+                     "confidence": 0.9, "estimator": "ble-presence/1"}),
+        _item(schema="context.state.v1", observation_id="s2",
+              timestamp=1759612350.0,
+              value={"key": "occupancy.v1", "entity_id": "lap-1",
+                     "value": {"occupied": False, "distinct_subjects": 0},
+                     "confidence": 0.5, "estimator": "ble-presence/1"}),
+    ]}
+    out = ingest_observation_batch(session, 1, "dev-uuid", frame)
+    st = session.query(ContextState).filter_by(
+        state_key="occupancy.v1", entity_id="lap-1").one()
+    # the *second* transition won — sampled evidence, live state
+    assert json.loads(st.value)["occupied"] is False
+    assert st.estimator == "ble-presence/1"
+    assert out["stored"] == 1 and out["deduplicated"] == 1
+
+
+def test_occupancy_prediction_mirrors_to_occupancy_state(
+        session, monkeypatch):
+    """task=occupancy predictions (radar/CSI models) update occupancy.v1
+    — the room state stops depending on BLE-enrolled subjects alone."""
+    from contextlib import contextmanager
+    import server.endpoints.node_ws as nw
+
+    @contextmanager
+    def sess():
+        yield session
+
+    monkeypatch.setattr(nw, "get_db_session", sess)
+    nw._apply_prediction_context(1, "lap-1", {
+        "label": "occupied", "confidence": 0.93,
+        "task": "occupancy", "runtime_model_id": "occ-rf-moe"})
+    st = session.query(ContextState).filter_by(
+        state_key="occupancy.v1", entity_id="lap-1").one()
+    v = json.loads(st.value)
+    assert v == {"occupied": True, "label": "occupied",
+                 "model": "occ-rf-moe"}
+    assert st.confidence == 0.93
+    # the raw prediction state still lands under its own key
+    pr = session.query(ContextState).filter_by(
+        state_key="prediction", entity_id="lap-1").one()
+    assert json.loads(pr.value) == "occupied"
+
+
+def test_non_occupancy_prediction_does_not_touch_occupancy(
+        session, monkeypatch):
+    from contextlib import contextmanager
+    import server.endpoints.node_ws as nw
+
+    @contextmanager
+    def sess():
+        yield session
+
+    monkeypatch.setattr(nw, "get_db_session", sess)
+    nw._apply_prediction_context(1, "lap-1", {
+        "label": "Gad", "confidence": 0.9, "task": "face",
+        "runtime_model_id": "face-emb"})
+    assert session.query(ContextState).filter_by(
+        state_key="occupancy.v1").count() == 0

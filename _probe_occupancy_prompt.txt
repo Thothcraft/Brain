@@ -1,0 +1,223 @@
+=== request kwargs (model, response_format, etc.) ===
+{
+  "model": "gpt-4o",
+  "temperature": 0.3,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "thoth_answer",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "assessments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "claim": {
+                  "type": "string"
+                },
+                "probability": {
+                  "type": "number"
+                },
+                "basis": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "claim",
+                "probability",
+                "basis"
+              ]
+            }
+          },
+          "widgets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "label": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "value"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "entity": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "string"
+                          },
+                          "confidence": {
+                            "type": "number"
+                          },
+                          "confirmed": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "entity",
+                          "value",
+                          "confidence",
+                          "confirmed"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "columns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "rows": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "items",
+                "columns",
+                "rows"
+              ]
+            }
+          }
+        },
+        "required": [
+          "answer",
+          "assessments",
+          "widgets"
+        ]
+      }
+    }
+  }
+}
+
+=== messages sent to the model ===
+
+----- system -----
+You are the Thothcraft assistant answering questions about the user's
+physical spaces, devices and activity. You receive a context bundle —
+the same semantic map the context builder maintains (entities,
+relationships, derived states; entries marked `confirmed: true` are
+user-confirmed facts), a `devices` registry telling you which physical
+machine each `device:<uuid>` / scene `device` id is (name, type, MAC,
+hardware — anything not listed is an unknown emitter), recent evidence
+descriptor aggregates and scene summaries — sensor entries carry
+physical `fields` (mean/std/min/max/n for radar SNR, CSI variance,
+RSSI, IMU, audio level…) plus node `estimates` and `location`, and
+`reference`/`calibration` — measured empty-vs-occupied stats for the
+radar/CSI fields (compare the current window's tail — max spikes,
+widened std — against those stats; the median alone is weak evidence)
+— then the user's question and optional attachments.
+
+Identity — WHO and WHICH THINGS belong to the account:
+  * `persons`/`places` list the account's people and address→building→
+    room hierarchy; `person:owner` is the account owner, `place:home`
+    the home address, its `rooms` the drawn layout.
+  * Every `devices[]` row (registry nodes/apps/watches) is OWNED by
+    `person:owner` unless evidence says otherwise — `entity_key` links
+    it to its `device:<uuid>` map entity. Emitters absent from
+    `devices` are unknowns.
+  * Assume owned devices sit in the owner's identified room/place
+    unless located_in edges or fresher evidence place them elsewhere.
+  * `config`/`provenance` tell you which bundle sections exist and the
+    window/caps the user configured.
+
+Rules:
+  * Answer ONLY from the bundle + attachments + conversation — never
+    invent telemetry. Say when evidence is missing, stale or weak.
+  * Confirmed facts win over inferred ones; describe inferred entries as
+    tentative ("the system believes…").
+  * You can explain what the model was shown — the user can ask "what
+    context did you use?"; reference the bundle fields directly.
+  * Be concise. No prose outside the JSON object.
+
+Respond ONLY with this JSON shape:
+{"answer": "<markdown text>",
+ "assessments": [{"claim": "<factual statement you made>",
+                  "probability": 0.0,
+                  "basis": "<bundle field/evidence supporting it>"}],
+ "widgets": [
+   {"type": "list", "title": "…", "items": ["…"]},
+   {"type": "key_values", "title": "…",
+    "items": [{"label": "…", "value": "…"}]},
+   {"type": "table", "title": "…",
+    "columns": ["…"], "rows": [["…", "…"]]},
+   {"type": "states", "title": "…",
+    "items": [{"key": "…", "entity": "…", "value": "…",
+               "confidence": 0.9, "confirmed": true}]},
+   {"type": "questions", "items": ["natural follow-up question?"]}
+ ]}
+
+Assessments — one entry per consequential factual claim in `answer`,
+with a calibrated probability (0–1) grounded in the bundle: fresh
+direct evidence → high; stale/inferred/absent → low. These make
+answers actionable downstream, so always emit them for factual claims.
+
+Widget guidance — include only what genuinely helps: list for
+enumerations, key_values for summaries, table for comparisons, states
+when quoting live context verbatim, questions for 2–4 natural
+follow-ups. `answer` is always required; widgets may be an empty array.
+
+
+----- user -----
+[context bundle]
+{"generated_at": 1791698031.437418, "window_s": 900.0, "map": {"entities": [{"id": "device:lap-1", "kind": "device", "name": "gad-laptop", "aliases": ["gad-laptop", "lap-1"], "confidence": 1.0, "last_seen": null, "confirmed": false}, {"id": "device:watch-1", "kind": "device", "name": "PineTime", "aliases": ["PineTime", "watch-1"], "confidence": 1.0, "last_seen": null, "confirmed": false}, {"id": "person:owner", "kind": "person", "name": "gadgad", "aliases": [], "confidence": null, "last_seen": 1791698031.437418, "confirmed": false}, {"id": "place:home", "kind": "place", "name": "home", "aliases": [], "confidence": null, "last_seen": 1791698031.437418, "confirmed": false}], "relationships": [{"subject": "person:owner", "predicate": "located_in", "object": "place:home", "confidence": 0.5, "confirmed": false}, {"subject": "device:lap-1", "predicate": "owned_by", "object": "person:owner", "confidence": 0.95, "confirmed": false}, {"subject": "device:lap-1", "predicate": "located_in", "object": "place:home", "confidence": 0.5, "confirmed": false}, {"subject": "device:watch-1", "predicate": "owned_by", "object": "person:owner", "confidence": 0.95, "confirmed": false}, {"subject": "device:watch-1", "predicate": "located_in", "object": "place:home", "confidence": 0.5, "confirmed": false}], "states": [{"key": "occupancy.v1", "entity_id": "place:home", "value": {"occupied": false}, "confidence": 0.72, "confirmed": false}, {"key": "watch.worn.v1", "entity_id": "device:watch-1", "value": {"worn": false, "acc_std": 0.0041, "n": 150}, "confidence": 0.9, "confirmed": false}]}, "devices": [{"entity": "device:lap-1", "uuid": "lap-1", "name": "gad-laptop", "type": "thoth", "mac": null, "online": false, "last_seen": "2026-10-11T05:53:51.359669Z", "hardware": {}, "entity_key": "device:lap-1", "owned": true, "owner": "person:owner"}, {"entity": "device:watch-1", "uuid": "watch-1", "name": "PineTime", "type": "pinetime", "mac": null, "online": false, "last_seen": "2026-10-11T05:53:51.359681Z", "hardware": {}, "entity_key": "device:watch-1", "owned": true, "owner": "person:owner"}], "config": {"window_s": 900.0, "max_bundle_chars": 0, "include_scenes": true, "include_descriptors": true, "include_reference": true, "include_builder": true, "include_usage": true, "include_persons_places": true}, "provenance": {"sections": ["generated_at", "window_s", "map", "devices", "persons", "places", "descriptors", "scenes", "reference", "calibration", "builder", "usage"], "history": {"max_turns": 12, "max_chars_per_turn": 2000}, "attachments": {"max": 5, "image_bytes": 8388608, "file_chars": 16000}, "model_picks": {"standard": "gpt-4o-mini", "advanced": "gpt-4o", "4": "gpt-4o", "5": "gpt-4.1", "6": "gpt-5"}}, "persons": [{"id": "person:owner", "kind": "person", "name": "gadgad", "aliases": [], "confidence": null, "last_seen": 1791698031.437418, "confirmed": false}], "places": [{"id": "place:home", "kind": "place", "name": "home", "aliases": [], "confidence": null, "last_seen": 1791698031.437418, "confirmed": false}], "descriptors": [{"key": "radar.snr", "device": "lap-1", "n": 30, "span_s": 29.0, "age_s": 1.4, "mean_confidence": 0.9, "fields": {"snr_db": {"mean": 7.64, "std": 0.17, "min": 7.4, "max": 7.88, "n": 30}, "snr_max": {"mean": 9.0, "std": 0.327, "min": 8.6, "max": 9.4, "n": 30}}, "latest": {"snr_db": 7.88, "snr_max": 9.4}}, {"key": "csi.variance", "device": "lap-1", "n": 30, "span_s": 29.0, "age_s": 1.4, "mean_confidence": 0.9, "fields": {"var": {"mean": 0.034, "std": 0.002, "min": 0.031, "max": 0.037, "n": 30}}, "latest": {"var": 0.033}}], "scenes": [], "reference": {"radar_occupancy": {"dataset": "e1_multilink_5s", "sensor": "BGT60TR13C mmWave radar + Wi-Fi CSI", "windows": {"empty": 2154, "occupied": 2160, "window_s": 5, "frame_hz": 10}, "how_to_read": "empty-room stats are TIGHT (snr_db.mean p95<8, max<8.3; snr_db.max never >~13); occupancy shows in the TAIL of the window \u2014 snr_db.max spikes >15-40 dB, ra/re/xy map means lift ~+0.1-0.2, *std90 spreads widen ~2x. A modest snr mean alone is weak (AUC~0.7): call occupied on spikes + map lifts, not a fixed median threshold. Compare a node's lift vs ITS OWN empty baseline \u2014 absolute values shift with mounting.", "fields": {"snr_db.mean": {"empty": {"mean": 7.62, "std": 0.2, "p95": 7.93, "max": 8.28}, "occupied": {"p50": 7.8, "p75": 8.47, "p95": 22.37, "max": 31.69}, "d": 0.63, "auc": 0.71}, "snr_db.max": {"empty": {"mean": 10.07, "std": 0.62, "p95": 11.23, "max": 12.88}, "occupied": {"p50": 10.59, "p75": 17.77, "p95": 40.6, "max": 51.89}, "d": 0.8, "auc": 0.71}, "ra_mean": {"empty": {"p50": 5.693, "p95": 5.734, "max": 5.75}, "occupied": {"p50": 5.83, "p75": 5.888, "p95": 5.982}, "d": 3.08, "auc": 1.0}, "re_mean": {"empty": {"p50": 5.788, "p95": 5.808}, "occupied": {"p50": 5.926, "p75": 5.97, "p95": 6.08}, "d": 2.91, "auc": 0.99}, "xy_mean": {"empty": {"p50": 3.4, "p95": 3.412}, "occupied": {"p50": 3.446, "p75": 3.476, "p95": 3.506}, "d": 2.04, "auc": 0.94}, "re_p90": {"empty": {"p50": 7.822, "p95": 8.058}, "occupied": {"p50": 8.316, "p75": 8.417, "p95": 8.654}, "d": 1.98, "auc": 0.92}, "xy_peak": {"empty": {"p50": 14.184, "p95": 14.202}, "occupied": {"p50": 14.212, "p75": 14.218, "p95": 14.223}, "d": 1.88, "auc": 0.9}, "re_std90": {"empty": {"p50": 0.108, "p95": 0.113}, "occupied": {"p50": 0.22, "p75": 0.33, "p95": 0.873}, "d": 1.14, "auc": 0.97}, "xy_std90": {"empty": {"p50": 0.108, "p95": 0.112}, "occupied": {"p50": 0.145, "p75": 0.185, "p95": 0.444}, "d": 0.99, "auc": 0.98}, "rd_mean": {"empty": {"p50": 6.597, "p95": 6.613}, "occupied": {"p50": 6.61, "p75": 6.624, "p95": 6.715}, "d": 0.82}, "csi_amp_mean": {"empty": {"p50": 27.65, "p95": 38.12}, "occupied": {"p50": 24.81, "p95": 29.91}, "d": -1.54, "auc": 0.88, "direction": "mount-dependent"}}}}, "calibration": {"radar_occupancy": {"radar_occupancy": {"dataset": "e1_multilink_5s", "sensor": "BGT60TR13C mmWave radar + Wi-Fi CSI", "windows": {"empty": 2154, "occupied": 2160, "window_s": 5, "frame_hz": 10}, "how_to_read": "empty-room stats are TIGHT (snr_db.mean p95<8, max<8.3; snr_db.max never >~13); occupancy shows in the TAIL of the window \u2014 snr_db.max spikes >15-40 dB, ra/re/xy map means lift ~+0.1-0.2, *std90 spreads widen ~2x. A modest snr mean alone is weak (AUC~0.7): call occupied on spikes + map lifts, not a fixed median threshold. Compare a node's lift vs ITS OWN empty baseline \u2014 absolute values shift with mounting.", "fields": {"snr_db.mean": {"empty": {"mean": 7.62, "std": 0.2, "p95": 7.93, "max": 8.28}, "occupied": {"p50": 7.8, "p75": 8.47, "p95": 22.37, "max": 31.69}, "d": 0.63, "auc": 0.71}, "snr_db.max": {"empty": {"mean": 10.07, "std": 0.62, "p95": 11.23, "max": 12.88}, "occupied": {"p50": 10.59, "p75": 17.77, "p95": 40.6, "max": 51.89}, "d": 0.8, "auc": 0.71}, "ra_mean": {"empty": {"p50": 5.693, "p95": 5.734, "max": 5.75}, "occupied": {"p50": 5.83, "p75": 5.888, "p95": 5.982}, "d": 3.08, "auc": 1.0}, "re_mean": {"empty": {"p50": 5.788, "p95": 5.808}, "occupied": {"p50": 5.926, "p75": 5.97, "p95": 6.08}, "d": 2.91, "auc": 0.99}, "xy_mean": {"empty": {"p50": 3.4, "p95": 3.412}, "occupied": {"p50": 3.446, "p75": 3.476, "p95": 3.506}, "d": 2.04, "auc": 0.94}, "re_p90": {"empty": {"p50": 7.822, "p95": 8.058}, "occupied": {"p50": 8.316, "p75": 8.417, "p95": 8.654}, "d": 1.98, "auc": 0.92}, "xy_peak": {"empty": {"p50": 14.184, "p95": 14.202}, "occupied": {"p50": 14.212, "p75": 14.218, "p95": 14.223}, "d": 1.88, "auc": 0.9}, "re_std90": {"empty": {"p50": 0.108, "p95": 0.113}, "occupied": {"p50": 0.22, "p75": 0.33, "p95": 0.873}, "d": 1.14, "auc": 0.97}, "xy_std90": {"empty": {"p50": 0.108, "p95": 0.112}, "occupied": {"p50": 0.145, "p75": 0.185, "p95": 0.444}, "d": 0.99, "auc": 0.98}, "rd_mean": {"empty": {"p50": 6.597, "p95": 6.613}, "occupied": {"p50": 6.61, "p75": 6.624, "p95": 6.715}, "d": 0.82}, "csi_amp_mean": {"empty": {"p50": 27.65, "p95": 38.12}, "occupied": {"p50": 24.81, "p95": 29.91}, "d": -1.54, "auc": 0.88, "direction": "mount-dependent"}}}}}, "builder": {"builds": 0, "last_build_at": null, "last_summary": null, "pending": 0}, "usage": {"plan": "free", "period_start": 1790812800.0, "allowance": 200, "used": 0, "remaining": 200, "generated_at": 1791698031.4959605}}
+
+----- assistant -----
+Understood — I will answer only from that bundle plus what you send.
+
+----- user -----
+Is anyone in the room right now?

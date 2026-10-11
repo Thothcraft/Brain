@@ -214,6 +214,34 @@ def _write_event(
 
 _OBSERVATION_BATCH_MAX = 500
 _OBS_SCHEMA_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*\.v\d+$")
+# task="occupancy" labels → occupied flag (unknown/other → None).
+_OCC_TRUE_LABELS = {"occupied", "presence", "present", "person",
+                    "person_present"}
+_OCC_FALSE_LABELS = {"empty", "unoccupied", "vacant", "absent", "none",
+                     "no_presence", "no_person"}
+
+
+def _apply_node_state(db: Session, user_id: int, value: Any,
+                      ts: float) -> None:
+    """A node estimator transition (``context.state.v1``) lands as a
+    first-class ``ContextState`` — the evidence row is the audit trail,
+    the state is what rules and the agent read. Contract §4/§8."""
+    if not isinstance(value, dict) or not value.get("key"):
+        return
+    try:
+        from server.v1.context import StateIn, apply_state
+        apply_state(db, user_id, StateIn(
+            key=str(value["key"]),
+            value=value.get("value"),
+            entity_id=str(value.get("entity_id") or ""),
+            confidence=float(value.get("confidence") or 0.8),
+            since=ts,
+            estimator=str(value.get("estimator") or "node")))
+    except Exception:
+        # Confirmed-state conflicts, bad payloads — never fail the batch.
+        db.rollback()
+        logger.debug("[node-ws] state obs apply failed: %r", value,
+                     exc_info=True)
 
 
 def ingest_observation_batch(db: Session, user_id: int,
@@ -257,6 +285,11 @@ def ingest_observation_batch(db: Session, user_id: int,
             ts = float(raw.get("timestamp") or time())
         except (TypeError, ValueError):
             ts = time()
+        # Estimator transitions are first-class states — applied before
+        # the sampling gate so a fast occupied→empty flip inside the
+        # 60 s evidence interval still reaches rules and the agent.
+        if schema == "context.state.v1":
+            _apply_node_state(db, user_id, value, ts)
         # High-frequency schemas (BLE RSSI, radio sightings, motion) are
         # sampled to one row/min per device — ungated they filled
         # context_evidence with 750K rows / 515MB in two days.
@@ -375,6 +408,30 @@ def _apply_prediction_context(user_id: int, device_uuid: str,
                 evaluate_user_rules(db, user_id, trigger={
                     "state_id": state.id, "event_id": event.id,
                     "state": state.to_dict()})
+            # Occupancy-task predictions (radar/CSI models) also carry
+            # the canonical key — without this the room state only ever
+            # reflects the BLE estimator and occupancy sensors never
+            # reach rules or the agent.
+            if str(data.get("task") or "") == "occupancy":
+                lab = str(label).lower()
+                occupied = (True if lab in _OCC_TRUE_LABELS
+                            else False if lab in _OCC_FALSE_LABELS
+                            else None)
+                model = str(data.get("runtime_model_id")
+                            or data.get("model_id") or "node")
+                try:
+                    from server.v1.context import StateIn, apply_state
+                    apply_state(db, user_id, StateIn(
+                        key="occupancy.v1",
+                        entity_id=device_uuid,
+                        value={"occupied": occupied,
+                               "label": str(label), "model": model},
+                        confidence=float(data.get("confidence") or 0.0),
+                        estimator=model))
+                except Exception:
+                    db.rollback()
+                    logger.debug("[node-ws] occupancy→state failed for %s",
+                                 device_uuid, exc_info=True)
     except Exception:
         logger.exception("[node-ws] prediction→context failed for %s",
                          device_uuid)
