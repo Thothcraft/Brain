@@ -243,6 +243,9 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
         out["persons"] = persons
     if places:
         out["places"] = places
+    spaces = bundle.get("spaces") or []
+    if spaces:
+        out["spaces"] = spaces
     if cfg.include_descriptors:
         out["descriptors"] = (bundle.get("descriptors") or []) \
                              [:32 if advanced else 12]
@@ -366,6 +369,13 @@ Identity — WHO and WHICH THINGS belong to the account:
     `person:owner` unless evidence says otherwise — `entity_key` links
     it to its `device:<uuid>` map entity. Emitters absent from
     `devices` are unknowns.
+  * `spaces[]` is the USER-DRAWN layout (authoritative): each space
+    has `name`, `size_m`, `zones[]` polygons, `devices[]` placements
+    ({ref → `device:<uuid>`, x, y, rotation_deg, fov_deg, range_m}).
+    A device placed in a space is IN that space; an emitter seen by a
+    node inside a space is inside it too. Scan emitters carrying
+    `device_ref`+`known` are anchored to the registry — `known`
+    emitters near a placed node share that node's space.
   * Assume owned devices sit in the owner's identified room/place
     unless located_in edges or fresher evidence place them elsewhere.
   * `config`/`provenance` tell you which bundle sections exist and the

@@ -390,6 +390,64 @@ def test_user_calibrations_reach_the_prompt(api, monkeypatch):
         "mean"] == pytest.approx(-52.1)
 
 
+def test_spaces_and_emitter_anchors_reach_the_bundle(api, monkeypatch):
+    """The user-drawn spatial layer + registry-anchored emitters must
+    reach the prompt: 'which devices are in Myroom' needs both."""
+    from server.db import (ContextEvidence, Device, DevicePlacement,
+                           Space, Zone)
+    client, session = api
+    dev = session.query(Device).filter(Device.userId == 1).first()
+    if dev is None:
+        dev = Device(userId=1, device_uuid="thoth-esp32-1",
+                     device_name="thoth-esp32-a0a2",
+                     device_type="thoth", mac_address="dc:1e:d5:6a:a0:a2",
+                     approved=True, online=True)
+        session.add(dev)
+    else:
+        dev.mac_address = "dc:1e:d5:6a:a0:a2"
+        dev.device_name = "thoth-esp32-a0a2"
+    session.flush()
+    sp = Space(user_id=1, name="Myroom", width_m=4.0, height_m=5.0)
+    session.add(sp)
+    session.flush()
+    session.add(Zone(space_id=sp.id, name="desk",
+                     polygon_json=json.dumps([[0, 0], [2, 0], [2, 2]])))
+    session.add(DevicePlacement(device_id=dev.deviceId, space_id=sp.id,
+                                x=1.0, y=1.0))
+    # One uplink scene whose radio scan contains the device's own MAC —
+    # _anchor_emitters must tag it device_ref/known.
+    session.add(ContextEvidence(
+        user_id=1, device_id=str(dev.device_uuid),
+        evidence_key="context.descriptors.v1",
+        timestamp=__import__("time").time(),
+        value=json.dumps({"value": {"sensors": {"radio-0": {
+            "type": "radio_env",
+            "scan": {"emitters": 3, "top": [
+                {"id": "dc:1e:d5:6a:a0:a2", "rssi": -44,
+                 "name": "thoth-esp32-a0a2"},
+                {"id": "aa:bb:cc:dd:ee:ff", "rssi": -88}]}}}}})))
+    session.commit()
+    seen = {}
+
+    def fake_answer(messages, tier="standard", usage_out=None):
+        seen["bundle"] = json.loads(
+            messages[1]["content"].split("\n", 1)[1])
+        return {"answer": "ok", "widgets": []}
+    monkeypatch.setattr(chat, "_openai_answer", fake_answer)
+
+    r = client.post("/v1/chat", json={"message": "what's in myroom?"})
+    assert r.status_code == 200, r.text
+    bundle = seen["bundle"]
+    space = next(s for s in bundle["spaces"] if s["name"] == "Myroom")
+    assert space["zones"] == [{"name": "desk",
+                               "polygon": [[0, 0], [2, 0], [2, 2]]}]
+    assert space["devices"][0]["ref"].startswith("device:")
+    top = bundle["scenes"][0]["sensors"]["radio-0"]["scan"]["top"]
+    assert top[0]["device_ref"].startswith("device:")
+    assert top[0]["known"] is True
+    assert "device_ref" not in top[1]
+
+
 def test_openai_quota_error_maps_to_429(api, monkeypatch):
     """An exhausted model balance must surface as a clean 429 — a bare
     500 is what 'chat failed' bubbles on mobile."""
@@ -424,4 +482,5 @@ def test_prompt_is_unbiased_and_schema_is_strict():
     assert sch["strict"] is True
     item = sch["schema"]["properties"]["assessments"]["items"]
     assert item["required"] == ["claim", "probability", "basis"]
+
 

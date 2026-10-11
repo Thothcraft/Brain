@@ -48,7 +48,7 @@ from sqlalchemy.orm import Session
 from server.auth import get_current_user, get_scoped_principal
 from server.db import (
     ContextEntity, ContextEvidence, ContextRelationship, ContextState,
-    Device, User, get_db,
+    Device, DevicePlacement, Space, User, get_db,
 )
 from server.inference_auth import inference_call
 from .context import (
@@ -651,6 +651,92 @@ def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
     return out
 
 
+def _norm_name(v: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+
+
+def _spaces(db: Session, user_id: int) -> List[Dict[str, Any]]:
+    """The user-drawn spatial layer (spaces/zones/placements) —
+    `place:` entities carry inferred layout; THIS is the authoritative
+    UI-edited layout. Placements reference devices by entity id so the
+    model can join them to the registry and scan anchors."""
+    out: List[Dict[str, Any]] = []
+    try:
+        rows = (db.query(Space)
+                .filter(Space.user_id == user_id)
+                .order_by(Space.name).all())
+    except Exception:
+        return out
+    for s in rows:
+        zones = []
+        for z in getattr(s, "zones", []) or []:
+            try:
+                polygon = json.loads(z.polygon_json)
+            except (TypeError, ValueError):
+                polygon = []
+            zones.append({"name": z.name, "polygon": polygon})
+        devs = []
+        for p in getattr(s, "placements", []) or []:
+            dev = getattr(p, "device", None)
+            devs.append({
+                "ref": (f"device:{dev.device_uuid}" if dev else None),
+                "name": getattr(dev, "device_name", None),
+                "x": p.x, "y": p.y,
+                "rotation_deg": p.rotation_deg,
+                "fov_deg": p.fov_deg,
+                "range_m": p.range_m,
+                "manual": True,
+            })
+        out.append({"entity": f"space:{s.id}", "name": s.name,
+                    "parent": (f"space:{s.parent_id}"
+                               if s.parent_id else None),
+                    "size_m": [s.width_m, s.height_m],
+                    "zones": zones, "devices": devs})
+    return out
+
+
+def _anchor_emitters(scenes: List[Dict[str, Any]],
+                     devices: List[Dict[str, Any]]) -> None:
+    """Tag scan emitters that match the device registry — a `thoth-*`
+    beacon name, a matching MAC/BSSID, or a matching hostname aliases
+    the emitter onto its `device:<uuid>` entity (known:true, ref) so
+    'devices in the room' separates account hardware from strangers.
+    Mutates scenes in place."""
+    lut: Dict[str, str] = {}
+    for d in devices:
+        ref = str(d.get("entity") or "")
+        if not ref:
+            continue
+        for tok in (d.get("mac"), d.get("uuid")):
+            m = _norm_mac(tok)
+            if m:
+                lut.setdefault(m, ref)
+        hw = d.get("hardware") or {}
+        for tok in (d.get("name"), hw.get("hostname")):
+            n = _norm_name(tok)
+            if n:
+                lut.setdefault(f"name:{n}", ref)
+    for scene in scenes:
+        for sensor in (scene.get("sensors") or {}).values():
+            scan = sensor.get("scan") if isinstance(sensor, dict) else None
+            for em in (scan or {}).get("top") or []:
+                if not isinstance(em, dict):
+                    continue
+                ref = None
+                for key in ("mac", "id", "addr", "bssid"):
+                    m = _norm_mac(em.get(key))
+                    if m and m in lut:
+                        ref = lut[m]
+                        break
+                if ref is None:
+                    n = _norm_name(em.get("name") or em.get("ssid"))
+                    if n:
+                        ref = lut.get(f"name:{n}")
+                if ref is not None:
+                    em["device_ref"] = ref
+                    em["known"] = True
+
+
 def _scenes(rows: List[ContextEvidence], now: float) -> List[Dict[str, Any]]:
     """Latest node uplink per device → textual cues (scene line, per-
     sensor sentences + cues, predictions) PLUS the physical descriptors
@@ -716,12 +802,16 @@ def build_bundle(db: Session, user_id: int, now: float,
                              if r.evidence_key != DESCRIPTOR_KEY])
     for a in aggregates:
         a["age_s"] = round(now - a.pop("last_ts"), 1)
+    devices = _devices(db, user_id)
+    scenes = _scenes(uplinks, now)
+    _anchor_emitters(scenes, devices)
     return {
         "now": now,
         "window_s": window_s,
         "evidence_rows": len(rows),
-        "devices": _devices(db, user_id),
-        "scenes": _scenes(uplinks, now),
+        "devices": devices,
+        "scenes": scenes,
+        "spaces": _spaces(db, user_id),
         "descriptors": aggregates,
         "map": map_snapshot(db, user_id, now),
         "reference": _reference(db, user_id),
