@@ -599,11 +599,17 @@ async def chat(
     if tier not in _TIERS:
         raise HTTPException(422, f"unknown model tier {tier!r} "
                                  f"— one of {list(_TIERS)}")
-    context_used = (_chat_context(
-                        db, current_user.userId, current_user,
-                        detail=tier, cfg=_load_config(db,
-                                                      current_user.userId))
-                    if body.include_context else None)
+    context_used: Optional[Dict[str, Any]] = None
+    if body.include_context:
+        try:
+            context_used = _chat_context(
+                db, current_user.userId, current_user,
+                detail=tier, cfg=_load_config(db, current_user.userId))
+        except Exception:
+            # A broken context leg must not kill the turn — answer
+            # context-free and log loud so ops sees it.
+            logger.exception("chat context build failed for user %s",
+                             current_user.userId)
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _SYSTEM_PROMPT}]
