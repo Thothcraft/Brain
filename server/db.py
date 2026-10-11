@@ -1536,6 +1536,47 @@ class NodeEvent(Base):
         }
 
 
+class DescriptorCalibration(Base):
+    """Labeled physical-descriptor baseline uploaded by a node
+    (``calibration/v1`` doc — e.g. ``sleep``, ``empty_room``).
+
+    The context builder merges these into ``reference.user_calibrations``
+    so agents compare a live window's per-field stats against a measured,
+    labeled distribution instead of a fixed threshold. One row per
+    (user, label) — a re-calibrated label replaces its stats.
+    """
+    __tablename__ = "descriptor_calibration"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id"),
+                     nullable=False, index=True)
+    device_id = Column(String(255), nullable=False, index=True)  # device_uuid
+    label = Column(String(120), nullable=False)
+    doc = Column(Text, nullable=False, default="{}")             # JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow,
+                        onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "label",
+                         name="uq_descriptor_calibration_label"),
+    )
+
+    def to_dict(self):
+        import json as _json
+        try:
+            doc = _json.loads(self.doc) if self.doc else {}
+        except (TypeError, _json.JSONDecodeError):
+            doc = {}
+        return {
+            "label": self.label,
+            "device_id": self.device_id,
+            "doc": doc,
+            "updated_at": self.updated_at.isoformat() + "Z"
+                          if self.updated_at else None,
+        }
+
+
 class NodeRoom(Base):
     """Cached ``room/v1`` document per node — Brain mirrors the node's
     authoritative room doc so portal/mobile render without a live tunnel."""

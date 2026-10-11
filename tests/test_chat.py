@@ -360,6 +360,36 @@ def test_calibration_is_flat_and_covers_imu_radar_csi(api, monkeypatch):
     assert "occupied" in cal["csi_link"]["fields"]["csi_amp_mean"]
 
 
+def test_user_calibrations_reach_the_prompt(api, monkeypatch):
+    """A node-uploaded labeled baseline (e.g. sleep) lands under
+    calibration.user_calibrations so the model can compare the live
+    window against the measured label."""
+    from server.db import DescriptorCalibration
+    client, session = api
+    session.add(DescriptorCalibration(
+        user_id=1, device_id="dev-1", label="sleep",
+        doc=json.dumps({"format": "calibration/v1", "label": "sleep",
+                        "duration_s": 1200,
+                        "sensors": {"radio-cacd": {
+                            "type": "radio_env", "n": 240,
+                            "fields": {"rssi": {"mean": -52.1}}}}})))
+    session.commit()
+    seen = {}
+
+    def fake_answer(messages, tier="standard", usage_out=None):
+        seen["bundle"] = json.loads(
+            messages[1]["content"].split("\n", 1)[1])
+        return {"answer": "ok", "widgets": []}
+    monkeypatch.setattr(chat, "_openai_answer", fake_answer)
+
+    r = client.post("/v1/chat", json={"message": "am I asleep?"})
+    assert r.status_code == 200, r.text
+    cals = seen["bundle"]["calibration"]["user_calibrations"]
+    assert "sleep" in cals
+    assert cals["sleep"]["sensors"]["radio-cacd"]["fields"]["rssi"][
+        "mean"] == pytest.approx(-52.1)
+
+
 def test_prompt_is_unbiased_and_schema_is_strict():
     """No measured numbers/placeholders baked into the prompt — the
     bundle carries calibration data; the prompt carries method. The

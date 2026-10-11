@@ -54,7 +54,8 @@ from sqlalchemy.orm import Session
 from server import event_bus
 from server.auth import decode_token_any, get_current_user
 from server.db import (
-    ApiUsage, Device, NodeEvent, NodeRoom, User, get_db, get_db_session,
+    ApiUsage, DescriptorCalibration, Device, NodeEvent, NodeRoom, User,
+    get_db, get_db_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -942,6 +943,85 @@ async def post_usage(
     db.commit()
     db.refresh(row)
     return {"ok": True, "usage": row.to_dict()}
+
+
+# -- labeled descriptor calibrations -------------------------------------------
+
+class CalibrationIn(BaseModel):
+    doc: Dict[str, Any] = {}
+
+
+@router.put("/calibrations/{label}", status_code=200)
+async def put_calibration(
+    label: str,
+    request: CalibrationIn,
+    raw: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Upsert one labeled descriptor baseline (``calibration/v1`` doc).
+
+    Nodes push these after a user-labeled capture (``sleep``,
+    ``empty_room``, …); the context builder merges them into
+    ``reference.user_calibrations`` so agents compare live windows
+    against measured baselines. Device JWTs write only their own
+    device's rows; user credentials may write any owned device."""
+    label = label.strip()[:120]
+    if not label:
+        raise HTTPException(status_code=422, detail="label is required")
+    kind, principal, device = _principal(raw, db)
+    if kind == "device":
+        target = device
+        user_id = target.userId
+        # A node pushing calibrations is alive — same liveness rule as
+        # /events + /usage.
+        target.last_seen = datetime.utcnow()
+        target.online = True
+    else:
+        body_dev = (request.doc or {}).get("device_id") or ""
+        target = _owned_device(str(body_dev), principal, db) \
+            if body_dev else None
+        if target is None:
+            raise HTTPException(status_code=422,
+                                detail="doc.device_id required")
+        user_id = principal.userId
+    row = db.query(DescriptorCalibration).filter(
+        DescriptorCalibration.user_id == user_id,
+        DescriptorCalibration.label == label).first()
+    if row is None:
+        row = DescriptorCalibration(user_id=user_id,
+                                    device_id=target.device_uuid,
+                                    label=label)
+        db.add(row)
+    row.device_id = target.device_uuid
+    row.doc = json.dumps(request.doc or {})
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "calibration": row.to_dict()}
+
+
+@router.get("/calibrations")
+async def list_calibrations(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    rows = db.query(DescriptorCalibration).filter(
+        DescriptorCalibration.user_id == current_user.userId
+    ).order_by(DescriptorCalibration.updated_at.desc()).all()
+    return {"calibrations": [r.to_dict() for r in rows]}
+
+
+@router.delete("/calibrations/{label}")
+async def delete_calibration(
+    label: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    n = db.query(DescriptorCalibration).filter(
+        DescriptorCalibration.user_id == current_user.userId,
+        DescriptorCalibration.label == label).delete(
+            synchronize_session=False)
+    db.commit()
+    return {"ok": True, "deleted": n}
 
 
 @router.get("/usage")

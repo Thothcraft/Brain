@@ -280,3 +280,36 @@ def test_rest_uplink_marks_device_online(api):
         d = s.query(Device).filter(Device.device_uuid == 'dev-1').one()
         assert d.online is True
         assert d.last_seen >= first_seen
+
+
+def test_calibrations_upsert_and_list(api):
+    """PUT /v1/calibrations/<label> upserts one labeled descriptor
+    baseline per (user, label); a re-put replaces the stats doc."""
+    client, factory, _user = api
+    device_auth = {'Authorization': f'Bearer {_device_token()}'}
+    doc = {"format": "calibration/v1", "label": "sleep",
+           "device_id": "dev-1", "duration_s": 1200,
+           "sensors": {"radio-cacd": {"type": "radio_env", "n": 100,
+                                     "fields": {"rssi": {"mean": -60}}}}}
+
+    res = client.put('/v1/calibrations/sleep', json={'doc': doc},
+                     headers=device_auth)
+    assert res.status_code == 200
+    assert res.json()['calibration']['label'] == 'sleep'
+
+    # Idempotent upsert per label — the doc is replaced, not appended.
+    doc['sensors']['radio-cacd']['n'] = 200
+    res = client.put('/v1/calibrations/sleep', json={'doc': doc},
+                     headers=device_auth)
+    assert res.status_code == 200
+
+    res = client.get('/v1/calibrations', headers=_user_headers())
+    assert res.status_code == 200
+    cals = res.json()['calibrations']
+    assert len(cals) == 1
+    assert cals[0]['label'] == 'sleep'
+    assert cals[0]['doc']['sensors']['radio-cacd']['n'] == 200
+
+    res = client.delete('/v1/calibrations/sleep',
+                        headers=_user_headers())
+    assert res.status_code == 200 and res.json()['deleted'] == 1

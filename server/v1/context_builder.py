@@ -721,10 +721,44 @@ def build_bundle(db: Session, user_id: int, now: float,
         "scenes": _scenes(uplinks, now),
         "descriptors": aggregates,
         "map": map_snapshot(db, user_id, now),
-        "reference": {"radar_occupancy": RADAR_REFERENCE,
-                      "csi_link": CSI_REFERENCE,
-                      "watch_imu_worn": IMU_REFERENCE},
+        "reference": _reference(db, user_id),
     }
+
+
+def _reference(db: Session, user_id: int) -> Dict[str, Any]:
+    """Built-in dataset priors + the user's own labeled descriptor
+    baselines (node-uploaded ``calibration/v1`` docs — ``sleep``,
+    ``empty_room``, …). Agents compare a live window's per-field stats
+    against a matching label the same way they use the priors."""
+    ref: Dict[str, Any] = {"radar_occupancy": RADAR_REFERENCE,
+                           "csi_link": CSI_REFERENCE,
+                           "watch_imu_worn": IMU_REFERENCE}
+    try:
+        from ..db import DescriptorCalibration
+        rows = db.query(DescriptorCalibration).filter(
+            DescriptorCalibration.user_id == user_id).all()
+        cals = {}
+        for r in rows:
+            try:
+                doc = json.loads(r.doc) if r.doc else {}
+            except (TypeError, json.JSONDecodeError):
+                continue
+            sensors = doc.get("sensors")
+            if isinstance(sensors, dict) and sensors:
+                cals[r.label] = {
+                    "format": doc.get("format"),
+                    "device_id": r.device_id,
+                    "duration_s": doc.get("duration_s"),
+                    "updated_at": r.updated_at.isoformat() + "Z"
+                                  if r.updated_at else None,
+                    "sensors": sensors,
+                }
+        if cals:
+            ref["user_calibrations"] = cals
+    except Exception:
+        # Calibrations are additive — never break the bundle on them.
+        pass
+    return ref
 
 
 # ---------------------------------------------------------------------------

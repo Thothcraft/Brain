@@ -594,6 +594,12 @@ For each request you receive some of:
     stats for the radar/CSI fields (E1 rig, BGT60TR13C). When the
     caller left `calibration` empty it is seeded FROM this reference —
     treat it as the default class distributions.
+    `reference.user_calibrations` (when present) holds the user's OWN
+    labeled baselines measured on their nodes — per-sensor descriptor
+    stats per label (e.g. `sleep`, `empty_room`). A live window that
+    sits near a labeled baseline's stats carries that label's meaning;
+    use them for activity/state judgements the same way you use the
+    priors.
   * `coverage` — if non-empty, fill only the named form sections.
 
 READING OCCUPANCY. The `reference` prior (E1 rig, BGT60TR13C @ ~10 Hz,

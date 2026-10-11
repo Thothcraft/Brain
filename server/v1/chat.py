@@ -347,7 +347,15 @@ occupied stats for the radar/CSI fields — compare the current
 window's tail, max spikes and widened std, against them; the median
 alone is weak evidence. `calibration.watch_imu_worn`: measured
 unworn-watch IMU baseline plus the worn signature to compare `acc_std`
-and gravity-axis behaviour against)
+and gravity-axis behaviour against.
+`calibration.user_calibrations`: the user's OWN labeled baselines
+measured on their nodes — e.g. `sleep`, `empty_room` — per-sensor
+descriptor stats (fields/scan) collected while the label held. To
+infer an activity or state, compare the CURRENT window's
+descriptors/scene fields against the labeled baseline (near → the
+label applies; far → it doesn't). A `sleep` baseline whose BLE scan
+carries the owner's phone and whose IMU/audio are quiet is the
+reference for "the owner is asleep".)
 — then the user's question and optional attachments.
 
 Identity — WHO and WHICH THINGS belong to the account:
