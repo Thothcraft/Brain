@@ -16,10 +16,19 @@ action requests durable in the DB and dispatches to Thoth nodes.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+try:  # whispy is the rule-language engine behind ``when.expr``
+    from whispy.automation import eval_expression as _whispy_eval
+except Exception:  # pragma: no cover - whispy not installed
+    _whispy_eval = None
 
 
 class AutomationEngine:
@@ -86,8 +95,52 @@ class AutomationEngine:
             return False
         return v >= b if op == "min" else v <= b
 
+    @staticmethod
+    def _expr_ctx(states: List[Dict[str, Any]]) -> Dict[str, float]:
+        """Flatten live states into numeric identifiers for the whispy
+        rule language. ``proximity.v1 {distance_m: 7.2}`` exposes
+        ``proximity_v1_distance_m`` and ``<entity>_proximity_v1_distance_m``;
+        scalar/bool states expose the bare ``key`` name. Non-numeric
+        leaves are skipped — whispy treats unknown names as NaN.
+        """
+        ctx: Dict[str, float] = {}
+        for s in states:
+            key = re.sub(r"\W+", "_", str(s.get("key") or "")).strip("_")
+            if not key:
+                continue
+            ent = re.sub(r"\W+", "_",
+                         str(s.get("entity_id") or "")).strip("_")
+            val = s.get("value")
+            leaves = (val.items() if isinstance(val, dict)
+                      else [("", val)])
+            for field, fv in leaves:
+                if isinstance(fv, bool):
+                    num = 1.0 if fv else 0.0
+                elif isinstance(fv, (int, float)):
+                    num = float(fv)
+                else:
+                    continue
+                fname = re.sub(r"\W+", "_", str(field)).strip("_")
+                names = [f"{key}_{fname}" if fname else key]
+                if ent:
+                    names.append(
+                        f"{ent}_{key}_{fname}" if fname
+                        else f"{ent}_{key}")
+                for name in names:
+                    ctx.setdefault(name, num)
+        return ctx
+
     def _matches(self, when: Dict[str, Any],
                  states: List[Dict[str, Any]]) -> bool:
+        expr = when.get("expr")
+        if expr is not None:
+            if _whispy_eval is None:
+                logger.warning("when.expr set but whispy is unavailable")
+                return False
+            if not _whispy_eval(str(expr), self._expr_ctx(states)):
+                return False
+            if not when.get("key"):
+                return True
         key = when.get("key")
         entity = when.get("entity_id")
         for s in states:

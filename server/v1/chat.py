@@ -338,10 +338,10 @@ hardware — anything not listed is an unknown emitter), recent evidence
 descriptor aggregates and scene summaries — sensor entries carry
 physical `fields` (mean/std/min/max/n for radar SNR, CSI variance,
 RSSI, IMU, audio level…) plus node `estimates` and `location`, and
-`reference` — measured empty-vs-occupied stats for the radar/CSI
-fields (E1 rig: empty room snr mean ~7.6 dB tight, occupancy shows as
-snr_max spikes >15-40 dB + map-mean lifts — a modest median SNR alone
-is weak) — then the user's question and optional attachments.
+`reference`/`calibration` — measured empty-vs-occupied stats for the
+radar/CSI fields (compare the current window's tail — max spikes,
+widened std — against those stats; the median alone is weak evidence)
+— then the user's question and optional attachments.
 
 Identity — WHO and WHICH THINGS belong to the account:
   * `persons`/`places` list the account's people and address→building→
@@ -411,11 +411,77 @@ def _model_for_tier(tier: str) -> str:
                              f"— one of {list(_TIERS)}")
 
 
+# Strict structured-output contract — guarantees the probabilistic
+# fields (`assessments[].probability`) exist and are well-typed so
+# answers stay machine-actionable. Falls back to JSON-object mode on
+# models that reject schema mode.
+_WIDGET_SCALAR: Dict[str, Any] = {
+    "type": ["string", "number", "boolean", "null"]}
+_WIDGET_KV: Dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"label": {"type": "string"},
+                   "value": {"type": "string"}},
+    "required": ["label", "value"]}
+_WIDGET_STATE: Dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"key": {"type": "string"}, "entity": {"type": "string"},
+                   "value": {"type": "string"},
+                   "confidence": {"type": "number"},
+                   "confirmed": {"type": "boolean"}},
+    "required": ["key", "entity", "value", "confidence", "confirmed"]}
+_ANSWER_SCHEMA: Dict[str, Any] = {
+    "name": "thoth_answer",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "answer": {"type": "string"},
+            "assessments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "claim": {"type": "string"},
+                        "probability": {"type": "number"},
+                        "basis": {"type": "string"},
+                    },
+                    "required": ["claim", "probability", "basis"],
+                },
+            },
+            "widgets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "type": {"type": "string"},
+                        "title": {"type": "string"},
+                        "items": {"type": "array", "items": {
+                            "anyOf": [{"type": "string"},
+                                      _WIDGET_KV, _WIDGET_STATE]}},
+                        "columns": {"type": "array",
+                                    "items": {"type": "string"}},
+                        "rows": {"type": "array",
+                                 "items": {"type": "array",
+                                           "items": _WIDGET_SCALAR}},
+                    },
+                    "required": ["type", "title", "items",
+                                 "columns", "rows"],
+                },
+            },
+        },
+        "required": ["answer", "assessments", "widgets"],
+    },
+}
+
+
 def _openai_answer(messages: List[Dict[str, Any]], *,
                    tier: str = "standard",
                    usage_out: Optional[Dict[str, Any]] = None
                    ) -> Dict[str, Any]:
-    """One JSON-mode completion → parsed rich answer."""
+    """One structured completion → parsed rich answer."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -428,7 +494,8 @@ def _openai_answer(messages: List[Dict[str, Any]], *,
     kwargs: Dict[str, Any] = {
         "model": model, "messages": messages,
         "temperature": 0.3,
-        "response_format": {"type": "json_object"},
+        "response_format": {"type": "json_schema",
+                            "json_schema": _ANSWER_SCHEMA},
     }
     # Reasoning-class models (gpt-5, o-series…) reject `temperature`
     # and/or `response_format` — degrade on BadRequestError instead of
@@ -441,8 +508,12 @@ def _openai_answer(messages: List[Dict[str, Any]], *,
         try:
             resp = client.chat.completions.create(**kwargs)
         except BadRequestError:
-            kwargs.pop("response_format", None)
-            resp = client.chat.completions.create(**kwargs)
+            kwargs["response_format"] = {"type": "json_object"}
+            try:
+                resp = client.chat.completions.create(**kwargs)
+            except BadRequestError:
+                kwargs.pop("response_format", None)
+                resp = client.chat.completions.create(**kwargs)
     if usage_out is not None:
         usage_out["model_id"] = model
         usage_out["tokens"] = getattr(

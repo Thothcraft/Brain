@@ -179,7 +179,9 @@ def test_repeated_identical_builds_are_stable(db):
     session, _ = db
     for i in range(4):
         cb.run_build(session, 1, now=T0 + i * 60, llm=lambda b: _proposal())
-    assert session.query(ContextRelationship).count() == 3
+    # 3 proposal edges + seeded anchors: owner→home, dev-1 owned_by,
+    # dev-1 located_in assumption (ended once the proposal places it).
+    assert session.query(ContextRelationship).count() == 6
     assert len(_active_rel(session, "person:gad", "located_in")) == 1
     # dev-1 + person:gad + place:living-room + activity:sitting +
     # the two seeded anchors (person:owner, place:home)
@@ -487,3 +489,61 @@ def test_confirmed_device_entity_seed_preserves_user_name(db):
     dev = session.query(ContextEntity).filter_by(
         entity_key="device:dev-1").one()
     assert dev.name == "front-door"               # seed can't clobber it
+
+
+def test_seed_creates_ownership_and_placement_edges(db):
+    """Every registry device gets owned_by -> person:owner (registry
+    fact) and located_in -> the owner's place (low-confidence
+    assumption) — real editable map edges, not prompt assertions."""
+    session, _ = db
+    cb.seed_devices(session, 1, T0)
+    by = {(r.subject, r.predicate): r
+          for r in session.query(ContextRelationship).all()}
+    own = by[("device:dev-1", "owned_by")]
+    assert own.object == "person:owner"
+    assert own.source == "registry"
+    loc = by[("device:dev-1", "located_in")]
+    assert loc.object == "place:home"
+    assert loc.confidence == 0.5 and loc.source == "assumption"
+    assert by[("person:owner", "located_in")].object == "place:home"
+
+
+def test_seed_placement_follows_owner_place(db):
+    """Assumption placement migrates with the owner's located_in — a
+    move inferred upstream re-places every assumed device."""
+    session, _ = db
+    cb.seed_devices(session, 1, T0)
+    session.add(ContextRelationship(
+        user_id=1, subject="person:owner", predicate="located_in",
+        object="place:office", valid_from=T0, confidence=0.9,
+        source="context-builder"))
+    session.commit()
+    cb.seed_devices(session, 1, T0 + 60)
+    assert [r.object for r in _active_rel(
+        session, "device:dev-1", "located_in")] == ["place:office"]
+    # The owner's evidence edge stays the only owner placement.
+    assert {r.object for r in _active_rel(
+        session, "person:owner", "located_in")} == {"place:office"}
+
+
+def test_seed_never_overrides_authoritative_placement(db):
+    """A user- or evidence-placed device keeps its edge; the stale
+    assumption row is pruned so located_in stays exclusive."""
+    session, _ = db
+    cb.seed_devices(session, 1, T0)
+    session.add(ContextRelationship(
+        user_id=1, subject="device:dev-1", predicate="located_in",
+        object="place:kitchen", valid_from=T0, confidence=0.95,
+        source="user"))
+    session.commit()
+    cb.seed_devices(session, 1, T0 + 60)
+    rels = _active_rel(session, "device:dev-1", "located_in")
+    assert len(rels) == 1 and rels[0].object == "place:kitchen"
+    assert rels[0].source == "user"
+
+
+def test_dry_run_seed_writes_no_relationships(db):
+    session, _ = db
+    cb.seed_devices(session, 1, T0, with_edges=False)
+    assert session.query(ContextRelationship).count() == 0
+

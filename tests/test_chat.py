@@ -333,3 +333,16 @@ def test_transcribe_rejects_empty(api):
     r = client.post("/v1/chat/transcribe",
                     files={"file": ("a.webm", b"", "audio/webm")})
     assert r.status_code == 422
+
+
+def test_prompt_is_unbiased_and_schema_is_strict():
+    """No measured numbers/placeholders baked into the prompt — the
+    bundle carries calibration data; the prompt carries method. The
+    strict schema is what guarantees per-claim probabilities."""
+    for bad in ("7.6", "E1 rig", "15-40", "snr_max spikes"):
+        assert bad not in chat._SYSTEM_PROMPT
+    sch = chat._ANSWER_SCHEMA
+    assert sch["strict"] is True
+    item = sch["schema"]["properties"]["assessments"]["items"]
+    assert item["required"] == ["claim", "probability", "basis"]
+

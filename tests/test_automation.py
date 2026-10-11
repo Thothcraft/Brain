@@ -117,6 +117,39 @@ def test_engine_extended_comparators():
         {"key": "proximity.v1", "value": {"distance_m": 12.0}}]}) == []
 
 
+def test_engine_whispy_expr_condition():
+    """``when.expr`` runs whispy's rule language over a flattened view
+    of live states — ``proximity.v1 {distance_m: 4.2}`` exposes
+    ``proximity_v1_distance_m``."""
+    fired = []
+    engine = AutomationEngine(
+        actuate=lambda aid, cmd: fired.append((aid, cmd))
+        or {"status": "succeeded"})
+    engine.add_rule({
+        "name": "watch-near",
+        "when": {"expr": "proximity_v1_distance_m < 10"},
+        "then": {"actuator_id": "light-1", "operation": "set_color",
+                 "params": {"rgb": [0, 255, 0]}}})
+    near = {"states": [{"key": "proximity.v1",
+                        "value": {"distance_m": 4.2, "rssi": -55}}]}
+    assert len(engine.evaluate(near)) == 1
+    # edge-reset then out-of-range → no fire
+    engine.evaluate({"states": []})
+    assert engine.evaluate({"states": [
+        {"key": "proximity.v1", "value": {"distance_m": 30}}]}) == []
+
+    # expr composes with the dict matchers — both must hold.
+    engine2 = AutomationEngine()
+    engine2.add_rule({
+        "name": "linked",
+        "when": {"key": "watch.link.v1", "contains": {"connected": True},
+                 "expr": "watch_link_v1_rssi > -80"},
+        "then": {"actuator_id": "a", "operation": "o"}})
+    assert len(engine2.evaluate({"states": [
+        {"key": "watch.link.v1",
+         "value": {"connected": True, "rssi": -61}}]})) == 1
+
+
 def test_notify_actuator_publishes_event(api):
     """actuator_id 'notify' → ActionRequest succeeds immediately and a
     `notification` NodeEvent is persisted (SSE fan-out + replay)."""

@@ -220,12 +220,15 @@ def map_snapshot(db: Session, user_id: int,
     return {"entities": entities, "relationships": rels, "states": states}
 
 
-def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
+def seed_devices(db: Session, user_id: int, now: float,
+                 *, with_edges: bool = True) -> List[str]:
     """Devices come from the registry, not the LLM — stable anchors.
 
     MAC and hostname join the alias set so a fingerprint (``aa:bb:…``,
     ``rpi-e1``) proposed by either model resolves onto the registered
     ``device:<uuid>`` anchor instead of forking a second entity.
+    ``with_edges`` also seeds ownership/placement edges — skipped on
+    dry-run builds so a preview writes no relationship rows.
     """
     seeded = []
     for dev in db.query(Device).filter(Device.userId == user_id).all():
@@ -310,6 +313,68 @@ def seed_devices(db: Session, user_id: int, now: float) -> List[str]:
         home.attributes = json.dumps(attrs, default=str)
         home.retired_at = None
     seeded += ["person:owner", "place:home"]
+    if not with_edges:
+        db.commit()
+        return seeded
+
+    # Ownership + assumed placement as real map edges — the user can
+    # correct or confirm them; assumption edges stay low-confidence and
+    # are never re-created once an active edge exists (user edit or
+    # evidence-placed both win).
+    def _edge(subject: str, predicate: str, obj: str,
+              confidence: float, source: str) -> None:
+        active = db.query(ContextRelationship).filter(
+            ContextRelationship.user_id == user_id,
+            ContextRelationship.subject == subject,
+            ContextRelationship.predicate == predicate,
+            (ContextRelationship.valid_until.is_(None)) |
+            (ContextRelationship.valid_until > now)).all()
+        if any((r.source or "") != "assumption" for r in active):
+            # An authoritative edge (user edit or evidence) owns this
+            # slot — prune stale assumption rows so an exclusive
+            # predicate never shows two placements.
+            for a in active:
+                if (a.source or "") == "assumption":
+                    a.valid_until = now
+            return
+        if any(r.object == obj for r in active):
+            return
+        for r in active:
+            r.valid_until = now    # stale assumption — migrate
+        db.add(ContextRelationship(
+            user_id=user_id, subject=subject, predicate=predicate,
+            object=obj, valid_from=now, confidence=confidence,
+            source=source))
+
+    # The owner's place: wherever person:owner is authoritatively
+    # located, else their assumption, else the single non-home place
+    # entity, else the home anchor. Stale owner assumptions expire the
+    # moment real placement evidence exists.
+    loc_rels = [r for r in _active_relationships(db, user_id, now)
+                if r.subject == "person:owner"
+                and r.predicate == "located_in"]
+    authoritative = [r.object for r in loc_rels
+                     if (r.source or "") != "assumption"]
+    if authoritative:
+        for r in loc_rels:
+            if (r.source or "") == "assumption":
+                r.valid_until = now
+        owner_places = authoritative
+    else:
+        owner_places = [r.object for r in loc_rels]
+    if not owner_places:
+        others = [e.entity_key for e in _live_entities(db, user_id)
+                  if e.kind == "place"
+                  and e.entity_key != "place:home"]
+        target = others[0] if len(others) == 1 else "place:home"
+        _edge("person:owner", "located_in", target, 0.5, "assumption")
+        owner_places = [target]
+    owner_place = owner_places[0]
+    for key in seeded:
+        if key.startswith("device:"):
+            _edge(key, "owned_by", "person:owner", 0.95, "registry")
+            _edge(key, "located_in", owner_place, 0.5, "assumption")
+
     db.commit()
     return seeded
 
@@ -1268,7 +1333,7 @@ def run_build(db: Session, user_id: int, *, now: Optional[float] = None,
               window_s: float = DEFAULT_WINDOW_S, dry_run: bool = False,
               llm: Optional[LLMFn] = None) -> Dict[str, Any]:
     now = now or time.time()
-    seed_devices(db, user_id, now)
+    seed_devices(db, user_id, now, with_edges=not dry_run)
     bundle = build_bundle(db, user_id, now, window_s)
     if llm is None:
         # Hosted call — authorized + metered like every inference path
