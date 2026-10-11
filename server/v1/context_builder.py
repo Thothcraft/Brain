@@ -79,9 +79,12 @@ MAX_AGGREGATES = 80
 MAX_FIELDS = 12
 
 # The builder reads a lot of physical evidence — a tier above the
-# infer path pays for itself in map quality. Env-overridable per
-# deployment; the actual model used is metered on every call.
-_DEFAULT_MODEL = "gpt-4o"
+# infer path pays for itself in map quality, but the standing 10-min
+# cadence makes cost dominate: mini keeps 128k context for the
+# descriptor bundle at a fraction of gpt-4o. Env-overridable per
+# deployment (CONTEXT_BUILDER_MODEL); the model used is metered on
+# every call.
+_DEFAULT_MODEL = "gpt-4o-mini"
 
 # How much of the model's input/output text is retained on the
 # map:builder entity for audit ("what the model saw / produced").
