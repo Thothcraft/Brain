@@ -390,6 +390,30 @@ def test_user_calibrations_reach_the_prompt(api, monkeypatch):
         "mean"] == pytest.approx(-52.1)
 
 
+def test_openai_quota_error_maps_to_429(api, monkeypatch):
+    """An exhausted model balance must surface as a clean 429 — a bare
+    500 is what 'chat failed' bubbles on mobile."""
+    import httpx
+    import openai
+    client, _ = api
+
+    class _Boom:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_kw):
+                    raise openai.RateLimitError(
+                        "credit_balance_exhausted", response=httpx.Response(
+                            429, request=httpx.Request("POST", "http://x")),
+                        body={"error": {"code": "credit_balance_exhausted"}})
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(openai, "OpenAI", lambda **_: _Boom())
+    r = client.post("/v1/chat", json={"message": "hi"})
+    assert r.status_code == 429
+    assert "quota" in r.json()["detail"]
+
+
 def test_prompt_is_unbiased_and_schema_is_strict():
     """No measured numbers/placeholders baked into the prompt — the
     bundle carries calibration data; the prompt carries method. The

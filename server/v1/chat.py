@@ -515,7 +515,7 @@ def _openai_answer(messages: List[Dict[str, Any]], *,
     # Reasoning-class models (gpt-5, o-series…) reject `temperature`
     # and/or `response_format` — degrade on BadRequestError instead of
     # failing the user's turn.
-    from openai import BadRequestError
+    from openai import APIStatusError, BadRequestError, RateLimitError
     try:
         resp = client.chat.completions.create(**kwargs)
     except BadRequestError:
@@ -529,6 +529,16 @@ def _openai_answer(messages: List[Dict[str, Any]], *,
             except BadRequestError:
                 kwargs.pop("response_format", None)
                 resp = client.chat.completions.create(**kwargs)
+        # A BadRequestError chain aside, upstream failures (dead key,
+        # exhausted balance, provider outage) must surface as a clean
+        # status — never a bare 500 the app can only call "chat failed".
+    except RateLimitError as exc:
+        raise HTTPException(429, "model quota exhausted — top up the "
+                                 "OpenAI balance or retry later") \
+            from exc
+    except APIStatusError as exc:
+        raise HTTPException(502, f"model upstream error "
+                                 f"({exc.status_code})") from exc
     if usage_out is not None:
         usage_out["model_id"] = model
         usage_out["tokens"] = getattr(
