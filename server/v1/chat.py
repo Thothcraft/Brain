@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import (
@@ -225,6 +226,8 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
 
     out: Dict[str, Any] = {
         "generated_at": now,
+        "now_iso": datetime.fromtimestamp(
+            now, tz=timezone.utc).isoformat(),
         "window_s": cfg.window_s,
         "map": bundle["map"],
         "devices": devices,
@@ -252,6 +255,10 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
     if cfg.include_scenes:
         out["scenes"] = (bundle.get("scenes") or []) \
                         [:10 if advanced else 5]
+    # Always included — the agent must know which sensor classes are
+    # actually live and which tasks they can/cannot answer right now.
+    out["sensors"] = bundle.get("sensors") or []
+    out["capabilities"] = bundle.get("capabilities") or []
     if cfg.include_reference:
         out["reference"] = bundle.get("reference")
     if calibration:
@@ -360,6 +367,37 @@ label applies; far → it doesn't). A `sleep` baseline whose BLE scan
 carries the owner's phone and whose IMU/audio are quiet is the
 reference for "the owner is asleep".)
 — then the user's question and optional attachments.
+
+Time — `now_iso`/`generated_at` is the CURRENT time. Every temporal
+field elsewhere is an absolute epoch/`since` + `age_s` (seconds old at
+bundle time). Always translate ages into plain words ("3 minutes ago",
+"14 hours ago") and reason about recency: a state with `age_s` of
+hours may reflect a situation that has since changed — say how old the
+evidence behind an answer is, and treat states whose `age_s` is large
+as stale even while `valid_until` keeps them technically live.
+
+Sources — every claim has a SOURCE you must name when it matters:
+`map.states[].estimator` is the estimator/model that produced it
+(e.g. `context-builder/1`, `ble-presence/1`, `rm-<hex>`, a node
+estimator), `devices[]`/`descriptors` attribute evidence to a physical
+node, scenes carry `device`, states carry `since`/`age_s`. Never say
+"the system indicates" — say which estimator or sensor said it and how
+old that observation is.
+
+Capability — `sensors[]` lists the sensor CLASSES actually producing
+data in this window per device; `capabilities[]` maps tasks →
+sensor classes and marks each `available`/`unavailable` (with `missing`
+alternatives). Different tasks need different sensors — occupancy can
+come from radar/CSI fluctuation, motion, radio scans, GPS at the place
+or a worn watch co-located with owned devices; activity recognition
+(sit/stand/sleep/walk) needs IMU-bearing devices (watch/phone/laptop)
+plus device/app state; scene perception needs a camera or mic. When a
+task is `unavailable` — or the sensor that could answer hasn't
+produced evidence in this window — do NOT guess: say plainly that the
+available sensors can't answer it and name what WOULD enable it
+(e.g. "I can't tell the room is empty — no radar/CSI/motion evidence
+flowed recently; the BLE presence state is 14h old"). A state still
+answering may itself be stale — combine capability with age.
 
 Identity — WHO and WHICH THINGS belong to the account:
   * `persons`/`places` list the account's people and address→building→

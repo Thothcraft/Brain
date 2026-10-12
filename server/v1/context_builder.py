@@ -219,6 +219,10 @@ def map_snapshot(db: Session, user_id: int,
         states.append({"key": s.state_key, "entity_id": s.entity_id or None,
                        "value": value,
                        "confidence": round(s.confidence or 0, 3),
+                       "estimator": s.estimator,
+                       "since": s.since,
+                       "age_s": round(now - (s.since or now), 1),
+                       "valid_until": s.valid_until,
                        "confirmed": is_confirmed_source(s.estimator or "")})
     return {"entities": entities, "relationships": rels, "states": states}
 
@@ -668,7 +672,7 @@ def _devices(db: Session, user_id: int) -> List[Dict[str, Any]]:
                           if dev.last_seen else None),
             "hardware": {k: hw.get(k) for k in
                          ("hostname", "model", "os", "platform",
-                          "chip") if hw.get(k)},
+                          "chip", "sensors", "actuators") if hw.get(k)},
         }
         # Two registry rows with the same fingerprint = the same physical
         # device double-registered — flag the earlier entry as canonical
@@ -823,6 +827,111 @@ def _scenes(rows: List[ContextEvidence], now: float) -> List[Dict[str, Any]]:
     return out[:MAX_SCENES]
 
 
+# ---------------------------------------------------------------------------
+# Sensor inventory → task capabilities
+# ---------------------------------------------------------------------------
+
+# evidence_key / scene-sensor name → sensor class. First match wins —
+# order specific tokens before generic ones ("ble" before "wifi" is
+# fine; "radar"/"csi" are unambiguous).
+_SENSOR_HINTS = (
+    ("radar", "radar"), ("csi", "csi"), ("wifi", "wifi"), ("ble", "ble"),
+    ("imu", "imu"), ("motion", "motion"), ("activity", "motion"),
+    ("geo", "gps"), ("location", "gps"), ("watch", "watch"),
+    ("app", "app"), ("focus", "app"), ("screen", "app"),
+    ("audio", "mic"), ("mic", "mic"), ("camera", "camera"),
+    ("vision", "camera"), ("face", "camera"),
+)
+
+# Which sensor classes can answer each task. ``any`` = one live class
+# suffices (alternatives); ``all`` = every listed class must be live.
+_TASK_SENSORS = (
+    {"task": "occupancy", "need": "any",
+     "sensors": ["radar", "csi", "motion", "ble", "wifi", "gps", "watch"],
+     "detail": "room/place occupied — radar/CSI fluctuation, motion, "
+               "radio scans, GPS at the place, or a worn watch co-located "
+               "with owned devices"},
+    {"task": "radio_presence", "need": "any",
+     "sensors": ["ble", "wifi"],
+     "detail": "which subjects/emitters are near a node"},
+    {"task": "activity_gesture", "need": "any",
+     "sensors": ["imu", "watch"],
+     "detail": "sit/stand/walk/sleep — IMU on watch/phone/laptop"},
+    {"task": "activity_context", "need": "all",
+     "sensors": ["imu", "app"],
+     "detail": "activity + what the device is doing (running app, "
+               "foreground state)"},
+    {"task": "indoor_location", "need": "any",
+     "sensors": ["gps", "wifi", "ble"],
+     "detail": "where a device/person is — geo fix or radio fingerprints"},
+    {"task": "device_discovery", "need": "any",
+     "sensors": ["ble", "wifi"],
+     "detail": "enumerate emitters around a node"},
+    {"task": "vitals", "need": "any",
+     "sensors": ["radar", "watch"],
+     "detail": "breathing/heart-rate — radar micro-motion or watch PPG"},
+    {"task": "scene_perception", "need": "any",
+     "sensors": ["camera", "mic"],
+     "detail": "what is visibly/audibly happening — needs capture sensors"},
+)
+
+
+def _sensor_class(name: Any) -> Optional[str]:
+    s = str(name or "").lower()
+    for tok, cls in _SENSOR_HINTS:
+        if tok in s:
+            return cls
+    return None
+
+
+def _sensor_inventory(rows: List[ContextEvidence],
+                      scenes: List[Dict[str, Any]],
+                      now: float) -> List[Dict[str, Any]]:
+    """Sensor classes actually producing data in the window, per device —
+    evidence keys AND the node's self-reported scene sensor entries.
+    Value = freshest age in seconds."""
+    inv: Dict[str, Dict[str, Optional[float]]] = {}
+
+    def _add(dev: str, cls: Optional[str], age: Optional[float]) -> None:
+        if not cls:
+            return
+        slot = inv.setdefault(dev, {})
+        if age is None:
+            slot.setdefault(cls, None)
+        elif cls not in slot or slot[cls] is None or age < slot[cls]:
+            slot[cls] = age
+
+    for row in rows:
+        _add(row.device_id or "", _sensor_class(row.evidence_key),
+             round(now - row.timestamp, 1))
+    for sc in scenes:
+        dev = str(sc.get("device") or "")
+        for sid, s in (sc.get("sensors") or {}).items():
+            cls = _sensor_class(sid)
+            if not cls and isinstance(s, dict):
+                cls = _sensor_class(s.get("type"))
+            _add(dev, cls, sc.get("age_s"))
+    return [{"device": dev or None, "sensors": sensors}
+            for dev, sensors in sorted(inv.items())]
+
+
+def _capabilities(sensors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """For each task: is at least one acceptable sensor class live in the
+    window — and if not, what would enable it."""
+    present = {cls for ent in sensors for cls in ent["sensors"]}
+    out = []
+    for t in _TASK_SENSORS:
+        have = [s for s in t["sensors"] if s in present]
+        ok = bool(have) if t["need"] == "any" \
+            else all(s in present for s in t["sensors"])
+        out.append({"task": t["task"],
+                    "status": "available" if ok else "unavailable",
+                    "detail": t["detail"],
+                    "have": have,
+                    "missing": [] if ok else t["sensors"]})
+    return out
+
+
 def build_bundle(db: Session, user_id: int, now: float,
                  window_s: float = DEFAULT_WINDOW_S) -> Dict[str, Any]:
     rows = db.query(ContextEvidence).filter(
@@ -838,6 +947,7 @@ def build_bundle(db: Session, user_id: int, now: float,
     devices = _devices(db, user_id)
     scenes = _scenes(uplinks, now)
     _anchor_emitters(scenes, devices)
+    sensors = _sensor_inventory(rows, scenes, now)
     return {
         "now": now,
         "window_s": window_s,
@@ -846,6 +956,8 @@ def build_bundle(db: Session, user_id: int, now: float,
         "scenes": scenes,
         "spaces": _spaces(db, user_id),
         "descriptors": aggregates,
+        "sensors": sensors,
+        "capabilities": _capabilities(sensors),
         "map": map_snapshot(db, user_id, now),
         "reference": _reference(db, user_id),
     }

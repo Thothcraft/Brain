@@ -154,6 +154,50 @@ def test_bundle_aggregates_geo_evidence(db):
     assert agg["fields"]["lat"]["mean"] == 43.65
 
 
+def test_bundle_states_carry_age_and_estimator(db):
+    """The agent must know WHEN each state was made and BY WHOM —
+    since/age_s/estimator ride along in map.states."""
+    session, _ = db
+    session.add(ContextState(
+        user_id=1, state_key="occupancy.v1", entity_id="place:home",
+        value=json.dumps({"occupied": False}), confidence=0.8,
+        estimator="ble-presence/1", since=T0 - 300,
+        valid_until=T0 + 300))
+    session.commit()
+    bundle = cb.build_bundle(session, 1, T0)
+    st = next(s for s in bundle["map"]["states"]
+              if s["key"] == "occupancy.v1")
+    assert st["estimator"] == "ble-presence/1"
+    assert st["since"] == T0 - 300
+    assert st["age_s"] == 300.0
+
+
+def test_bundle_capabilities_reflect_live_sensors(db):
+    """Occupancy is answerable via live BLE evidence; with no evidence
+    the task is unavailable and names what would enable it."""
+    session, _ = db
+    bundle = cb.build_bundle(session, 1, T0)
+    cap = {c["task"]: c for c in bundle["capabilities"]}
+    assert cap["occupancy"]["status"] == "unavailable"
+    assert "radar" in cap["occupancy"]["missing"]
+    _evidence(session, n=3, key="radio.ble.v1")
+    session.add(ContextEvidence(
+        user_id=1, evidence_key="imu.v1", device_id="dev-1",
+        value=json.dumps({"acc_std": 0.02}), timestamp=T0))
+    session.commit()
+    bundle = cb.build_bundle(session, 1, T0)
+    cap = {c["task"]: c for c in bundle["capabilities"]}
+    assert cap["occupancy"]["status"] == "available"
+    assert "ble" in cap["occupancy"]["have"]
+    assert cap["activity_gesture"]["status"] == "available"
+    # imu live but no app.focus evidence → all-of task still missing
+    assert cap["activity_context"]["status"] == "unavailable"
+    assert "app" in cap["activity_context"]["missing"]
+    # inventory attributes sensors to the reporting device
+    inv = {s["device"]: s["sensors"] for s in bundle["sensors"]}
+    assert inv["dev-1"]["ble"] < 5 and inv["dev-1"]["imu"] == 0.0
+
+
 def test_build_applies_map_and_seeds_devices(db):
     session, _ = db
     _evidence(session)
