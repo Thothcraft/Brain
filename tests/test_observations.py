@@ -68,6 +68,63 @@ def test_sampled_schema_keeps_one_row_per_subject_per_interval(session):
     assert ids == {"a", "c", "d"}
 
 
+def test_item_conflict_rolls_back_only_that_row(tmp_path, monkeypatch):
+    """A dup committed by a CONCURRENT connection between the existence
+    check and the flush must NOT roll back earlier items — per-item
+    savepoints isolate the IntegrityError (was: db.rollback() undid the
+    whole batch while ``stored`` still counted the rows).
+
+    WAL mode lets the competing writer commit while the ingester's read
+    transaction is open — exactly the production race."""
+    import server.v1.context as v1ctx
+    from sqlalchemy.orm import sessionmaker
+
+    # Default pool — the two sessions MUST be on separate connections
+    # for a genuine cross-connection conflict.
+    engine = create_engine(
+        f'sqlite:///{tmp_path}/race.db',
+        connect_args={'timeout': 30})
+    Base.metadata.create_all(engine)
+    with engine.connect() as c:
+        c.exec_driver_sql('PRAGMA journal_mode=WAL')
+    sf = sessionmaker(bind=engine, expire_on_commit=False)
+    s1, s2 = sf(), sf()
+    try:
+        s1.add(User(userId=1, username='test', email='t@x.invalid',
+                    hashed_password='x', role=0, plan='free'))
+        s1.commit()
+
+        real_gate = v1ctx.evidence_sample_ok
+
+        def sneak(user_id, schema, device, ts, subject):
+            # Concurrent writer: commits the same external_id AFTER
+            # item B's existence check ran but before its insert.
+            if subject == "device:watch-2":
+                s2.add(ContextEvidence(
+                    user_id=1, external_id="obs:obs-2",
+                    evidence_key="ble.rssi.v1", timestamp=ts,
+                    device_id="other"))
+                s2.commit()
+            return real_gate(user_id, schema, device, ts, subject)
+
+        monkeypatch.setattr(v1ctx, "evidence_sample_ok", sneak)
+        frame = {"type": "observation_batch", "id": "b9",
+                 "items": [_item(observation_id="obs-1"),
+                           _item(observation_id="obs-2",
+                                 subject="device:watch-2")]}
+        out = ingest_observation_batch(s1, 1, "dev-uuid", frame)
+        assert out == {"stored": 1, "deduplicated": 1, "rejected": 0}
+        # The first item survived; the sneaky row is the only other row
+        # (device_id="other", not this batch).
+        mine = s1.query(ContextEvidence).filter_by(
+            device_id="dev-uuid").all()
+        assert [r.observation_id for r in mine] == ["obs-1"]
+    finally:
+        s1.close()
+        s2.close()
+        engine.dispose()
+
+
 def test_redelivery_is_idempotent(session):
     frame = {"type": "observation_batch", "id": "b1", "items": [_item()]}
     ingest_observation_batch(session, 1, "dev-uuid", frame)

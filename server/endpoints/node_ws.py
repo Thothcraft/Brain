@@ -226,7 +226,11 @@ def _apply_node_state(db: Session, user_id: int, value: Any,
                       ts: float) -> None:
     """A node estimator transition (``context.state.v1``) lands as a
     first-class ``ContextState`` — the evidence row is the audit trail,
-    the state is what rules and the agent read. Contract §4/§8."""
+    the state is what rules and the agent read. Contract §4/§8.
+
+    Runs *after* the evidence batch commits — ``apply_state`` manages
+    its own transaction, so failures here can only lose the state apply
+    itself, never sibling evidence rows."""
     if not isinstance(value, dict) or not value.get("key"):
         return
     try:
@@ -259,11 +263,16 @@ def ingest_observation_batch(db: Session, user_id: int,
     Returns a small receipt: ``{stored, deduplicated, rejected}``.
     """
     from server.db import ContextEvidence
+    from server.v1.context import evidence_sample_ok
     items = frame.get("items") if isinstance(frame, dict) else None
     if not isinstance(items, list):
         return {"stored": 0, "deduplicated": 0, "rejected": 0}
     stored = deduped = rejected = 0
     batch_id = str(frame.get("id") or "")
+    # context.state.v1 items are applied after the evidence commit —
+    # apply_state runs its own transaction and must not interleave with
+    # the per-item savepoints below.
+    state_items: list = []
     for raw in items[:_OBSERVATION_BATCH_MAX]:
         if not isinstance(raw, dict):
             rejected += 1
@@ -286,15 +295,15 @@ def ingest_observation_batch(db: Session, user_id: int,
             ts = float(raw.get("timestamp") or time())
         except (TypeError, ValueError):
             ts = time()
-        # Estimator transitions are first-class states — applied before
-        # the sampling gate so a fast occupied→empty flip inside the
-        # 60 s evidence interval still reaches rules and the agent.
+        # Estimator transitions are first-class states — applied for
+        # every state obs (post-commit, below) regardless of the sampling
+        # gate so a fast occupied→empty flip inside the 60 s evidence
+        # interval still reaches rules and the agent.
         if schema == "context.state.v1":
-            _apply_node_state(db, user_id, value, ts)
+            state_items.append((value, ts))
         # High-frequency schemas (BLE RSSI, radio sightings, motion) are
         # sampled to one row/min per device — ungated they filled
         # context_evidence with 750K rows / 515MB in two days.
-        from server.v1.context import evidence_sample_ok
         if not evidence_sample_ok(user_id, schema, device_uuid, ts,
                                   str(raw.get("subject") or "")):
             deduped += 1
@@ -322,15 +331,26 @@ def ingest_observation_batch(db: Session, user_id: int,
             confidence=conf,
             execution_class="edge",
             provenance=json.dumps(raw.get("provenance") or {}))
-        db.add(row)
         try:
-            db.flush()
+            # Per-item savepoint — a duplicate observation_id (concurrent
+            # re-delivery) rolls back ONLY this row; rolling back the
+            # outer transaction here used to silently undo earlier
+            # inserts while ``stored`` still counted them.
+            with db.begin_nested():
+                db.add(row)
+                db.flush()
             stored += 1
         except IntegrityError:
-            # Concurrent re-delivery of the same observation_id.
-            db.rollback()
             deduped += 1
+        except Exception:
+            # Malformed-but-schema-valid row (oversized payload etc.) —
+            # skip it instead of failing the whole batch on commit.
+            rejected += 1
+            logger.debug("[node-ws] observation row rejected: %r", raw,
+                         exc_info=True)
     db.commit()
+    for value, ts in state_items:
+        _apply_node_state(db, user_id, value, ts)
     if stored or deduped or rejected:
         logger.debug("[node-ws] observations from %s: %d stored, %d dedup, "
                      "%d rejected", device_uuid, stored, deduped, rejected)
@@ -339,15 +359,18 @@ def ingest_observation_batch(db: Session, user_id: int,
 
 
 def _ingest_observation_frame(user_id: int, device_uuid: str,
-                              frame: Dict[str, Any]) -> None:
+                              frame: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Session wrapper for the WS loop — never lets ingest break the
-    node channel."""
+    node channel. Returns the ingest receipt (``stored``/``deduplicated``/
+    ``rejected``) so the socket can ack the batch after Brain has
+    actually committed it, or ``None`` when ingest failed outright."""
     try:
         with get_db_session() as db:
-            ingest_observation_batch(db, user_id, device_uuid, frame)
+            return ingest_observation_batch(db, user_id, device_uuid, frame)
     except Exception:
         logger.exception("[node-ws] observation ingest failed for %s",
                          device_uuid)
+        return None
 
 
 def _apply_prediction_context(user_id: int, device_uuid: str,
@@ -607,8 +630,20 @@ async def node_ws(
                         "room_changed", doc, frame.get("ts"),
                         frame.get("id"))
             elif ftype == "observation_batch":
-                await asyncio.to_thread(
+                receipt = await asyncio.to_thread(
                     _ingest_observation_frame, user_id, device_uuid, frame)
+                # Persistence receipt — the node only clears its spool
+                # on this ack, so a disconnect or commit failure can no
+                # longer drop committed-into-the-void observations.
+                if receipt is not None:
+                    try:
+                        await websocket.send_json({
+                            "type": "observation_ack",
+                            "id": frame.get("id"),
+                            **receipt})
+                    except Exception:
+                        logger.debug("[node-ws] observation_ack send "
+                                     "failed for %s", device_uuid)
             elif ftype in ("event", "metadata"):
                 kind = frame.get("kind") or (
                     "metadata" if ftype == "metadata" else "event")
@@ -640,6 +675,37 @@ class NodeApiRequest(BaseModel):
     body: Any = None
 
 
+_RELAY_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _check_relay_scope(principal: Any, method: str) -> None:
+    """Enforce credential scopes on the tunnel relay.
+
+    ``get_current_user`` accepts scoped automation keys (and scoped
+    JWTs) — without this check a read-only key could relay arbitrary
+    mutations (captures, model deploys, actuation) to the owner's
+    devices. Read operations need ``device:read`` (or the superset
+    ``device:control``); everything else requires ``device:control``.
+    A principal with no scope claim (plain user token) is unconstrained.
+    """
+    scopes = getattr(principal, "scopes", None)
+    if scopes is None:
+        scopes = getattr(principal, "auth_scopes", None)
+    if scopes is None:
+        return
+    if method.upper() in _RELAY_READ_METHODS:
+        required = "device:read"
+        allowed = {"device:read", "device:control"}
+    else:
+        required = "device:control"
+        allowed = {"device:control"}
+    if not allowed.intersection(scopes):
+        raise HTTPException(
+            status_code=403,
+            detail=f"credential lacks scope for {method.upper()} "
+                   f"device relay (requires '{required}')")
+
+
 @router.post("/nodes/{device_id}/api")
 async def node_api_relay(
     device_id: str,
@@ -650,6 +716,7 @@ async def node_api_relay(
 ):
     """Forward ``{method,path,body}`` to the node over its tunnel and return
     the node's status + body verbatim — portal/mobile's single choke point."""
+    _check_relay_scope(current_user, request.method)
     device = _owned_device(device_id, current_user, db)
     if not request.path.startswith("/"):
         raise HTTPException(status_code=422,
@@ -863,16 +930,25 @@ async def stream_events(
     async def gen():
         queue = event_bus.subscribe(user_id)
         try:
-            # Replay persisted events newer than the cursor (bounded).
+            # Replay persisted events newer than the cursor, paginating
+            # until the backlog drains — a single ``limit`` page used to
+            # leave large backlogs unreplayed, and live events then
+            # advanced the client cursor past them.
+            cursor = last_id
             try:
-                rows = db.query(NodeEvent).filter(
-                    NodeEvent.user_id == user_id,
-                    NodeEvent.id > last_id).order_by(
-                    NodeEvent.id.asc()).limit(limit).all()
-                for row in rows:
-                    yield _sse(row.to_dict())
+                while True:
+                    rows = db.query(NodeEvent).filter(
+                        NodeEvent.user_id == user_id,
+                        NodeEvent.id > cursor).order_by(
+                        NodeEvent.id.asc()).limit(limit).all()
+                    if not rows:
+                        break
+                    for row in rows:
+                        cursor = row.id
+                        yield _sse(row.to_dict())
             except Exception:  # replay is best-effort — live feed wins
                 pass
+            replayed_up_to = cursor
             while True:
                 if await request.is_disconnected():
                     return
@@ -881,6 +957,13 @@ async def stream_events(
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
                     continue
+                # Skip live copies of events already sent by the replay
+                # (they landed on the bus before/while replay ran).
+                try:
+                    if int(evt.get("id") or 0) <= replayed_up_to:
+                        continue
+                except (TypeError, ValueError):
+                    pass
                 yield _sse(evt)
         finally:
             event_bus.unsubscribe(user_id, queue)

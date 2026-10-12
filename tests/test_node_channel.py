@@ -9,6 +9,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 
 import pytest
@@ -186,6 +187,63 @@ def test_relay_offline_node_returns_503(api):
                       json={'method': 'GET', 'path': '/api/status'},
                       headers=_user_headers())
     assert res.status_code == 503
+
+
+def test_relay_scoped_credentials_enforced(api):
+    """A scoped principal (automation key / scoped JWT) may only relay
+    what its scopes allow — read ops need device:read|control, mutations
+    need device:control. Was: any valid credential could relay anything."""
+    client, _factory, user = api
+    over = client.app.dependency_overrides
+    try:
+        over[get_current_user] = lambda: SimpleNamespace(
+            userId=1, username='auto', scopes=['device:read'])
+        # Read passes scope → reaches the tunnel (503 = node offline).
+        res = client.post('/v1/nodes/dev-1/api',
+                          json={'method': 'GET', 'path': '/api/v1/status'})
+        assert res.status_code == 503
+        # Mutation is rejected before device lookup.
+        res = client.post('/v1/nodes/dev-1/api',
+                          json={'method': 'POST',
+                                'path': '/api/captures/start'})
+        assert res.status_code == 403
+
+        over[get_current_user] = lambda: SimpleNamespace(
+            userId=1, username='auto', scopes=['device:control'])
+        res = client.post('/v1/nodes/dev-1/api',
+                          json={'method': 'POST',
+                                'path': '/api/captures/start'})
+        assert res.status_code == 503  # scope OK — offline tunnel
+
+        # An unrelated scope (no device:*) is rejected even for reads.
+        over[get_current_user] = lambda: SimpleNamespace(
+            userId=1, username='auto', scopes=['sensor:stream'])
+        res = client.post('/v1/nodes/dev-1/api',
+                          json={'method': 'GET', 'path': '/api/v1/status'})
+        assert res.status_code == 403
+    finally:
+        over[get_current_user] = lambda: user
+
+
+def test_observation_batch_gets_persistence_ack(api):
+    """Brain replies ``observation_ack`` only after the batch commits —
+    the node's spool keys off this frame, not the socket write."""
+    client, factory, _user = api
+    from server.db import ContextEvidence
+    item = {'schema': 'ble.rssi.v1', 'observation_id': 'w1',
+            'timestamp': 1759612345.0, 'source_id': 'ble:hci0',
+            'subject': 'device:watch-1',
+            'value': {'rssi_dbm': -40}}
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.send_json({'type': 'observation_batch', 'id': 'b1',
+                      'items': [item]})
+        msg = ws.receive_json()
+        assert msg['type'] == 'observation_ack'
+        assert msg['id'] == 'b1'
+        assert msg['stored'] == 1
+    with factory() as s:
+        assert s.query(ContextEvidence).filter_by(
+            external_id='obs:w1').count() == 1
 
 
 def test_room_put_writes_through(api):
