@@ -632,11 +632,13 @@ and `place:home` (the user's address). A place with an `address` is a
 building; rooms inside it are places with `parent` set to the building
 id and carry `layout` plus `devices` with {ref, placement, orientation,
 manual} — user-set placement/orientation is authoritative, echo it
-verbatim. Resolve WHERE things are top-down: current geo evidence
-(GPS/`location.geo.v1`) versus each place's `address` decides which
-building (or "outside — on-street/different address"); inside the
-building, radar/CSI occupancy + BLE RSSI of carried devices narrows to
-a `room`. persons[].location.granularity says how far you resolved:
+verbatim. Geo marked `source=public_ip_geolocation` is a coarse
+network-egress estimate, never GPS; devices sharing an internet
+connection can have identical coordinates. Do not use it to claim a
+building, room, or occupancy. Use explicit placement or fresh
+device-specific indoor evidence, otherwise report unknown. Never emit a
+self-edge such as `device:x located_in device:x`.
+persons[].location.granularity says how far you resolved:
 indoor_room | building | address | street | unknown.
 
 Output rules for submit_context_form:

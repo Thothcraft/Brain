@@ -181,11 +181,15 @@ def _live_entities(db: Session, user_id: int) -> List[ContextEntity]:
 
 def _active_relationships(db: Session, user_id: int,
                           now: float) -> List[ContextRelationship]:
-    return db.query(ContextRelationship).filter(
+    rows = db.query(ContextRelationship).filter(
         ContextRelationship.user_id == user_id,
         ContextRelationship.valid_from <= now,
         (ContextRelationship.valid_until.is_(None)) |
         (ContextRelationship.valid_until > now)).all()
+    return [r for r in rows if not (
+        (r.predicate == "located_in" and r.subject == r.object) or
+        (r.predicate == "located_in" and r.subject.startswith("device:")
+         and r.source == "assumption"))]
 
 
 def _active_states(db: Session, user_id: int, now: float) -> List[ContextState]:
@@ -398,7 +402,27 @@ def seed_devices(db: Session, user_id: int, now: float,
     for key in seeded:
         if key.startswith("device:"):
             _edge(key, "owned_by", "person:owner", 0.95, "registry")
-            _edge(key, "located_in", owner_place, 0.5, "assumption")
+
+    # Ownership does not establish where a device is physically located.
+    stale_device_places = db.query(ContextRelationship).filter(
+        ContextRelationship.user_id == user_id,
+        ContextRelationship.predicate == "located_in",
+        ContextRelationship.subject.like("device:%"),
+        ContextRelationship.source == "assumption",
+        ContextRelationship.valid_from <= now,
+        (ContextRelationship.valid_until.is_(None)) |
+        (ContextRelationship.valid_until > now)).all()
+    for rel in stale_device_places:
+        rel.valid_until = now
+    stale_self_places = db.query(ContextRelationship).filter(
+        ContextRelationship.user_id == user_id,
+        ContextRelationship.predicate == "located_in",
+        ContextRelationship.valid_from <= now,
+        (ContextRelationship.valid_until.is_(None)) |
+        (ContextRelationship.valid_until > now)).all()
+    for rel in stale_self_places:
+        if rel.subject == rel.object:
+            rel.valid_until = now
 
     db.commit()
     return seeded
@@ -847,10 +871,10 @@ _SENSOR_HINTS = (
 # suffices (alternatives); ``all`` = every listed class must be live.
 _TASK_SENSORS = (
     {"task": "occupancy", "need": "any",
-     "sensors": ["radar", "csi", "motion", "ble", "wifi", "gps", "watch"],
-     "detail": "room/place occupied — radar/CSI fluctuation, motion, "
-               "radio scans, GPS at the place, or a worn watch co-located "
-               "with owned devices"},
+     "sensors": ["radar", "csi", "motion"],
+     "detail": "room/place occupied — radar/CSI fluctuation and motion; "
+               "coarse public-IP geo, online status, BLE sightings, and "
+               "ownership do not prove room occupancy"},
     {"task": "radio_presence", "need": "any",
      "sensors": ["ble", "wifi"],
      "detail": "which subjects/emitters are near a node"},
@@ -1134,11 +1158,12 @@ PLACES — a `place:` with an `address` is a building; `place:`s inside
 it (rooms) carry `building` (the parent's id) plus `layout` and
 `devices` (each {ref, placement, orientation, manual}) — user-set
 placement/orientation entries are authoritative, preserve them
-verbatim. Current `location.geo.v1`/geo evidence versus the place
-address decides where things ARE: a device/person whose geo sits
-outside every known address is `located_in` a different/unknown place
-(on-street/away), and inside the address, radar/CSI/BLE evidence
-narrows it to a specific room.
+verbatim. Geo marked `source=public_ip_geolocation` is only a coarse
+public-egress estimate, not device GPS. Nodes sharing a network can
+have identical coordinates. Never use that evidence to assert a room,
+building presence, or occupancy. Use confirmed/manual room assignment
+or fresh, device-specific sensor evidence; otherwise report location as
+unknown. Never create a `located_in` edge whose subject equals object.
 
 PERSONS — the account always owns at least `person:owner` (the user,
 pre-seeded) and `place:home` (their address). Track who the carried
@@ -1155,13 +1180,14 @@ You get:
     physical `fields` (per-field mean/min/max/n — e.g. radar `snr_db`,
     `range`, CSI amplitude variance, RSSI, audio level) with `n`,
     `rate_hz` and `age_s`, plus the node's `estimates` (its own
-    occupancy/zone/activity verdicts) and `location` (self-resolved geo
-    + user-set `site` address + `room`). Prefer these — they are the
-    most direct evidence.
+    occupancy/zone/activity verdicts) and `location` (which may be a
+    coarse public-IP estimate; it does not prove presence, site, or room).
+    Prefer explicit room placement and fresh indoor sensor evidence.
   * `descriptors` — compact physical aggregates per (evidence key,
     device): counts, field mean/min/max, latest value, mean confidence,
-    age. `location.geo.v1` entries describe where a node is (lat/lon,
-    postal_code, city, site).
+    age. `location.geo.v1` may be public-IP geolocation (a coarse egress
+    area shared by nodes behind the same network), not physical presence;
+    it may include lat/lon, postal_code, city, and user-set site.
   * `devices` — the device registry (see above); `map` — the current
     semantic map snapshot you are updating; `reference` — measured
     empty-vs-occupied stats for the radar/CSI fields (E1 rig): treat as
@@ -1513,6 +1539,10 @@ def apply_map_update(db: Session, user_id: int, update: Dict[str, Any],
         if s not in live or o not in live:
             receipt["skipped"].append({"relationship": [s, p, o],
                                        "reason": "unresolved endpoint"})
+            continue
+        if p == "located_in" and s == o:
+            receipt["skipped"].append({"relationship": [s, p, o],
+                                       "reason": "self-location is invalid"})
             continue
         seen_entities += [s, o]
         same = next((r for r in active if r.subject == s and r.predicate == p

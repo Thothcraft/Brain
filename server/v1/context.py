@@ -235,14 +235,24 @@ async def list_relationships(
             ContextRelationship.valid_from <= now,
             (ContextRelationship.valid_until.is_(None)) |
             (ContextRelationship.valid_until > now))
-    return {"relationships": [r.to_dict() for r in
-                              q.order_by(ContextRelationship.id).all()]}
+    rows = q.order_by(ContextRelationship.id).all()
+    if active_only:
+        rows = [r for r in rows if not (
+            (r.predicate == "located_in" and r.subject == r.object) or
+            (r.predicate == "located_in" and r.subject.startswith("device:")
+             and r.source == "assumption"))]
+    return {"relationships": [r.to_dict() for r in rows]}
 
 
 def apply_relationship(db: Session, user_id: int,
                        body: RelationshipIn) -> ContextRelationship:
     """Create one relationship row — shared validation for REST and
     context-form submissions."""
+    if body.predicate == "located_in" and body.subject == body.object:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "a node cannot be located in itself",
+                    "hint": "located_in must point to a distinct place entity"})
     if not body.allow_unresolved:
         missing = [
             key for key in (body.subject, body.object)
@@ -615,6 +625,10 @@ async def context_snapshot(
         ContextState.user_id == uid,
         (ContextState.valid_until.is_(None)) |
         (ContextState.valid_until > now)).all()
+    rels = [r for r in rels if not (
+        (r.predicate == "located_in" and r.subject == r.object) or
+        (r.predicate == "located_in" and r.subject.startswith("device:")
+         and r.source == "assumption"))]
     return {
         "entities": [e.to_dict() for e in entities],
         "relationships": [r.to_dict() for r in rels],

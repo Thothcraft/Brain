@@ -166,6 +166,11 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
     the model was actually shown."""
     cfg = cfg or _load_config(db, user_id)
     now = now or time.time()
+    def is_device_gps(value: Any) -> bool:
+        if isinstance(value, dict) and isinstance(value.get("value"), dict):
+            value = value["value"]
+        return isinstance(value, dict) and str(value.get("source") or "").casefold() in {
+            "gps", "device_gps", "gnss"}
     # Same anchors the builder maintains — registry devices (with MAC/
     # hostname fingerprints) + person:owner/place:home — so the assistant
     # never answers against an unseeded map.
@@ -306,11 +311,13 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
             online_age = None
         gps_state = next((s for s in linked
                           if str(s.get("key") or "").startswith("location.geo")
-                          and not s.get("is_stale")), None)
+                          and not s.get("is_stale")
+                          and is_device_gps(s.get("value"))), None)
         fresh_scene_location = next((scene for scene in (bundle.get("scenes") or [])
             if str(scene.get("device") or "").casefold() in aliases
             and scene.get("location")
             and isinstance(scene.get("location"), dict)
+            and str(scene["location"].get("source") or "").casefold() in {"gps", "device_gps", "gnss"}
             and float(scene["location"].get("age_s") or 0) <= 120), None)
         current_device_facts.append({
             "entity": device.get("entity_key") or device.get("entity"),
@@ -321,10 +328,10 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
                 if online_age is not None else None,
             "status_states": linked,
             "location": (
-                {"source": "fresh GPS state", "age_s": gps_state.get("age_s"),
+                {"source": "device GPS state", "age_s": gps_state.get("age_s"),
                  "value": gps_state.get("value")}
                 if gps_state else
-                {"source": "fresh node GPS", "age_s": fresh_scene_location["location"].get("age_s"),
+                {"source": "device GPS", "age_s": fresh_scene_location["location"].get("age_s"),
                  "value": fresh_scene_location["location"]}
                 if fresh_scene_location else None
             ),
@@ -360,7 +367,7 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
                     }
                     break
             current_device_facts[-1]["location"] = placement or {
-                "status": "unknown; no fresh GPS or room placement"}
+                "status": "unknown; no trusted device GPS or room placement"}
     out["current_device_facts"] = current_device_facts
     if cfg.include_descriptors:
         out["descriptors"] = (bundle.get("descriptors") or []) \
@@ -501,12 +508,20 @@ Current status and location rules — `current_device_facts` is the
 conservative summary of registry reachability and rapidly changing
 states. `node_online` means only that the node checked in recently; it
 does NOT mean that the laptop/person is physically inside the home or a
-room. Physical location requires a fresh GPS/location state or an
-explicit user-drawn room placement in `spaces`. Do not infer room
+room. `location.geo.v1` marked `source=public_ip_geolocation` is a
+coarse internet-egress estimate, not GPS; devices on the same network
+can report identical coordinates. It never proves a device is at home,
+inside a building, or in a room. Physical location requires a fresh
+device GPS state marked with source `gps`, or an explicit user-drawn
+room placement in `spaces`. Do not infer room
 presence from online status, ownership, a stale `located_in` edge, or
 the fact that a device was seen by its own node. For `watch.link.v1`,
-`connected: false` means disconnected; for `watch.worn.v1`, `worn: true`
-means worn. Read these values literally. If a state is marked
+only its fresh `connected` field establishes the link; RSSI alone does
+not mean connected. `connected: false` means disconnected. For
+`watch.worn.v1`, `worn: true` means worn and `worn: false` means not
+worn; low IMU/acceleration variance means little movement, not unworn.
+Never override a fresh explicit watch state with RSSI or motion variance.
+Read these values literally. If a state is marked
 `is_stale: true`, describe it only as the last report and do not use it
 as the present state. When current evidence conflicts, show the
 timestamps and say that the current status is unknown.
@@ -515,8 +530,9 @@ Capability — `sensors[]` lists the sensor CLASSES actually producing
 data in this window per device; `capabilities[]` maps tasks →
 sensor classes and marks each `available`/`unavailable` (with `missing`
 alternatives). Different tasks need different sensors — occupancy can
-come from radar/CSI fluctuation, motion, radio scans, GPS at the place
-or a worn watch co-located with owned devices; activity recognition
+come from radar/CSI fluctuation and motion. Radio or watch sightings
+identify nearby emitters but do not by themselves prove room occupancy;
+activity recognition
 (sit/stand/sleep/walk) needs IMU-bearing devices (watch/phone/laptop)
 plus device/app state; scene perception needs a camera or mic. When a
 task is `unavailable` — or the sensor that could answer hasn't
