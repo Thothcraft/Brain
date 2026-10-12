@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from server.auth import get_current_user, get_scoped_principal
-from server.db import ContextEntity, User, get_db
+from server.db import ContextEntity, NodeRoom, User, get_db
 from server.inference_auth import (
     INFERENCE_SOURCE, inference_call, inference_status,
 )
@@ -249,6 +249,119 @@ def _chat_context(db: Session, user_id: int, user: Optional[User],
     spaces = bundle.get("spaces") or []
     if spaces:
         out["spaces"] = spaces
+    # The node's detailed room/v1 plan is a separate source from Brain's
+    # account-space placements. Include it so chat sees furniture, room
+    # geometry, device positions and manually placed people as authored.
+    room_layouts = []
+    try:
+        for row in (db.query(NodeRoom).filter(NodeRoom.user_id == user_id)
+                    .order_by(NodeRoom.updated_at.desc()).limit(20).all()):
+            try:
+                doc = json.loads(row.doc or "{}")
+            except (TypeError, ValueError):
+                doc = {}
+            room_layouts.append({
+                "device_id": row.device_id,
+                "updated_at": row.updated_at.isoformat() + "Z"
+                    if row.updated_at else None,
+                "doc": doc,
+            })
+    except Exception:
+        logger.exception("chat room layout load failed for user %s", user_id)
+    if room_layouts:
+        out["room_layouts"] = room_layouts
+
+    # `valid_until` is a retention boundary, not proof that volatile data
+    # remains true. Keep the map for auditability and expose a conservative
+    # summary the assistant can use for present-tense claims.
+    entities = bundle["map"].get("entities") or []
+    entity_by_alias: Dict[str, Dict[str, Any]] = {}
+    for entity in entities:
+        for alias in (entity.get("id"), *(entity.get("aliases") or [])):
+            if alias:
+                entity_by_alias[str(alias).casefold()] = entity
+    current_device_facts: List[Dict[str, Any]] = []
+    now_dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    for device in devices:
+        entity = entity_by_alias.get(
+            str(device.get("entity_key") or "").casefold())
+        aliases = [str(device.get(k) or "").casefold()
+                   for k in ("uuid", "name", "entity", "entity_key")]
+        if entity:
+            aliases.extend(str(a).casefold()
+                           for a in (entity.get("aliases") or []))
+        linked = [s for s in (bundle["map"].get("states") or [])
+                  if str(s.get("entity_id") or "").casefold() in aliases]
+        for state in linked:
+            key = str(state.get("key") or "")
+            age = max(0.0, float(state.get("age_s") or 0.0))
+            freshness_limit = 120.0 if key.startswith("location.") else 300.0
+            state["freshness"] = "stale" if age > freshness_limit else "current"
+            state["is_stale"] = age > freshness_limit
+        try:
+            seen = datetime.fromisoformat(
+                str(device.get("last_seen") or "").replace("Z", "+00:00"))
+            online_age = max(0.0, (now_dt - seen).total_seconds())
+        except (TypeError, ValueError):
+            online_age = None
+        gps_state = next((s for s in linked
+                          if str(s.get("key") or "").startswith("location.geo")
+                          and not s.get("is_stale")), None)
+        fresh_scene_location = next((scene for scene in (bundle.get("scenes") or [])
+            if str(scene.get("device") or "").casefold() in aliases
+            and scene.get("location")
+            and isinstance(scene.get("location"), dict)
+            and float(scene["location"].get("age_s") or 0) <= 120), None)
+        current_device_facts.append({
+            "entity": device.get("entity_key") or device.get("entity"),
+            "name": device.get("name"),
+            "node_online": bool(device.get("online"))
+                and online_age is not None and online_age <= 90,
+            "node_online_age_s": round(online_age, 1)
+                if online_age is not None else None,
+            "status_states": linked,
+            "location": (
+                {"source": "fresh GPS state", "age_s": gps_state.get("age_s"),
+                 "value": gps_state.get("value")}
+                if gps_state else
+                {"source": "fresh node GPS", "age_s": fresh_scene_location["location"].get("age_s"),
+                 "value": fresh_scene_location["location"]}
+                if fresh_scene_location else None
+            ),
+        })
+        if current_device_facts[-1]["location"] is None:
+            refs = {str(device.get("entity_key") or "").casefold(),
+                    str(device.get("entity") or "").casefold(),
+                    f"device:{str(device.get('uuid') or '').casefold()}"}
+            placement = next((
+                {"source": "user-drawn room placement", "space": space.get("name"),
+                 "entity": space.get("entity")}
+                for space in spaces
+                for placed in (space.get("devices") or [])
+                if str(placed.get("ref") or "").casefold() in refs
+            ), None)
+            if placement is None:
+                for layout in room_layouts:
+                    doc = layout.get("doc") or {}
+                    device_row = next((d for d in (doc.get("devices") or [])
+                                       if str(d.get("device_id") or "").casefold()
+                                       in aliases), None)
+                    if device_row is None:
+                        continue
+                    room_id = str(device_row.get("room_id") or "")
+                    room = next((r for r in (doc.get("rooms") or [])
+                                 if str(r.get("room_id") or "") == room_id), None)
+                    placement = {
+                        "source": "node room plan",
+                        "space": (room or {}).get("name") or
+                            (doc.get("name") if not room_id else room_id) or
+                            "primary room",
+                        "device_id": layout.get("device_id"),
+                    }
+                    break
+            current_device_facts[-1]["location"] = placement or {
+                "status": "unknown; no fresh GPS or room placement"}
+    out["current_device_facts"] = current_device_facts
     if cfg.include_descriptors:
         out["descriptors"] = (bundle.get("descriptors") or []) \
                              [:32 if advanced else 12]
@@ -384,6 +497,20 @@ node, scenes carry `device`, states carry `since`/`age_s`. Never say
 "the system indicates" — say which estimator or sensor said it and how
 old that observation is.
 
+Current status and location rules — `current_device_facts` is the
+conservative summary of registry reachability and rapidly changing
+states. `node_online` means only that the node checked in recently; it
+does NOT mean that the laptop/person is physically inside the home or a
+room. Physical location requires a fresh GPS/location state or an
+explicit user-drawn room placement in `spaces`. Do not infer room
+presence from online status, ownership, a stale `located_in` edge, or
+the fact that a device was seen by its own node. For `watch.link.v1`,
+`connected: false` means disconnected; for `watch.worn.v1`, `worn: true`
+means worn. Read these values literally. If a state is marked
+`is_stale: true`, describe it only as the last report and do not use it
+as the present state. When current evidence conflicts, show the
+timestamps and say that the current status is unknown.
+
 Capability — `sensors[]` lists the sensor CLASSES actually producing
 data in this window per device; `capabilities[]` maps tasks →
 sensor classes and marks each `available`/`unavailable` (with `missing`
@@ -407,6 +534,10 @@ Identity — WHO and WHICH THINGS belong to the account:
     `person:owner` unless evidence says otherwise — `entity_key` links
     it to its `device:<uuid>` map entity. Emitters absent from
     `devices` are unknowns.
+  * `spaces[]` is the account-space layout; `room_layouts[]` contains
+    node-authored `room/v1` geometry, furniture, room assignments and
+    manually placed person markers. Use both plans as authored and do
+    not treat a marker as proof someone is currently present.
   * `spaces[]` is the USER-DRAWN layout (authoritative): each space
     has `name`, `size_m`, `zones[]` polygons, `devices[]` placements
     ({ref → `device:<uuid>`, x, y, rotation_deg, fov_deg, range_m}).
