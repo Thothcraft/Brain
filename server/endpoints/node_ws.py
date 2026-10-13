@@ -788,6 +788,49 @@ async def get_node_room(
     }
 
 
+@router.get("/rooms")
+async def list_account_node_rooms(
+    raw: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Read cached node room layouts belonging to the caller's account.
+
+    Both portal users and paired devices may read the account's layouts. A
+    device credential is scoped to its registered account, so a node can
+    render another owned node's room without gaining write access to it.
+    """
+    kind, principal, device = _principal(raw, db)
+    user_id = device.userId if kind == "device" else principal.userId
+    rows = (db.query(NodeRoom, Device)
+            .join(Device, Device.device_uuid == NodeRoom.device_id)
+            .filter(NodeRoom.user_id == user_id, Device.userId == user_id)
+            .order_by(NodeRoom.updated_at.desc()).all())
+    names = dict(db.query(Device.device_uuid, Device.device_name).filter(
+        Device.userId == user_id).all())
+    rooms = []
+    for room, node in rows:
+        doc = room.to_dict()
+        if isinstance(doc, dict):
+            doc = dict(doc)
+            devices = doc.get("devices")
+            if isinstance(devices, list):
+                doc["devices"] = [
+                    {**item, "device_name": item.get("device_name")
+                     or names.get(str(item.get("device_id") or ""))
+                     or item.get("device_id")}
+                    if isinstance(item, dict) else item
+                    for item in devices]
+        rooms.append({
+            "device_id": node.device_uuid,
+            "device_name": node.device_name,
+            "online": bool(node.online),
+            "room": doc,
+            "updated_at": room.updated_at.isoformat() + "Z"
+                if room.updated_at else None,
+        })
+    return {"rooms": rooms}
+
+
 @router.put("/nodes/{device_id}/room")
 async def put_node_room(
     device_id: str,
