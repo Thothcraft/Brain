@@ -931,10 +931,30 @@ def _sensor_inventory(rows: List[ContextEvidence],
     for sc in scenes:
         dev = str(sc.get("device") or "")
         for sid, s in (sc.get("sensors") or {}).items():
+            if not isinstance(s, dict):
+                continue
             cls = _sensor_class(sid)
-            if not cls and isinstance(s, dict):
+            if not cls:
                 cls = _sensor_class(s.get("type"))
-            _add(dev, cls, sc.get("age_s"))
+            # A recent descriptor heartbeat does not mean every sensor is
+            # producing data. Use the sensor's own last-sample age/count;
+            # fall back to the scene age only for older descriptor formats.
+            try:
+                sample_count = float(s.get("n") or 0)
+            except (TypeError, ValueError):
+                sample_count = 0
+            if sample_count <= 0:
+                continue
+            try:
+                age = float(s.get("age_s")) if s.get("age_s") is not None \
+                    else float(sc.get("age_s"))
+            except (TypeError, ValueError):
+                age = None
+            # Sensors silent for two minutes are not live capabilities,
+            # even when the node itself checked in recently.
+            if age is not None and age > 120:
+                continue
+            _add(dev, cls, age)
     return [{"device": dev or None, "sensors": sensors}
             for dev, sensors in sorted(inv.items())]
 
@@ -1190,11 +1210,10 @@ You get:
     it may include lat/lon, postal_code, city, and user-set site.
   * `devices` — the device registry (see above); `map` — the current
     semantic map snapshot you are updating; `reference` — measured
-    empty-vs-occupied stats for the radar/CSI fields (E1 rig): treat as
-    the default prior — absolute map means are mount-dependent, so weigh
-    a node's lift vs ITS OWN empty baseline; the transferable shape is
-    occupancy-in-the-tail (snr spikes + std90 spread + map-mean lifts),
-    not a higher median.
+    empty-vs-occupied stats for the radar/CSI fields (E1 rig): these
+    thresholds apply only to that rig/configuration. Do not transfer them
+    to another sensor or room without a matching calibration; use a
+    device-specific empty baseline when available.
 Typical keys: occupancy/presence probabilities, radar SNR and range,
 CSI amplitude variance, BLE/Wi-Fi RSSI sightings (with decoded beacon
 identities), IMU motion variance, face/person detections, audio level,
@@ -1204,13 +1223,18 @@ A `site` on a node's location is a user-set address — anchor it: create
 or reuse a `place:` entity for the site (e.g. place:home named after
 the address), relate the reporting `device:` with `located_in`, and
 relate other persons/devices the node observes there when the evidence
-supports it. When radar/CSI fields are flat — snr_db.max under ~13 dB,
-tight range profile, near-zero CSI variance, zero emitters — while the
-node is fresh and reporting, that is positive evidence the space is
-EMPTY — set occupancy.v1 {"occupied": false} on the place with matching
-confidence. (Reference: on the E1 rig an empty room reads snr mean
-~7.6 dB, p95 <8; occupancy appears as window snr_max spikes >15-40 dB
-and ra/re/xy map lifts — see `reference.radar_occupancy`.)
+supports it. For occupancy, distinguish sensor freshness from a positive
+sensor signal: a recent sample only proves that data arrived. Flat
+radar/CSI fields and no motion spikes are NOT evidence that someone is
+present. Do not report an occupied room from BLE sightings, online
+devices, a node estimator, model prediction, or stale occupancy state
+alone. Report occupancy as unknown unless a fresh, room-relevant sensor
+window contains calibrated positive motion/presence evidence, or a
+person explicitly confirms it. Flat readings may lower occupancy only
+when the sensor is known to be functioning and a matching device/room
+empty baseline supports that conclusion; otherwise report the readings
+and say occupancy cannot be determined. The E1 thresholds in
+`reference.radar_occupancy` are rig-specific and are not universal.
 
 Update the map by calling update_context_map exactly once:
   * Reuse existing entity ids from `map` whenever they match — never

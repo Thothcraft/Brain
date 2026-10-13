@@ -526,6 +526,17 @@ Read these values literally. If a state is marked
 as the present state. When current evidence conflicts, show the
 timestamps and say that the current status is unknown.
 
+Occupancy has a stricter evidence rule: a fresh radar/CSI sample or node
+heartbeat proves only that data arrived. Flat radar/CSI fields and no
+motion spikes do not support saying a room is occupied. Do not treat
+BLE sightings, online devices, node occupancy estimates, model
+predictions, or stale `occupancy.v1` states as sufficient proof. Say
+"unknown" unless the current room has calibrated positive motion or
+presence evidence, or the user confirms occupancy. A flat reading can
+lower occupancy only when the sensor is known to work and its empty
+baseline matches that device and room. The E1 reference is not a
+universal threshold.
+
 Capability — `sensors[]` lists the sensor CLASSES actually producing
 data in this window per device; `capabilities[]` maps tasks →
 sensor classes and marks each `available`/`unavailable` (with `missing`
