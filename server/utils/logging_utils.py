@@ -103,7 +103,10 @@ def log_request_start(endpoint: str, method: str = 'UNKNOWN',
             endpoint,
             remote_addr,
             user_id or 'unauthenticated',
-            {k: v for k, v in headers.items() if k.lower() not in ['authorization', 'cookie']}
+            sorted(
+                k.decode("latin1") if isinstance(k, bytes) else str(k)
+                for k in headers
+            )
         )
     except Exception as e:
         logger.error("Error in log_request_start: %s", str(e))
@@ -175,11 +178,18 @@ def log_response(status_code: int, response: Any, endpoint: str) -> None:
         endpoint: The API endpoint that was called
     """
     log_level = logging.INFO if status_code < 400 else logging.ERROR
-    logger.log(
-        log_level,
-        "Response from %s - Status: %s, Response: %s",
-        endpoint, status_code, response
-    )
+    if isinstance(response, dict):
+        summary = f"object with {len(response)} fields"
+    elif isinstance(response, (list, tuple, set)):
+        summary = f"{type(response).__name__} with {len(response)} items"
+    elif isinstance(response, (str, bytes, bytearray)):
+        summary = f"{type(response).__name__} with {len(response)} characters"
+    elif response is None:
+        summary = "empty response"
+    else:
+        summary = type(response).__name__
+    logger.log(log_level, "Response from %s - Status: %s (%s)",
+               endpoint, status_code, summary)
 
 
 def log_ai_call(query: str, model: str, endpoint: str) -> None:

@@ -237,10 +237,8 @@ def log_request_details(request, response=None, error=None):
     log_data = {
         "timestamp": datetime.utcnow().isoformat(),
         "method": request.method,
-        "url": str(request.url),
-        "headers": dict(request.headers),
-        "client": request.client.host if request.client else None,
-        "user_agent": request.headers.get("user-agent"),
+        "path": request.url.path,
+        "header_names": sorted(request.headers.keys()),
     }
     
     if response:
