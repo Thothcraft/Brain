@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from server.auth import get_current_user
-from server.db import ApiUsage, Base, User, get_db
+from server.db import ApiUsage, Base, Query as ChatRecord, User, get_db
 from server.inference_auth import INFERENCE_SOURCE
 import server.v1.chat as chat
 from server.v1.chat import router as chat_router
@@ -82,6 +82,30 @@ def test_chat_returns_rich_answer_and_echoes_context(api, monkeypatch):
     assert seen["tier"] == "standard"
     assert r.json()["model"]["tier"] == "standard"
     assert _usage(session, "chat_query")
+
+
+def test_shared_transcript_roundtrip_and_clear(api, monkeypatch):
+    client, session = api
+    monkeypatch.setattr(chat, "_openai_answer", lambda *a, **k: {
+        "answer": "The office is occupied.", "widgets": []})
+
+    response = client.post("/v1/chat", json={
+        "chat_id": "shared-main", "message": "Is the office occupied?"})
+    assert response.status_code == 200
+    assert response.json()["chat_id"] == "shared-main"
+    saved = session.query(ChatRecord).one()
+    assert saved.userId == 1
+    assert saved.chatId == "shared-main"
+
+    history = client.get("/v1/chat/history?chat_id=shared-main").json()
+    assert [m["role"] for m in history["messages"]] == ["user", "assistant"]
+    assert history["messages"][1]["content"] == "The office is occupied."
+
+    cleared = client.delete("/v1/chat/history?chat_id=shared-main")
+    assert cleared.status_code == 200
+    assert cleared.json()["deleted_turns"] == 1
+    assert client.get("/v1/chat/history?chat_id=shared-main").json()[
+        "messages"] == []
 
 
 def test_chat_context_endpoint_shows_bundle_for_free(api):

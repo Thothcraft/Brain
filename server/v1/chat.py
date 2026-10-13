@@ -33,13 +33,15 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import (
-    APIRouter, Depends, File, HTTPException, Response, UploadFile,
+    APIRouter, Depends, File, HTTPException, Query as QueryParam, Response,
+    UploadFile,
 )
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import desc
 
 from server.auth import get_current_user, get_scoped_principal
-from server.db import ContextEntity, NodeRoom, User, get_db
+from server.db import ContextEntity, NodeRoom, Query as ChatRecord, User, get_db
 from server.inference_auth import (
     INFERENCE_SOURCE, inference_call, inference_status,
 )
@@ -91,12 +93,13 @@ class AttachmentIn(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str                       # user | assistant
-    content: str
+    content: str = Field(max_length=_MAX_HISTORY_CHARS)
 
 
 class ChatRequest(BaseModel):
     message: str = ""
     history: List[ChatMessage] = Field(default_factory=list)
+    chat_id: str = Field(default="main", min_length=1, max_length=64)
     attachments: List[AttachmentIn] = Field(default_factory=list)
     include_context: bool = True
     model: str = Field(
@@ -105,6 +108,11 @@ class ChatRequest(BaseModel):
                     "4 = gpt-4o-class fast, 5/6 = deeper reasoning + a "
                     "much larger context bundle) or the legacy tiers "
                     "'standard'/'advanced'. Bogus pick → 422.")
+
+
+class ChatHistoryIn(BaseModel):
+    chat_id: str = Field(default="main", min_length=1, max_length=64)
+    messages: List[ChatMessage] = Field(min_length=1, max_length=24)
 
 
 class TtsRequest(BaseModel):
@@ -870,6 +878,22 @@ async def chat(
     with inference_call(db, current_user, kind="chat_query") as meter:
         parsed = _openai_answer(messages, tier=tier, usage_out=meter)
 
+    # Persist one user/assistant turn in the same account-scoped transcript
+    # used by the app and web hub. Keep the legacy Query table so no schema
+    # migration is needed.
+    try:
+        db.add(ChatRecord(
+            userId=current_user.userId,
+            chatId=body.chat_id,
+            query_text=text,
+            response=parsed["answer"],
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("chat transcript save failed for user %s",
+                         current_user.userId)
+
     return {
         "answer": parsed["answer"],
         "assessments": [a for a in (parsed.get("assessments") or [])
@@ -879,8 +903,93 @@ async def chat(
         "attachments": attachment_notes,
         "model": {"tier": tier,
                   "id": _model_for_tier(tier)},
+        "chat_id": body.chat_id,
         "generated_at": time.time(),
     }
+
+
+@router.get("/history")
+async def get_chat_history(
+    chat_id: str = QueryParam(default="main", min_length=1, max_length=64),
+    limit: int = QueryParam(default=12, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Read the shared, account-scoped conversation transcript."""
+    rows = db.query(ChatRecord).filter(
+        ChatRecord.userId == current_user.userId,
+        ChatRecord.chatId == chat_id,
+    ).order_by(desc(ChatRecord.created_at), desc(ChatRecord.queryId)) \
+        .limit(limit).all()
+    rows.reverse()
+    messages: List[Dict[str, Any]] = []
+    for row in rows:
+        stamp = row.created_at.isoformat() + "Z" if row.created_at else None
+        messages.append({"role": "user", "content": row.query_text,
+                         "timestamp": stamp})
+        if row.response:
+            messages.append({"role": "assistant", "content": row.response,
+                             "timestamp": stamp})
+    return {"chat_id": chat_id, "messages": messages}
+
+
+@router.post("/history")
+async def import_chat_history(
+    body: ChatHistoryIn,
+    current_user: User = Depends(get_scoped_principal("chat:write")),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """One-time import of an existing local transcript, if the shared chat
+    has no saved turns yet. This lets the web hub migrate its old browser
+    history without overwriting an app-created transcript.
+    """
+    existing = db.query(ChatRecord.queryId).filter(
+        ChatRecord.userId == current_user.userId,
+        ChatRecord.chatId == body.chat_id,
+    ).first()
+    if existing:
+        return {"chat_id": body.chat_id, "imported_turns": 0,
+                "already_exists": True}
+
+    pending_user: Optional[str] = None
+    turns: List[ChatRecord] = []
+    for message in body.messages:
+        if message.role == "user":
+            if pending_user:
+                turns.append(ChatRecord(userId=current_user.userId,
+                                        chatId=body.chat_id,
+                                        query_text=pending_user))
+            pending_user = message.content.strip() or "[attachment]"
+        elif message.role == "assistant" and pending_user:
+            turns.append(ChatRecord(userId=current_user.userId,
+                                    chatId=body.chat_id,
+                                    query_text=pending_user,
+                                    response=message.content))
+            pending_user = None
+    if pending_user:
+        turns.append(ChatRecord(userId=current_user.userId,
+                                chatId=body.chat_id,
+                                query_text=pending_user))
+    if turns:
+        db.add_all(turns)
+        db.commit()
+    return {"chat_id": body.chat_id, "imported_turns": len(turns),
+            "already_exists": False}
+
+
+@router.delete("/history")
+async def clear_chat_history(
+    chat_id: str = QueryParam(default="main", min_length=1, max_length=64),
+    current_user: User = Depends(get_scoped_principal("chat:write")),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Clear the shared transcript for the selected chat on all clients."""
+    deleted = db.query(ChatRecord).filter(
+        ChatRecord.userId == current_user.userId,
+        ChatRecord.chatId == chat_id,
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"chat_id": chat_id, "deleted_turns": deleted}
 
 
 @router.get("/context")

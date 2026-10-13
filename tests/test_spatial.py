@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from server.auth import get_current_user
 from server.db import (
-    Base, Device, DeviceCaptureChunk, Space, User, get_db,
+    Base, ContextState, Device, DeviceCaptureChunk, Space, User, get_db,
 )
 from server.endpoints.spatial_endpoints import router as spatial_router
 
@@ -119,6 +119,58 @@ def test_space_state_empty(api):
     state = client.get(f"/api/spaces/{space['id']}/state").json()['state']
     assert state['occupied'] is False
     assert state['people_count'] == 0
+
+
+def test_space_state_uses_live_radar_occupancy_state(api):
+    client, session, _ = api
+    space = client.post('/api/spaces', json={'name': 'office'}).json()['space']
+    client.put('/api/spaces/devices/dev-1/placement', json={
+        'space_id': space['id'], 'x': 0.0, 'y': 0.0,
+    })
+    session.add(ContextState(
+        user_id=1,
+        state_key='occupancy.v1',
+        entity_id='dev-1',
+        value=json.dumps({'occupied': True, 'label': 'occupied',
+                          'model': 'radar-model'}),
+        confidence=0.91,
+        since=1781291400.0,
+        estimator='radar-model',
+    ))
+    session.commit()
+
+    state = client.get(f"/api/spaces/{space['id']}/state").json()['state']
+    assert state['occupied'] is True
+    assert state['confidence'] == 0.91
+
+
+def test_live_radar_empty_state_supersedes_old_capture_label(api):
+    client, session, _ = api
+    space = client.post('/api/spaces', json={'name': 'office'}).json()['space']
+    client.put('/api/spaces/devices/dev-1/placement', json={
+        'space_id': space['id'], 'x': 0.0, 'y': 0.0,
+    })
+    session.add(DeviceCaptureChunk(
+        device_id=1, user_id=1, minute='20260922_0100', chunk_index=0,
+        status='stored', frame_count=10,
+        payload=json.dumps({'model_predictions': [
+            {'label': 'occupied', 'confidence': 0.8},
+        ]}),
+    ))
+    session.add(ContextState(
+        user_id=1,
+        state_key='occupancy.v1',
+        entity_id='dev-1',
+        value=json.dumps({'occupied': False, 'label': 'empty'}),
+        confidence=0.88,
+        since=1781291400.0,
+        estimator='radar-model',
+    ))
+    session.commit()
+
+    state = client.get(f"/api/spaces/{space['id']}/state").json()['state']
+    assert state['occupied'] is False
+    assert state['confidence'] == 0.88
 
 
 def test_foreign_space_not_found(api):

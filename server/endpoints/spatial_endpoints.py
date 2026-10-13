@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 
 from server.auth import get_current_user
 from server.db import (
-    Device, DeviceCaptureChunk, DevicePlacement, Space, User, Zone, get_db,
+    ContextState, Device, DeviceCaptureChunk, DevicePlacement, Space, User,
+    Zone, get_db,
 )
 from server.entitlements import check_space_limit
 
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/spaces", tags=["spaces"])
 
 OCCUPIED_LABELS = {"occupied", "person", "presence", "moving", "activity"}
+EMPTY_LABELS = {"empty", "unoccupied", "no_person", "vacant"}
 
 
 # ── request models ──────────────────────────────────────────────────────────
@@ -125,6 +127,40 @@ def _latest_predictions(db: Session, device: Device) -> List[Dict[str, Any]]:
     return preds
 
 
+def _occupancy_state(db: Session, device: Device, user_id: int,
+                     now: float) -> Optional[Dict[str, Any]]:
+    """Read the canonical occupancy state produced from node predictions.
+
+    Radar/CSI node predictions are projected to ``occupancy.v1`` by the
+    authenticated node event path. The room endpoint previously ignored
+    that state and only inspected capture-chunk payloads, so a room could
+    show empty even while the live occupancy state said occupied.
+    """
+    state = db.query(ContextState).filter(
+        ContextState.user_id == user_id,
+        ContextState.state_key == "occupancy.v1",
+        ContextState.entity_id == device.device_uuid,
+    ).first()
+    if state is None or (state.valid_until is not None
+                         and state.valid_until <= now):
+        return None
+    try:
+        value = json.loads(state.value or "{}")
+    except (TypeError, ValueError):
+        return None
+    occupied = value.get("occupied") if isinstance(value, dict) else None
+    if not isinstance(occupied, bool):
+        return None
+    return {
+        "label": value.get("label") or ("occupied" if occupied else "empty"),
+        "occupied": occupied,
+        "confidence": state.confidence or 0.0,
+        "people_count": value.get("people_count"),
+        "xy": value.get("xy") or value.get("points") or [],
+        "source": "context_state",
+    }
+
+
 def _space_state(db: Session, space: Space) -> Dict[str, Any]:
     """Compute live spatial state for one space from placed devices."""
     zone_states: Dict[str, Dict[str, Any]] = {
@@ -135,22 +171,38 @@ def _space_state(db: Session, space: Space) -> Dict[str, Any]:
     people = 0
     best_conf = 0.0
     last_activity: Optional[str] = None
+    now = datetime.utcnow().timestamp()
 
     for placement in space.placements:
         device = placement.device
         if not device:
             continue
         preds = _latest_predictions(db, device)
+        # Canonical node occupancy is the source of truth for the live room
+        # state. Keep chunk-based predictions for older producers and XY
+        # localization, while including the event-projected state.
+        canonical = _occupancy_state(db, device, space.user_id, now)
+        if canonical is not None:
+            preds = [{**pred, "_ignore_occupancy_label": True}
+                     for pred in preds]
+            preds.append({**canonical, "_canonical_occupancy": True})
         for pred in preds:
             label = str(pred.get("label") or pred.get("prediction") or "").lower()
             conf = float(pred.get("confidence") or 0.0)
-            occupied = label in OCCUPIED_LABELS
+            occupied = (bool(pred["occupied"])
+                        if pred.get("_canonical_occupancy")
+                        else label in OCCUPIED_LABELS
+                        and not pred.get("_ignore_occupancy_label"))
             count = int(pred.get("people_count") or (1 if occupied else 0))
             xy = pred.get("xy") or pred.get("points") or []
 
+            if (pred.get("_canonical_occupancy") or
+                    (label in OCCUPIED_LABELS | EMPTY_LABELS and
+                     not pred.get("_ignore_occupancy_label"))):
+                best_conf = max(best_conf, conf)
+
             if occupied:
                 space_occupied = True
-                best_conf = max(best_conf, conf)
                 people = max(people, count)
 
             # Assign XY points (plan coords) to zones
