@@ -537,6 +537,14 @@ lower occupancy only when the sensor is known to work and its empty
 baseline matches that device and room. The E1 reference is not a
 universal threshold.
 
+Whispy's MMW-HAT BGT60TR13C payload has two different SNR fields:
+`snr_f` is the clutter-masked FFT/Doppler SNR; `snr_db` is a raw
+max-to-median ADC ratio and is not an occupancy feature. Its raw
+`range_profile` and `xy_map` are also ADC diagnostics, not a calibrated
+range or room-position map. Prefer `snr_f` and calibrated DSP/model
+outputs; if they or a matching room baseline are absent, say occupancy
+is unknown. Do not apply E1 `snr_db` cutoffs to Whispy's raw `snr_db`.
+
 Capability — `sensors[]` lists the sensor CLASSES actually producing
 data in this window per device; `capabilities[]` maps tasks →
 sensor classes and marks each `available`/`unavailable` (with `missing`
