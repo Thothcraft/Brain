@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from server.db import get_db
 from server.auth import get_current_user
 from server.db import User
+from server.storage import check_upload_allowed
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.utils.error_handler import (
     APIError, handle_api_error, file_error, validation_error,
@@ -78,27 +79,33 @@ def cleanup_expired_sessions():
 @router.post("/init", response_model=UploadInitResponse)
 async def init_resumable_upload(
     request: UploadInitRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> UploadInitResponse:
     """Initialize a resumable upload session.
-    
+
     Args:
         request: Upload initialization parameters
-        
+
     Returns:
         Upload session information
     """
     try:
         cleanup_expired_sessions()
-        
-        # Validate file size
-        max_size = 100 * 1024 * 1024 * 1024  # 100GB
+
+        # Per-user file-size cap (Supabase buckets additionally cap objects
+        # at 200MB); the plan/project quota is enforced below.
+        max_size = getattr(current_user, 'max_file_size', None) or 104_857_600
         if request.total_size > max_size:
             raise handle_api_error(file_error(
                 ErrorCode.FILE_TOO_LARGE,
                 f"File size {request.total_size} exceeds maximum {max_size}",
                 {"max_size": max_size, "requested_size": request.total_size}
             ))
+
+        # Plan + project storage quota — checked again at complete with the
+        # assembled size.
+        check_upload_allowed(db, current_user, request.total_size)
         
         # Generate upload ID
         upload_id = generate_upload_id(current_user.userId, request.filename)
@@ -137,7 +144,9 @@ async def init_resumable_upload(
             uploaded_chunks=[],
             expires_at=session['expires_at']
         )
-        
+
+    except HTTPException:
+        raise
     except APIError as ae:
         log_error(f"APIError in upload init: {ae.message}")
         raise handle_api_error(ae)
@@ -356,7 +365,9 @@ async def complete_upload(
                 "File hash mismatch. File may be corrupted.",
                 status.HTTP_400_BAD_REQUEST
             ))
-        
+
+        check_upload_allowed(db, current_user, total_size)
+
         # Save to database (reuse existing file upload logic)
         from server.endpoints.file_endpoints import save_file_to_database
         
@@ -396,7 +407,9 @@ async def complete_upload(
             size=total_size,
             upload_url=f"/file/{file_id}"
         )
-        
+
+    except HTTPException:
+        raise
     except APIError as ae:
         log_error(f"APIError completing upload: {ae.message}")
         raise handle_api_error(ae)

@@ -1,12 +1,12 @@
 from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
-from server.entitlements import GB, get_entitlements, check_device_limit, normalize_plan
+from server.entitlements import GB, MB, get_entitlements, check_device_limit, normalize_plan
 
 
 @pytest.mark.parametrize('plan,devices,quota,download,labs', [
-    ('free', 1, None, False, False), ('home', 5, 10 * GB, True, False),
-    ('research', 10, 100 * GB, True, True),
+    ('free', 1, None, False, False), ('home', 5, 400 * MB, True, False),
+    ('research', 10, 1 * GB, True, True),
 ])
 def test_plan_matrix(plan, devices, quota, download, labs):
     user = SimpleNamespace(plan=plan)

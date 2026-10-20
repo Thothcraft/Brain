@@ -7,6 +7,7 @@ background tasks, and utility functions used across the application.
 import os
 import logging
 import json
+import time
 import uuid
 import mimetypes
 from datetime import datetime, timedelta
@@ -215,6 +216,78 @@ def enforce_free_minute_retention():
                 pass
 
 
+def enforce_time_series_retention():
+    """Bound the append-only telemetry tables to the Supabase DB budget.
+
+    ``context_evidence``/``node_event``/``context_event`` grow without
+    limit today — on a free Supabase project (500 MB database quota) they
+    push the deployment over quota and Supabase flips the database
+    read-only, which would break *everything* including heartbeats.
+
+    Rows older than the configured window are deleted in small batches so
+    the job never holds a long transaction against live writers. Windows
+    are env-tunable (days); ``0`` disables a table's cleanup:
+
+    * ``TS_RETENTION_CONTEXT_EVIDENCE_DAYS`` (default 30)
+    * ``TS_RETENTION_CONTEXT_EVENT_DAYS``   (default 30)
+    * ``TS_RETENTION_NODE_EVENT_DAYS``      (default 14)
+    * ``TS_RETENTION_BATCH_ROWS``           (default 20000)
+    """
+    from sqlalchemy import text
+
+    jobs = [
+        ("context_evidence", "timestamp",
+         int(os.getenv("TS_RETENTION_CONTEXT_EVIDENCE_DAYS", "30"))),
+        ("context_event", "timestamp",
+         int(os.getenv("TS_RETENTION_CONTEXT_EVENT_DAYS", "30"))),
+        ("node_event", "ts",
+         int(os.getenv("TS_RETENTION_NODE_EVENT_DAYS", "14"))),
+    ]
+    batch = max(100, int(os.getenv("TS_RETENTION_BATCH_ROWS", "20000")))
+
+    db = None
+    total = 0
+    try:
+        db = SessionLocal()
+        db.execute(text("SET LOCAL statement_timeout = '60000ms'"))
+        for table, column, days in jobs:
+            if days <= 0:
+                continue
+            cutoff = time.time() - days * 86400
+            try:
+                deleted = db.execute(text(
+                    f"DELETE FROM {table} WHERE id IN ("
+                    f"  SELECT id FROM {table} WHERE {column} < :cutoff"
+                    f"  ORDER BY {column} ASC LIMIT :lim)"
+                ), {"cutoff": cutoff, "lim": batch}).rowcount or 0
+                total += deleted
+                if deleted:
+                    logger.info(
+                        f"[SERVICE] retention pruned {deleted} rows from {table} "
+                        f"(older than {days}d)")
+            except Exception as table_err:
+                logger.warning(
+                    f"[SERVICE] retention prune failed for {table}: {table_err}")
+                db.rollback()
+        if total:
+            db.commit()
+        return total
+    except Exception as e:
+        logger.error(f"[SERVICE] Time-series retention job failed: {e}")
+        if db:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return 0
+    finally:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 def stop_scheduler():
     """Stop the background scheduler gracefully."""
     global scheduler
@@ -278,6 +351,18 @@ def start_scheduler():
             name='Enforce Free plan minute retention',
             replace_existing=True,
             next_run_time=datetime.now() + timedelta(seconds=120),
+        )
+
+        # Append-only telemetry retention — bounds DB size to the Supabase
+        # quota. Hourly, batched, env-tunable windows.
+        scheduler.add_job(
+            enforce_time_series_retention,
+            trigger=IntervalTrigger(
+                seconds=int(os.getenv("TS_RETENTION_JOB_SECONDS", "3600"))),
+            id='ts_retention_job',
+            name='Prune aged time-series rows',
+            replace_existing=True,
+            next_run_time=datetime.now() + timedelta(minutes=10),
         )
 
         # Outbound webhook delivery — drain queued EventDelivery rows.

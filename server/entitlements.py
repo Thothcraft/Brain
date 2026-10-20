@@ -9,9 +9,9 @@ Plans
 free     : functionally capable; 1 device, no raw-data download,
            rolling retention of the most recent 400 minutes,
            200 hosted-inference calls/month.
-home     : 5 devices, 10 GB cloud storage, data download/export,
-           5,000 hosted-inference calls/month.
-research : 10 devices, 100 GB cloud storage, datasets, Labs,
+home     : 5 devices, cloud storage + data download/export bounded by
+           the Supabase project budget, 5,000 hosted-inference calls/month.
+research : 10 devices, larger cloud storage share, datasets, Labs,
            notebook submission/grading, full SDK use,
            20,000 hosted-inference calls/month.
 
@@ -19,9 +19,25 @@ research : 10 devices, 100 GB cloud storage, datasets, Labs,
 = unlimited), enforced by ``server.inference_auth``; the provisional
 values here are placeholders for the paid-inference phase and can be
 overridden deployment-wide via ``INFERENCE_MONTHLY_QUOTA``.
+
+Supabase budget
+---------------
+Per-plan ``storage_bytes``/``monthly_egress_bytes`` are sized relative to
+the backing Supabase project's quota, which is the real hard limit. The
+deployment below is a **free** project (500 MB database, 1 GB Storage,
+~5 GB/month egress), so plan caps are small fractions of the project
+budget and ``server.storage`` additionally enforces project-wide ceilings
+so one account can never push the project itself over quota. Override
+the project budgets via env when the Supabase plan changes:
+
+* ``SUPABASE_PROJECT_STORAGE_BYTES`` — total Storage budget (default 1 GiB)
+* ``SUPABASE_MONTHLY_EGRESS_BUDGET_BYTES`` — total monthly egress budget
+  (default 4 GiB, margin under the ~5 GB free allowance)
+* ``SUPABASE_DB_BUDGET_BYTES`` — database size budget (default 460 MiB)
 """
 
 import logging
+import os
 from typing import Any, Callable, Dict, Optional
 
 from fastapi import Depends, HTTPException, status
@@ -32,6 +48,16 @@ from server.db import User, get_db
 logger = logging.getLogger(__name__)
 
 GB = 1024 ** 3
+MB = 1024 ** 2
+
+# ── Supabase project budgets (deployment-wide hard ceilings) ─────────────────
+# Defaults match a Supabase *free* project; raise via env on paid tiers.
+PROJECT_STORAGE_BUDGET_BYTES = int(
+    os.getenv("SUPABASE_PROJECT_STORAGE_BYTES", str(1 * GB)))
+PROJECT_MONTHLY_EGRESS_BUDGET_BYTES = int(
+    os.getenv("SUPABASE_MONTHLY_EGRESS_BUDGET_BYTES", str(4 * GB)))
+PROJECT_DB_BUDGET_BYTES = int(
+    os.getenv("SUPABASE_DB_BUDGET_BYTES", str(460 * MB)))
 
 # ── plan definitions ──────────────────────────────────────────────────────────
 
@@ -49,12 +75,15 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "custom_models": False,         # private model deployment
         "sdk": "read_control",          # read data + control devices
         "inference_quota": 200,          # hosted model calls / month
+        "monthly_egress_bytes": 250 * MB,
     },
     "home": {
         "device_limit": 5,
         "space_limit": 5,
         "minute_retention": None,       # bounded by storage_bytes
-        "storage_bytes": 10 * GB,
+        # Sized to a free-tier Supabase project (1 GB storage total); the
+        # project-wide budget guard in server.storage is the backstop.
+        "storage_bytes": 400 * MB,
         "download_data": True,
         "labs": False,
         "datasets": False,
@@ -62,12 +91,13 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "custom_models": False,
         "sdk": "full",
         "inference_quota": 5000,
+        "monthly_egress_bytes": 1 * GB,
     },
     "research": {
         "device_limit": 10,
         "space_limit": None,          # unlimited
         "minute_retention": None,
-        "storage_bytes": 100 * GB,
+        "storage_bytes": 1 * GB,
         "download_data": True,
         "labs": True,
         "datasets": True,
@@ -75,6 +105,7 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "custom_models": True,
         "sdk": "full",
         "inference_quota": 20000,
+        "monthly_egress_bytes": 3 * GB,
     },
 }
 

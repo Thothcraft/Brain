@@ -28,7 +28,7 @@ from server.db import (
     DeviceDeployment, DeviceCaptureChunk, DeviceCommand,
 )
 from server.auth import get_current_user, get_user_from_token
-from server.entitlements import PLANS, has_entitlement, normalize_plan, check_device_limit
+from server.entitlements import has_entitlement, normalize_plan, check_device_limit
 from server.utils.rate_limit import rate_limit
 from server.audit import audit
 from server.utils.logging_utils import log_request_start, log_response, log_error
@@ -172,8 +172,6 @@ class DeviceRegistrationError(Exception):
     """Custom exception for device registration errors."""
     pass
 
-
-PLAN_DEVICE_LIMITS = {name: spec["device_limit"] for name, spec in PLANS.items()}
 
 # Legacy feature names mapped onto the centralized entitlement model.
 # Free is functionally capable: every sensing feature is available on all
@@ -352,21 +350,6 @@ def _set_capture_settings_for_device(
     db.refresh(device)
     return merged
 
-
-def _can_mark_device_online(
-    db: Session,
-    user: Union[User, Any],
-    current_device_id: Optional[int] = None
-) -> bool:
-    """Return True when user can bring another device online."""
-    online_count_query = db.query(Device).filter(
-        Device.userId == user.userId,
-        Device.online == True
-    )
-    if current_device_id is not None:
-        online_count_query = online_count_query.filter(Device.deviceId != current_device_id)
-    online_count = online_count_query.count()
-    return online_count < PLAN_DEVICE_LIMITS[_product_plan(user)]
 
 def validate_ip_address(ip_str: str) -> bool:
     """Validate an IP address string."""
@@ -1132,16 +1115,6 @@ async def register_device(
                         existing_capture_settings, hardware_info.get('capture_settings') or {}
                     )
 
-                if not _can_mark_device_online(
-                    db,
-                    _plan_subject(db, current_user),
-                    current_device_id=existing_device.deviceId
-                ):
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"{_product_plan(_plan_subject(db, current_user)).title()} plan device limit reached. Disconnect another device or upgrade your plan."
-                    )
-
                 # Only the explicit identity endpoint changes the canonical
                 # user-visible ID. Routine registration must never restore a
                 # generated/default name over a portal edit.
@@ -1580,15 +1553,6 @@ async def update_device_status(
         # Update device status
         now = datetime.utcnow()
         requested_online = request.status.lower() == "online" if hasattr(request, 'status') else device.online
-        if requested_online and not _can_mark_device_online(
-            db,
-            current_user,
-            current_device_id=device.deviceId
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"{_product_plan(current_user).title()} plan device limit reached. Disconnect another device or upgrade your plan."
-            )
 
         update_data = {
             "last_seen": now,
@@ -1929,15 +1893,6 @@ async def device_heartbeat(
         # Update device status
         now = datetime.utcnow()
         requested_online = request.online if hasattr(request, 'online') and request.online is not None else True
-        if requested_online and not _can_mark_device_online(
-            db,
-            _plan_subject(db, current_user),
-            current_device_id=device.deviceId
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"{_product_plan(_plan_subject(db, current_user)).title()} plan device limit reached. Disconnect another device or upgrade your plan."
-            )
 
         update_data = {
             "last_seen": now,

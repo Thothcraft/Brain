@@ -21,7 +21,11 @@ from sqlalchemy.orm import defer, Session
 from server.db import get_db, SessionLocal
 from server.auth import get_current_user
 from server.entitlements import check_download_allowed
-from server.storage import check_upload_allowed
+from server.storage import (
+    check_egress_allowed,
+    check_upload_allowed,
+    record_egress,
+)
 from server.db import User, File, DeviceFile, Device, DeviceCommand, DatasetFile, TrainingDataset, FileDeviceUpdate
 from server.utils.logging_utils import log_request_start, log_response, log_error
 from server.utils.error_handler import (
@@ -872,6 +876,8 @@ async def download_minute_bundle(
         if not files:
             raise HTTPException(status_code=404, detail="No cloud files found for this minute")
 
+        check_egress_allowed(db, current_user,
+                             sum(int(f.size or 0) for f in files))
         used_names = set()
         entries = []
         for file_record in files:
@@ -885,6 +891,8 @@ async def download_minute_bundle(
             raise HTTPException(status_code=404, detail="Minute files have no downloadable content")
 
         filename = f"{minute}.zip"
+        record_egress(db, current_user.userId,
+                      sum(int(f.size or 0) for f in files), source="portal")
         return StreamingResponse(
             _stream_zip(entries),
             media_type="application/zip",
@@ -945,6 +953,10 @@ async def download_minute_bundles(
         entries.append((record.fileId, archive_name))
     if not entries:
         raise HTTPException(status_code=404, detail="Selected minutes have no downloadable cloud files")
+    entry_sizes = {r.fileId: int(r.size or 0) for r in records}
+    total_bytes = sum(entry_sizes.get(fid, 0) for fid, _ in entries)
+    check_egress_allowed(db, current_user, total_bytes)
+    record_egress(db, current_user.userId, total_bytes, source="portal")
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     return StreamingResponse(
         _stream_zip(entries),
@@ -1279,22 +1291,24 @@ async def download_file_simple(
         check_download_allowed(current_user)
     try:
         log_request_start("GET", f"/file/{file_id}", current_user.userId)
-        
+
         # Get file record
         file_record = db.query(File).filter(
             File.fileId == file_id,
             File.userId == current_user.userId
         ).first()
-        
+
         if not file_record:
             raise HTTPException(status_code=404, detail="File not found")
-        
+
         original_filename = _original_filename(file_record.filename)
-        
+
         file_content = _file_content(file_record)
-        
+
         if file_content is None:
             raise HTTPException(status_code=404, detail="File content not available")
+
+        check_egress_allowed(db, current_user, len(file_content))
         
         # Prepare headers
         headers = {
@@ -1307,7 +1321,9 @@ async def download_file_simple(
             headers["Content-Disposition"] = f'inline; filename="{original_filename}"'
         
         log_response(200, f"File {'downloaded' if download else 'viewed'}: {original_filename}", f"/file/{file_id}")
-        
+        record_egress(db, current_user.userId, len(file_content),
+                      source="portal")
+
         return Response(
             content=file_content,
             media_type=file_record.content_type or "application/octet-stream",

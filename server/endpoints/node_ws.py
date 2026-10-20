@@ -62,6 +62,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["v1", "node-channel"])
 
 NODE_API_TIMEOUT_S = float(os.getenv("NODE_API_TIMEOUT_S", "30"))
+# Mirrors device_endpoints.DEVICE_ONLINE_TIMEOUT_SECONDS — kept local so
+# this module stays importable without the REST surface.
+DEVICE_ONLINE_TIMEOUT_SECONDS = max(
+    30, int(os.getenv("DEVICE_ONLINE_TIMEOUT_SECONDS", "90")))
 USAGE_KINDS = {"prediction", "deploy", "capture", "automation", "actuate"}
 USAGE_SOURCES = {"api", "portal", "dashboard", "mobile"}
 
@@ -168,6 +172,19 @@ def _touch_seen(device_uuid: str) -> None:
     except Exception as exc:
         logger.debug("[node-ws] last_seen update failed for %s: %s",
                      device_uuid, exc)
+
+
+async def _presence_keepalive(device_uuid: str, conn: "_NodeConn") -> None:
+    """Refresh ``last_seen`` while the tunnel is up.
+
+    WS-level pings never surface as frames, so an idle (but connected)
+    node's ``last_seen`` would age past DEVICE_ONLINE_TIMEOUT_SECONDS and
+    the stale-device jobs would mark a live node offline.
+    """
+    interval = max(10, min(45, DEVICE_ONLINE_TIMEOUT_SECONDS // 3))
+    while manager.get(device_uuid) is conn:
+        await asyncio.sleep(interval)
+        await asyncio.to_thread(_touch_seen, device_uuid)
 
 
 def _write_event(
@@ -609,6 +626,7 @@ async def node_ws(
     conn = _NodeConn(websocket)
     manager.register(device_uuid, conn)
     await asyncio.to_thread(_mark_online, device_uuid, True)
+    keepalive = asyncio.create_task(_presence_keepalive(device_uuid, conn))
     logger.info("[node-ws] node %s connected", device_uuid)
     try:
         while True:
@@ -660,6 +678,7 @@ async def node_ws(
     except Exception as exc:
         logger.warning("[node-ws] node %s socket error: %s", device_uuid, exc)
     finally:
+        keepalive.cancel()
         manager.unregister(device_uuid, conn)
         await asyncio.to_thread(_mark_online, device_uuid, False)
         logger.info("[node-ws] node %s disconnected", device_uuid)
