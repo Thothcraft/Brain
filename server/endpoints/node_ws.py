@@ -146,8 +146,33 @@ class NodeWSManager:
         finally:
             conn.pending.pop(request_id, None)
 
+    async def relay(
+        self,
+        device_id: str,
+        cid: str,
+        ct: str,
+        timeout: float = NODE_API_TIMEOUT_S,
+    ) -> Optional[Dict[str, Any]]:
+        """Forward an opaque sealed envelope and await the sealed reply.
+
+        Brain never inspects or stores ``ct`` (privacy-first relay)."""
+        conn = self._conns.get(device_id)
+        if conn is None:
+            return None
+        request_id = uuid.uuid4().hex
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        conn.pending[request_id] = fut
+        try:
+            await conn.send({"type": "relay", "id": request_id,
+                             "cid": cid, "ct": ct})
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            conn.pending.pop(request_id, None)
+
 
 manager = NodeWSManager()
+RELAY_MAX_CT_BYTES = int(os.getenv("RELAY_MAX_CT_BYTES", str(1024 * 1024 * 4 // 3 + 16)))
+STRICT_RELAY = os.getenv("PRIVACY_STRICT_RELAY", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +659,7 @@ async def node_ws(
             if not isinstance(frame, dict):
                 continue
             ftype = frame.get("type")
-            if ftype == "api_response":
+            if ftype in ("api_response", "relay_response"):
                 fut = conn.pending.get(str(frame.get("id") or ""))
                 if fut is not None and not fut.done():
                     fut.set_result(frame)
@@ -735,6 +760,10 @@ async def node_api_relay(
 ):
     """Forward ``{method,path,body}`` to the node over its tunnel and return
     the node's status + body verbatim — portal/mobile's single choke point."""
+    if STRICT_RELAY:
+        raise HTTPException(status_code=410, detail={
+            "code": "plaintext_relay_disabled",
+            "message": "Use the end-to-end encrypted relay: POST /v1/relay/{device_id}"})
     _check_relay_scope(current_user, request.method)
     device = _owned_device(device_id, current_user, db)
     if not request.path.startswith("/"):
@@ -784,6 +813,70 @@ async def node_api_relay(
             content=payload, status_code=status_code,
             media_type=str(resp.get("content_type") or "application/octet-stream"))
     return JSONResponse(content=resp.get("body"), status_code=status_code)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end encrypted relay + sealed notifications (privacy-first, D-01)
+# ---------------------------------------------------------------------------
+
+class RelayIn(BaseModel):
+    cid: str
+    ct: str
+
+
+@router.post("/relay/{device_id}")
+async def e2e_relay(
+    device_id: str,
+    body: RelayIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Forward a sealed box to the owner's Room1 and return its sealed reply.
+
+    Only the owner may relay; payloads are neither logged nor persisted —
+    the usage row records size and latency only."""
+    _check_relay_scope(current_user, "POST")
+    device = _owned_device(device_id, current_user, db)
+    if not body.cid or len(body.cid) > 128:
+        raise HTTPException(status_code=422, detail="invalid client id")
+    if len(body.ct) > RELAY_MAX_CT_BYTES:
+        raise HTTPException(status_code=413, detail="sealed payload too large; chunk it")
+    started = perf_counter()
+    try:
+        resp = await manager.relay(device.device_uuid, body.cid, body.ct)
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"detail": "relay timed out"})
+    if resp is None:
+        return JSONResponse(status_code=409, content={
+            "detail": "Room1 offline", "device_id": device.device_uuid, "online": False})
+    _record_usage(
+        db, user_id=current_user.userId, device_uuid=device.device_uuid,
+        source="relay", kind="relay", model_id=None,
+        latency_ms=(perf_counter() - started) * 1000.0,
+        meta={"in_bytes": len(body.ct), "out_bytes": len(str(resp.get("ct") or ""))})
+    db.commit()
+    return {"ct": resp.get("ct"), "id": resp.get("id")}
+
+
+class NotifyIn(BaseModel):
+    title: str = "Thothcraft update"
+    ct: str
+
+
+@router.post("/notify", status_code=201)
+async def sealed_notify(body: NotifyIn, request: Request,
+                        db: Session = Depends(get_db)):
+    """Room1 asks Brain to notify its owner. Content is sealed to the
+    owner's clients; Brain stores only a generic title + ciphertext."""
+    kind, payload, device = _principal(request, db)
+    if kind != "device":
+        raise HTTPException(status_code=403, detail="notify requires a device credential")
+    if len(body.ct) > 16384:
+        raise HTTPException(status_code=413, detail="notification too large")
+    title = body.title[:80] if body.title else "Thothcraft update"
+    _write_event(device.userId, device.device_uuid, "sealed_notify",
+                 {"title": title, "ct": body.ct}, None, None)
+    return {"queued": True}
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
+from server import privacy
 from server.auth import get_current_user, get_scoped_principal
 from server.db import ContextEntity, NodeRoom, Query as ChatRecord, User, get_db
 from server.inference_auth import (
@@ -827,6 +828,7 @@ async def chat(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Question (+ attachments) → context-grounded rich answer."""
+    privacy.require(current_user, "cloud_processing")
     tier = (body.model or "standard").lower()
     if tier not in _TIERS:
         raise HTTPException(422, f"unknown model tier {tier!r} "
@@ -1039,6 +1041,7 @@ async def transcribe(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Audio clip → transcript (OpenAI speech-to-text, proxied)."""
+    privacy.require(current_user, "cloud_processing")
     data = await file.read()
     if not data:
         raise HTTPException(422, "empty audio")
@@ -1059,6 +1062,7 @@ async def tts(
     db: Session = Depends(get_db),
 ) -> Response:
     """Text → spoken audio/mpeg (OpenAI text-to-speech, proxied)."""
+    privacy.require(current_user, "cloud_processing")
     with inference_call(db, current_user, kind="chat_tts"):
         audio = _openai_tts(body.text[:_MAX_TTS_CHARS],
                             body.voice or "alloy")

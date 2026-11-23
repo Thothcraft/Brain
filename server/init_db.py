@@ -700,12 +700,52 @@ def ensure_calibration_schema():
         return False
 
 
+def ensure_privacy_billing_schema():
+    """Firebase identity link, privacy settings and omi-style usage counters."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                ALTER TABLE user_account
+                    ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(128),
+                    ADD COLUMN IF NOT EXISTS privacy_json TEXT
+            """))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_account_firebase_uid ON user_account (firebase_uid) WHERE firebase_uid IS NOT NULL"))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS usage_counter (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    period VARCHAR(7) NOT NULL,
+                    metric VARCHAR(40) NOT NULL,
+                    value DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    CONSTRAINT uq_usage_counter UNIQUE (user_id, period, metric)
+                );
+                CREATE INDEX IF NOT EXISTS ix_usage_counter_user_period ON usage_counter (user_id, period);
+                CREATE TABLE IF NOT EXISTS usage_report (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    device_uuid VARCHAR(255) NOT NULL,
+                    period VARCHAR(7) NOT NULL,
+                    seq INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    CONSTRAINT uq_usage_report UNIQUE (device_uuid, period, seq)
+                );
+            """))
+        return True
+    except Exception as e:
+        logger.error(f"[INIT] Error ensuring privacy/billing schema: {e}")
+        return False
+
+
 def initialize_database():
     """Initialize all required database tables."""
     logger.info("[INIT] Starting database initialization")
 
     try:
         results = {
+            # First: the User model maps these columns, so they must exist
+            # before any request queries user_account.
+            "privacy_billing_schema": ensure_privacy_billing_schema(),
             "calibration_schema": ensure_calibration_schema(),
             "product_core": ensure_product_core_schema(),
             "trained_model": ensure_trained_model_table(),

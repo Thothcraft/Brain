@@ -32,7 +32,7 @@ WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 # Price IDs (update these after running setup_stripe.py)
 PRICE_IDS = {
     f"{plan}_{period}": os.getenv(f"STRIPE_PRICE_ID_{plan.upper()}_{period.upper()}")
-    for plan in ("home", "research")
+    for plan in ("pro", "home", "research")
     for period in ("monthly", "annual")
 }
 _CATALOG_CACHE = {"expires": 0.0, "payload": None}
@@ -320,7 +320,10 @@ async def create_checkout_session(
     aliases = {"researcher": "research"}
     plan = aliases.get(plan, plan)
     price_id = PRICE_IDS.get(f"{plan}_{billing_period}")
-    if plan not in {"home", "research"} or billing_period not in {"monthly", "annual"} or not price_id:
+    # omi model: Thothcraft Pro is the only plan sold. Home/Research stay
+    # purchasable only behind LEGACY_PLAN_CHECKOUT for migration windows.
+    sellable = {"pro"} | ({"home", "research"} if os.getenv("LEGACY_PLAN_CHECKOUT") == "1" else set())
+    if plan not in sellable or billing_period not in {"monthly", "annual"} or not price_id:
         raise HTTPException(status_code=400, detail="Invalid plan")
     if current_user.stripe_subscription_id:
         raise HTTPException(

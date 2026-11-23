@@ -29,6 +29,7 @@ from server.db import (
 )
 from server.auth import get_current_user, get_user_from_token
 from server.entitlements import has_entitlement, normalize_plan, check_device_limit
+from server import privacy
 from server.utils.rate_limit import rate_limit
 from server.audit import audit
 from server.utils.logging_utils import log_request_start, log_response, log_error
@@ -2110,6 +2111,7 @@ async def upsert_live_capture_chunk(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Store one current-minute chunk without rewriting device or file rows."""
+    privacy.require(current_user, "raw_upload")
     device = db.query(Device).filter(
         Device.device_uuid == device_uuid,
         Device.userId == current_user.userId,
@@ -2615,6 +2617,7 @@ async def request_capture_upload(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Request the complete minute from its owning Thoth device."""
+    privacy.require(current_user, "raw_upload")
     device = db.query(Device).filter(
         Device.device_uuid == device_uuid,
         Device.userId == current_user.userId,
@@ -2679,6 +2682,7 @@ async def request_file_upload(
     Sets upload_requested=True on the DeviceFile record.
     The device will see this in its next registration response and upload the file.
     """
+    privacy.require(current_user, "raw_upload")
     try:
         log_request_start("POST", f"/device/file/{device_file_id}/request-upload", current_user.userId)
         

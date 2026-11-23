@@ -13,6 +13,8 @@ from .chat import router as chat_router
 from .automation import router as automation_router
 from .faces import router as faces_router
 from .subscriptions import router as subscriptions_router
+from .payments import router as payments_router
+from .privacy import router as privacy_router
 from server.endpoints.node_ws import router as node_ws_router
 
 router.include_router(context_router)
@@ -23,5 +25,7 @@ router.include_router(automation_router)
 router.include_router(faces_router)
 router.include_router(subscriptions_router)
 router.include_router(node_ws_router)
+router.include_router(payments_router)
+router.include_router(privacy_router)
 
 __all__ = ["router"]

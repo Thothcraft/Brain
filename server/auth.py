@@ -399,6 +399,17 @@ def get_current_user(
     if not token and not cookie_token:
         raise credentials_exception
 
+    # Firebase ID token (omi-based apps). RS256 + kid, never a Brain JWT.
+    if token:
+        from server.firebase_auth import looks_like_firebase_token, resolve_firebase_user, verify_firebase_token
+        if looks_like_firebase_token(token):
+            claims = verify_firebase_token(token)
+            if not claims:
+                raise credentials_exception
+            user = resolve_firebase_user(db, claims)
+            user.auth_scopes = None
+            return user
+
     try:
         if token:
             payload, domain = decode_token_any(token)

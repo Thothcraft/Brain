@@ -5,7 +5,7 @@ from server.entitlements import GB, MB, get_entitlements, check_device_limit, no
 
 
 @pytest.mark.parametrize('plan,devices,quota,download,labs', [
-    ('free', 1, None, False, False), ('home', 5, 400 * MB, True, False),
+    ('free', 10, None, False, False), ('home', 5, 400 * MB, True, False),
     ('research', 10, 1 * GB, True, True),
 ])
 def test_plan_matrix(plan, devices, quota, download, labs):
@@ -19,7 +19,8 @@ def test_plan_matrix(plan, devices, quota, download, labs):
 
 
 def test_unknown_plan_fails_closed():
-    assert normalize_plan('organization') == normalize_plan('pro') == 'free'
+    assert normalize_plan('organization') == 'free'
+    assert normalize_plan('pro') == 'pro'
 
 
 def test_free_download_forbidden(api):

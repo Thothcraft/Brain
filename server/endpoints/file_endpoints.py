@@ -1635,6 +1635,8 @@ async def upload_file_from_device(
     """
     import requests as http_requests
     from server.db import DeviceFile, Device
+    from server import privacy
+    privacy.require(current_user, "raw_upload")
     
     try:
         log_request_start("POST", "/file/upload-from-device", current_user.userId)

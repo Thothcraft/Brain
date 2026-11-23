@@ -268,6 +268,10 @@ class User(Base):
     """Verified contact email used for Supabase Auth and Stripe."""
     email_verified = Column("email_verified", Boolean, nullable=False, default=False)
     supabase_auth_user_id = Column("supabase_auth_user_id", String(36), nullable=True, unique=True, index=True)
+    firebase_uid = Column("firebase_uid", String(128), nullable=True, unique=True, index=True)
+    """Firebase Auth subject (omi-based apps sign in with Firebase)."""
+    privacy_json = Column("privacy_json", Text, nullable=True)
+    """Privacy settings JSON; NULL = legacy account (pre privacy-first defaults)."""
     
     # Relationships
     files = relationship("File", back_populates="user")
@@ -1598,6 +1602,44 @@ class NodeRoom(Base):
         except (TypeError, _json.JSONDecodeError):
             doc = {}
         return doc
+
+
+class UsageCounter(Base):
+    """Monthly plan-allocation counters (omi-style caps).
+
+    Counters only — never content. ``metric`` ∈ transcription_seconds |
+    chat_questions | words_transcribed | memories_created. ``period`` is
+    the UTC month ``YYYY-MM``.
+    """
+    __tablename__ = "usage_counter"
+    __table_args__ = (
+        UniqueConstraint("user_id", "period", "metric", name="uq_usage_counter"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    period = Column(String(7), nullable=False, index=True)
+    metric = Column(String(40), nullable=False)
+    value = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UsageReport(Base):
+    """Idempotency ledger for Room1 usage reports: one row per
+    ``(device, period, seq)`` so a retried report is never double counted."""
+    __tablename__ = "usage_report"
+    __table_args__ = (
+        UniqueConstraint("device_uuid", "period", "seq", name="uq_usage_report"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user_account.user_id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    device_uuid = Column(String(255), nullable=False, index=True)
+    period = Column(String(7), nullable=False)
+    seq = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class ApiUsage(Base):

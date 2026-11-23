@@ -6,12 +6,14 @@ All feature gating must go through this module — never scatter
 
 Plans
 -----
-free     : functionally capable; 1 device, no raw-data download,
+free     : functionally capable; 10 devices, no raw-data download,
            rolling retention of the most recent 400 minutes,
            200 hosted-inference calls/month.
 home     : 5 devices, cloud storage + data download/export bounded by
            the Supabase project budget, 5,000 hosted-inference calls/month.
-research : 10 devices, larger cloud storage share, datasets, Labs,
+pro      : Thothcraft Pro (omi-style single paid plan); research
+           features, 25 devices. See server/plans.py for allocations.
+research : (deprecated, existing subscribers) 10 devices, larger cloud storage share, datasets, Labs,
            notebook submission/grading, full SDK use,
            20,000 hosted-inference calls/month.
 
@@ -63,7 +65,9 @@ PROJECT_DB_BUDGET_BYTES = int(
 
 PLANS: Dict[str, Dict[str, Any]] = {
     "free": {
-        "device_limit": 1,
+        # omi model: devices are not a paid lever — a Person1 package alone
+        # is Room1 + necklace + watch + earbuds + phone.
+        "device_limit": 10,
         "space_limit": 1,
         # Free keeps only the most recent N minutes server-side.
         "minute_retention": 400,
@@ -108,6 +112,11 @@ PLANS: Dict[str, Dict[str, Any]] = {
         "monthly_egress_bytes": 3 * GB,
     },
 }
+
+# Thothcraft Pro — the single plan sold (omi "Omi Pro" model, see
+# server/plans.py for transcription/chat allocations). Home/Research remain
+# for existing subscribers only (lifecycle: deprecated).
+PLANS["pro"] = {**PLANS["research"], "device_limit": 25, "space_limit": None}
 
 DEFAULT_PLAN = "free"
 
