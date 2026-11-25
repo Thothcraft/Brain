@@ -184,6 +184,17 @@ def ensure_product_core_schema():
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_device_file_cloud_history ON device_file (user_id, modified_at DESC) WHERE on_cloud = TRUE"))
             conn.execute(text("ALTER TABLE device_file ADD COLUMN IF NOT EXISTS metadata_json TEXT"))
             conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS app_doc (
+                    user_id INTEGER NOT NULL REFERENCES user_account(user_id) ON DELETE CASCADE,
+                    kind VARCHAR(32) NOT NULL,
+                    doc_id VARCHAR(64) NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, kind, doc_id)
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_app_doc_recent ON app_doc (user_id, kind, created_at DESC)"))
+            conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS device_capture_chunk (
                     id SERIAL PRIMARY KEY,
                     device_id INTEGER NOT NULL REFERENCES device(device_id) ON DELETE CASCADE,

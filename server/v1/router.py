@@ -650,8 +650,10 @@ async def get_available_languages(
 @router.get("/users/language")
 async def get_user_language(
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    return {"language": current_user.language}
+    row = db.query(User.language).filter(User.userId == current_user.userId).first()
+    return {"language": row[0] if row else None}
 
 
 @router.patch("/users/language")
@@ -665,7 +667,9 @@ async def set_user_language(
         raise HTTPException(status_code=400, detail="language is required")
     if code not in _LANGUAGE_CODES:
         raise HTTPException(status_code=422, detail="unsupported language code")
-    current_user.language = code
+    # current_user may belong to the auth dependency's session — write
+    # through this request's session so the commit actually persists.
+    db.query(User).filter(User.userId == current_user.userId).update({User.language: code})
     db.commit()
     # Brain has no per-language STT policy yet — never lock the app into
     # single-language mode.
