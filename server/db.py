@@ -270,6 +270,8 @@ class User(Base):
     supabase_auth_user_id = Column("supabase_auth_user_id", String(36), nullable=True, unique=True, index=True)
     firebase_uid = Column("firebase_uid", String(128), nullable=True, unique=True, index=True)
     """Firebase Auth subject (omi-based apps sign in with Firebase)."""
+    language = Column("language", String(16), nullable=True)
+    """Primary spoken language (BCP-47), set from the mobile app onboarding."""
     privacy_json = Column("privacy_json", Text, nullable=True)
     """Privacy settings JSON; NULL = legacy account (pre privacy-first defaults)."""
     

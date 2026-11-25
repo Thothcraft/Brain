@@ -557,3 +557,116 @@ async def revoke_automation_key(
     key.revoked = True
     db.commit()
     return {"ok": True, "id": key_id, "revoked": True}
+
+
+# ---------------------------------------------------------------------------
+# Users (mobile-app surface: language preference)
+# ---------------------------------------------------------------------------
+
+# Mirrors the app's offline fallback list (home_provider._bundledLanguages).
+_AVAILABLE_LANGUAGES: List[Dict[str, str]] = [
+    {"name": "English", "code": "en"},
+    {"name": "English (US)", "code": "en-US"},
+    {"name": "English (UK)", "code": "en-GB"},
+    {"name": "English (Australia)", "code": "en-AU"},
+    {"name": "English (New Zealand)", "code": "en-NZ"},
+    {"name": "English (India)", "code": "en-IN"},
+    {"name": "Spanish", "code": "es"},
+    {"name": "Spanish (Latin America)", "code": "es-419"},
+    {"name": "Chinese (Mandarin, Simplified)", "code": "zh"},
+    {"name": "Chinese (Mandarin, Simplified, CN)", "code": "zh-CN"},
+    {"name": "Chinese (Mandarin, Simplified, Hans)", "code": "zh-Hans"},
+    {"name": "Hindi", "code": "hi"},
+    {"name": "Portuguese", "code": "pt"},
+    {"name": "Portuguese (Brazil)", "code": "pt-BR"},
+    {"name": "Portuguese (Portugal)", "code": "pt-PT"},
+    {"name": "Russian", "code": "ru"},
+    {"name": "Japanese", "code": "ja"},
+    {"name": "German", "code": "de"},
+    {"name": "Arabic", "code": "ar"},
+    {"name": "Belarusian", "code": "be"},
+    {"name": "Bengali", "code": "bn"},
+    {"name": "Bosnian", "code": "bs"},
+    {"name": "Bulgarian", "code": "bg"},
+    {"name": "Catalan", "code": "ca"},
+    {"name": "Chinese (Mandarin, Traditional)", "code": "zh-TW"},
+    {"name": "Chinese (Mandarin, Traditional, Hant)", "code": "zh-Hant"},
+    {"name": "Chinese (Cantonese, Traditional)", "code": "zh-HK"},
+    {"name": "Croatian", "code": "hr"},
+    {"name": "Czech", "code": "cs"},
+    {"name": "Danish", "code": "da"},
+    {"name": "Danish (Denmark)", "code": "da-DK"},
+    {"name": "Dutch", "code": "nl"},
+    {"name": "Estonian", "code": "et"},
+    {"name": "Finnish", "code": "fi"},
+    {"name": "Flemish", "code": "nl-BE"},
+    {"name": "French", "code": "fr"},
+    {"name": "French (Canada)", "code": "fr-CA"},
+    {"name": "German (Switzerland)", "code": "de-CH"},
+    {"name": "Greek", "code": "el"},
+    {"name": "Hebrew", "code": "he"},
+    {"name": "Hungarian", "code": "hu"},
+    {"name": "Indonesian", "code": "id"},
+    {"name": "Italian", "code": "it"},
+    {"name": "Kannada", "code": "kn"},
+    {"name": "Korean", "code": "ko"},
+    {"name": "Korean (Korea)", "code": "ko-KR"},
+    {"name": "Latvian", "code": "lv"},
+    {"name": "Lithuanian", "code": "lt"},
+    {"name": "Macedonian", "code": "mk"},
+    {"name": "Malay", "code": "ms"},
+    {"name": "Marathi", "code": "mr"},
+    {"name": "Norwegian", "code": "no"},
+    {"name": "Persian", "code": "fa"},
+    {"name": "Punjabi", "code": "pa"},
+    {"name": "Polish", "code": "pl"},
+    {"name": "Romanian", "code": "ro"},
+    {"name": "Serbian", "code": "sr"},
+    {"name": "Slovak", "code": "sk"},
+    {"name": "Slovenian", "code": "sl"},
+    {"name": "Swedish", "code": "sv"},
+    {"name": "Swedish (Sweden)", "code": "sv-SE"},
+    {"name": "Tagalog", "code": "tl"},
+    {"name": "Tamil", "code": "ta"},
+    {"name": "Telugu", "code": "te"},
+    {"name": "Thai", "code": "th"},
+    {"name": "Thai (Thailand)", "code": "th-TH"},
+    {"name": "Turkish", "code": "tr"},
+    {"name": "Ukrainian", "code": "uk"},
+    {"name": "Urdu", "code": "ur"},
+    {"name": "Vietnamese", "code": "vi"},
+]
+
+_LANGUAGE_CODES = {entry["code"] for entry in _AVAILABLE_LANGUAGES}
+
+
+@router.get("/users/available-languages")
+async def get_available_languages(
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    return {"languages": _AVAILABLE_LANGUAGES}
+
+
+@router.get("/users/language")
+async def get_user_language(
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    return {"language": current_user.language}
+
+
+@router.patch("/users/language")
+async def set_user_language(
+    payload: Dict[str, Any] = Body(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    code = str(payload.get("language") or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="language is required")
+    if code not in _LANGUAGE_CODES:
+        raise HTTPException(status_code=422, detail="unsupported language code")
+    current_user.language = code
+    db.commit()
+    # Brain has no per-language STT policy yet — never lock the app into
+    # single-language mode.
+    return {"status": "ok", "single_language_mode": False}

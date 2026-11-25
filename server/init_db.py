@@ -173,7 +173,8 @@ def ensure_product_core_schema():
                 ALTER TABLE user_account
                     ADD COLUMN IF NOT EXISTS email VARCHAR(320),
                     ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS supabase_auth_user_id VARCHAR(36)
+                    ADD COLUMN IF NOT EXISTS supabase_auth_user_id VARCHAR(36),
+                    ADD COLUMN IF NOT EXISTS language VARCHAR(16)
             """))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_account_email ON user_account (lower(email)) WHERE email IS NOT NULL"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_account_supabase_auth ON user_account (supabase_auth_user_id) WHERE supabase_auth_user_id IS NOT NULL"))
