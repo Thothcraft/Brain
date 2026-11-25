@@ -77,3 +77,15 @@ def test_language_set_and_read(client):
     assert r.json() == {'status': 'ok', 'single_language_mode': False}
     assert client.get('/v1/users/language').json() == {'language': 'en'}
     assert client.patch('/v1/users/language', json={'language': 'xx'}).status_code == 422
+
+
+def test_activity_timeline_merges_devices(client):
+    r = client.post('/v1/activity', json={'events': [
+        {'ts': '2026-11-25T10:00:00Z', 'device': 'desktop', 'kind': 'digital', 'label': 'VS Code'},
+        {'ts': '2026-11-25T10:05:00Z', 'device': 'watch', 'kind': 'physical', 'label': 'sitting'},
+        {'device': 'phone'},  # no label -> dropped
+    ]})
+    assert r.json()['stored'] == 2
+    events = client.get('/v1/activity').json()['events']
+    assert [e['label'] for e in events] == ['sitting', 'VS Code']
+    assert {e['device'] for e in events} == {'desktop', 'watch'}

@@ -25,7 +25,7 @@ from server.db import User, get_db
 router = APIRouter(tags=["app"])          # mounted under /v1
 root_router = APIRouter(tags=["app"])     # mounted at / (v2/v3 paths)
 
-_KINDS = {"conversation", "memory", "action_item", "folder", "person"}
+_KINDS = {"conversation", "memory", "action_item", "folder", "person", "activity"}
 
 
 def _now() -> str:
@@ -132,6 +132,33 @@ async def list_folders(user: User = Depends(get_current_user), db: Session = Dep
 @router.get("/users/people")
 async def list_people(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _list(db, user, "person", 500, 0)
+
+
+# -- activity timeline (physical + digital, every device) ----------------------
+# One event = {ts, device: phone|desktop|room1|watch|necklace|earbuds,
+#              kind: physical|digital, label, detail?, duration_s?}.
+
+@router.post("/activity")
+async def post_activity(payload: Dict[str, Any] = Body(...),
+                        user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    events = payload.get("events") if isinstance(payload.get("events"), list) else [payload]
+    stored = 0
+    for ev in events[:500]:
+        if not isinstance(ev, dict) or not ev.get("label"):
+            continue
+        ev = {k: ev[k] for k in ("id", "ts", "device", "kind", "label", "detail", "duration_s") if k in ev}
+        ev.setdefault("ts", _now())
+        ev["kind"] = ev.get("kind") if ev.get("kind") in ("physical", "digital") else "digital"
+        _put(db, user, "activity", ev)
+        stored += 1
+    return {"status": "ok", "stored": stored}
+
+
+@router.get("/activity")
+async def get_activity(limit: int = Query(200, ge=1, le=1000),
+                       user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    events = _list(db, user, "activity", limit, 0)
+    return {"events": sorted(events, key=lambda e: str(e.get("ts", "")), reverse=True)}
 
 
 # -- memories (v3 namespace) -----------------------------------------------------
