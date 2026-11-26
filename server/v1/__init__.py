@@ -16,6 +16,7 @@ from .subscriptions import router as subscriptions_router
 from .payments import router as payments_router
 from .privacy import router as privacy_router
 from .app_compat import router as app_compat_router, root_router as app_compat_root_router
+from .auth_oauth import router as auth_oauth_router
 from server.endpoints.node_ws import router as node_ws_router
 
 router.include_router(context_router)
@@ -29,5 +30,6 @@ router.include_router(node_ws_router)
 router.include_router(payments_router)
 router.include_router(privacy_router)
 router.include_router(app_compat_router)
+router.include_router(auth_oauth_router)
 
 __all__ = ["router"]
