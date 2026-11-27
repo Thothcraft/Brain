@@ -1,6 +1,7 @@
 # Force rebuild: 2026-01-23-1803
 [phases.setup]
 nixPkgs = ["python311"]
+aptPkgs = ["libopus0"]
 
 [phases.install]
 cmds = ["pip install -r requirements-deploy.txt"]
