@@ -26,6 +26,7 @@ google-auth-oauthlib
 google-api-python-client
 psutil
 numpy>=1.21.0
+opuslib>=3.0.1
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
 pandas>=2.0.0

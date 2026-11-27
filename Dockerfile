@@ -46,6 +46,7 @@ ENV RAY_DISABLE_DASHBOARD=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     tesseract-ocr \
+    libopus0 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
