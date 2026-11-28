@@ -567,7 +567,8 @@ async def initial_message(user: User = Depends(get_current_user)):
 
 @root_router.get("/v2/review/items")
 async def review_items(user: User = Depends(get_current_user)):
-    return {"items": []}
+    # remaining_today is a required field in both wire versions.
+    return {"items": [], "remaining_today": 0}
 
 
 @root_router.post("/v2/review/items/{item_id}/answer")
@@ -585,3 +586,39 @@ async def review_changes(user: User = Depends(get_current_user)):
 @router.post("/review/changes/{change_id}/redo")
 async def review_change_undone(change_id: str, user: User = Depends(get_current_user)):
     raise HTTPException(404, "unknown change")
+
+
+# -- profile -------------------------------------------------------------------
+#
+# The app boots UserProvider off GET /v1/users/profile and treats a failure as
+# fatal (home shows "something went wrong"). Only `uid` is required by the wire
+# model; everything else is optional metadata.
+
+
+@router.get("/users/profile")
+async def user_profile(user: User = Depends(get_current_user)):
+    return {
+        "uid": user.firebase_uid or user.username,
+        "name": user.username,
+        "email": user.email,
+        "created_at": None,
+        "data_protection_level": None,
+        "migration_status": None,
+    }
+
+
+# -- integrations ----------------------------------------------------------------
+#
+# Settings reads per-app connection state (GET /v1/integrations/{app_key}) and
+# the task-router reads /v1/task-integrations. No integrations are stored yet —
+# answer "not connected" rather than 405 so the app stops erroring.
+
+
+@router.get("/integrations/{app_key}")
+async def integration_state(app_key: str, user: User = Depends(get_current_user)):
+    return {"app_key": app_key, "connected": False, "read_selection_configured": False}
+
+
+@router.get("/task-integrations")
+async def task_integrations(user: User = Depends(get_current_user)):
+    return {"integrations": {}, "default_app": None}
