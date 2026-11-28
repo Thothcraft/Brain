@@ -10,8 +10,11 @@ lists are bare JSON arrays; action items use ``{"action_items", "has_more"}``.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import io
 import json
+import logging
 import os
 import struct
 import tempfile
@@ -23,19 +26,42 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import (APIRouter, BackgroundTasks, Body, Depends, File, Header,
-                     HTTPException, Query, UploadFile)
-from fastapi.responses import JSONResponse
-from sqlalchemy import text
+                     HTTPException, Query, Request, UploadFile)
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy import desc, text
 from sqlalchemy.orm import Session
 
 from server import privacy
 from server.auth import get_current_user
-from server.db import User, get_db, get_db_session
+from server.db import Query as ChatRecord, User, get_db, get_db_session
+from server.inference_auth import inference_call
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["app"])          # mounted under /v1
 root_router = APIRouter(tags=["app"])     # mounted at / (v2/v3 paths)
 
 _KINDS = {"conversation", "memory", "action_item", "folder", "person", "activity"}
+
+
+def _normalize(kind: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Guarantee keys the app's generated wire models require present.
+
+    ``requiredField: true, nullable: true`` entries throw FormatException on a
+    *missing* key even though null is legal — older/in-progress docs stored
+    without them would otherwise crash the whole list parse.
+    """
+    if kind == "conversation":
+        doc.setdefault("started_at", None)
+        doc.setdefault("finished_at", None)
+        doc.setdefault("created_at", _now())
+        doc.setdefault("status", "completed")
+        doc.setdefault("structured", {"title": "", "overview": "", "emoji": "",
+                                      "category": "other", "action_items": [], "events": []})
+        doc.setdefault("transcript_segments", [])
+        doc.setdefault("discarded", False)
+        doc.setdefault("source", "phone")
+    return doc
 
 
 def _now() -> str:
@@ -50,7 +76,7 @@ def _list(db: Session, user: User, kind: str, limit: int, offset: int) -> List[D
     out = []
     for (body,) in rows:
         try:
-            out.append(json.loads(body))
+            out.append(_normalize(kind, json.loads(body)))
         except (TypeError, ValueError):
             continue
     return out
@@ -62,13 +88,14 @@ def _get(db: Session, user: User, kind: str, doc_id: str) -> Dict[str, Any]:
         {"u": user.userId, "k": kind, "d": doc_id}).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"{kind} not found")
-    return json.loads(row[0])
+    return _normalize(kind, json.loads(row[0]))
 
 
 def _put(db: Session, user: User, kind: str, doc: Dict[str, Any]) -> Dict[str, Any]:
     doc_id = str(doc.get("id") or uuid.uuid4())
     doc["id"] = doc_id
     doc.setdefault("created_at", _now())
+    _normalize(kind, doc)
     db.execute(text(
         "INSERT INTO app_doc (user_id, kind, doc_id, body, created_at) "
         "VALUES (:u, :k, :d, :b, CURRENT_TIMESTAMP) "
@@ -395,3 +422,166 @@ async def sync_job_status(job_id: str,
     if job is None or job.get("user_id") != user.userId:
         raise HTTPException(404, "unknown job")
     return {k: v for k, v in job.items() if k != "user_id"}
+
+
+# -- chat surface (v2/messages) ------------------------------------------------
+#
+# The app's chat tab talks to GET/POST/DELETE /v2/messages. POST is an SSE-ish
+# line stream of `\n\n`-delimited frames (`think:`/`data:`/`message:`/`done:`/
+# `error:`); the terminal `done:` frame carries a base64 ServerMessage. Brain
+# answers through the same OpenAI path as /v1/chat and persists turns in the
+# shared `query` transcript.
+
+
+def _wire_message(msg_id: str, sender: str, text: str,
+                  created_at: Optional[str] = None) -> Dict[str, Any]:
+    """Minimal ServerMessage JSON — both GeneratedMessage and
+    GeneratedResponseMessage only require id/created_at/sender/text/type."""
+    return {
+        "id": msg_id,
+        "created_at": created_at or _now(),
+        "text": text,
+        "sender": sender,  # "human" | "ai"
+        "type": "text",
+        "files": [], "files_id": [],
+        "memories": [], "memories_id": [],
+        "reported": False,
+        "from_external_integration": False,
+        "ask_for_nps": False,
+    }
+
+
+def _sse_frame(kind: str, payload: Dict[str, Any]) -> str:
+    return f"{kind}: {base64.b64encode(json.dumps(payload).encode()).decode()}\n\n"
+
+
+def _chat_rows(db: Session, user_id: int, session: str,
+               limit: int, offset: int = 0) -> List[ChatRecord]:
+    rows = (db.query(ChatRecord)
+            .filter(ChatRecord.userId == user_id,
+                    ChatRecord.chatId == session)
+            .order_by(desc(ChatRecord.created_at), desc(ChatRecord.queryId))
+            .offset(offset).limit(limit).all())
+    rows.reverse()
+    return rows
+
+
+@root_router.get("/v2/messages")
+async def list_chat_messages(chat_session_id: Optional[str] = None,
+                             limit: int = Query(100, ge=1, le=500),
+                             offset: int = Query(0, ge=0),
+                             user: User = Depends(get_current_user),
+                             db: Session = Depends(get_db)):
+    out: List[Dict[str, Any]] = []
+    for r in _chat_rows(db, user.userId, chat_session_id or "main", limit, offset):
+        stamp = r.created_at.isoformat() + "Z" if r.created_at else None
+        out.append(_wire_message(f"{r.queryId}-u", "human", r.query_text or "", stamp))
+        if r.response:
+            out.append(_wire_message(f"{r.queryId}-a", "ai", r.response, stamp))
+    return out
+
+
+@root_router.delete("/v2/messages")
+async def clear_chat_messages(chat_session_id: Optional[str] = None,
+                              user: User = Depends(get_current_user),
+                              db: Session = Depends(get_db)):
+    db.query(ChatRecord).filter(
+        ChatRecord.userId == user.userId,
+        ChatRecord.chatId == (chat_session_id or "main")).delete()
+    db.commit()
+    return _wire_message(str(uuid.uuid4()), "ai", "Chat cleared.")
+
+
+@root_router.post("/v2/messages")
+async def post_chat_message(request: Request,
+                            user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    from server.v1.chat import (_MAX_HISTORY_CHARS, _SYSTEM_PROMPT,
+                                _chat_context, _load_config, _openai_answer)
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(422, "text required")
+    session = request.query_params.get("chat_session_id") or "main"
+
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    try:
+        ctx = _chat_context(db, user.userId, user,
+                            cfg=_load_config(db, user.userId))
+        if ctx:
+            messages.append({"role": "user", "content": "[context bundle]\n"
+                             + json.dumps(ctx, default=str)[:60_000]})
+            messages.append({"role": "assistant",
+                             "content": "Understood — I will answer only from "
+                                        "that bundle plus what you send."})
+    except Exception:
+        logger.exception("v2/messages context build failed for user %s", user.userId)
+    for r in _chat_rows(db, user.userId, session, 6):
+        if r.query_text:
+            messages.append({"role": "user", "content": r.query_text[:_MAX_HISTORY_CHARS]})
+        if r.response:
+            messages.append({"role": "assistant", "content": r.response[:_MAX_HISTORY_CHARS]})
+    messages.append({"role": "user", "content": text})
+
+    try:
+        with inference_call(db, user, kind="chat_query") as meter:
+            parsed = await asyncio.to_thread(
+                _openai_answer, messages, tier="standard", usage_out=meter)
+        answer = parsed.get("answer") or ""
+    except HTTPException as exc:
+        if exc.status_code == 402:
+            return Response(content="error:402:Monthly chat allowance reached.\n\n",
+                            media_type="text/plain")
+        detail = exc.detail if isinstance(exc.detail, str) else "chat is unavailable"
+        return Response(content=f"error: {json.dumps({'message': detail, 'error': 'unavailable'})}\n\n",
+                        media_type="text/plain")
+    except Exception:
+        logger.exception("v2/messages answer failed for user %s", user.userId)
+        return Response(content='error: {"message":"chat is unavailable right now","error":"unavailable"}\n\n',
+                        media_type="text/plain")
+
+    try:
+        db.add(ChatRecord(userId=user.userId, chatId=session,
+                          query_text=text, response=answer))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("v2/messages transcript save failed for user %s", user.userId)
+    return Response(content=_sse_frame("done", _wire_message(str(uuid.uuid4()), "ai", answer)),
+                    media_type="text/plain")
+
+
+@root_router.post("/v2/initial-message")
+async def initial_message(user: User = Depends(get_current_user)):
+    return _wire_message(str(uuid.uuid4()), "ai",
+                         "Hey, ask me anything about your conversations, "
+                         "devices, or day.")
+
+
+# -- review surface ------------------------------------------------------------
+#
+# The review tab ("questions") reads GET /v2/review/items. Brain has no
+# review-suggestion pipeline yet, so the honest empty state beats a 404 —
+# items land here once room1 starts proposing them.
+
+
+@root_router.get("/v2/review/items")
+async def review_items(user: User = Depends(get_current_user)):
+    return {"items": []}
+
+
+@root_router.post("/v2/review/items/{item_id}/answer")
+async def review_item_answer(item_id: str, payload: Dict[str, Any] = Body(default={}),
+                             user: User = Depends(get_current_user)):
+    return {"applied": False, "item_id": item_id, "remaining_today": 0}
+
+
+@router.get("/review/changes")
+async def review_changes(user: User = Depends(get_current_user)):
+    return {"changes": []}
+
+
+@router.post("/review/changes/{change_id}/undo")
+@router.post("/review/changes/{change_id}/redo")
+async def review_change_undone(change_id: str, user: User = Depends(get_current_user)):
+    raise HTTPException(404, "unknown change")

@@ -116,7 +116,14 @@ def sellable_price_ids() -> set:
 
 
 def available_plans(user: Any) -> List[Dict[str, Any]]:
-    """omi audience rule: sell Pro; show a retired plan only to its subscriber."""
+    """omi audience rule: sell Pro; show a retired plan only to its subscriber.
+
+    Entries satisfy both wire models: GeneratedSubscriptionPlan (id, title)
+    and GeneratedPaymentPricingOption (id, title, interval, price_string,
+    unit_amount — all required). When no Stripe price is configured the
+    option stays listed but ``is_active: False`` so the client shows the
+    catalog without offering a dead checkout.
+    """
     current = plan_type(user)
     plans = []
     for plan_id, spec in CATALOG.items():
@@ -124,21 +131,29 @@ def available_plans(user: Any) -> List[Dict[str, Any]]:
             continue
         if spec["lifecycle"] == "deprecated" and plan_id != current:
             continue
-        prices = [{
-            "id": p["price_id"],
-            "title": "Monthly" if p["interval"] == "month" else "Annual",
-            "description": None,
-            "price_string": "",
-        } for p in price_ids(plan_id)]
         alloc = spec["allocations"]
-        plans.append({
-            "id": plan_id,
-            "title": spec["display_name"],
-            "subtitle": f"{alloc['chat_questions']:,} questions per month" if alloc["chat_questions"] else "Unlimited",
-            "features": spec["features"],
-            "prices": prices,
-            "legacy": spec["lifecycle"] == "deprecated",
-        })
+        subtitle = (f"{alloc['chat_questions']:,} questions per month"
+                    if alloc["chat_questions"] else "Unlimited")
+        prices = price_ids(plan_id)
+        if not prices:
+            prices = [{"interval": "month", "price_id": f"{plan_id}-month",
+                       "placeholder": True}]
+        for p in prices:
+            plans.append({
+                "id": p["price_id"],
+                "title": spec["display_name"],
+                "subtitle": subtitle,
+                "description": None,
+                "eyebrow": None,
+                "interval": p["interval"],
+                "price_string": "",
+                "unit_amount": 0,
+                "is_active": not p.get("placeholder", False),
+                "plan_id": plan_id,
+                "currency": "usd",
+                "features": spec["features"],
+                "legacy": spec["lifecycle"] == "deprecated",
+            })
     return plans
 
 

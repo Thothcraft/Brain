@@ -91,9 +91,15 @@ def test_available_plans_sell_only_pro(env):
     client, _ = env
     r = client.get('/v1/payments/available-plans', headers=_hdr())
     assert r.status_code == 200
-    ids = [p['id'] for p in r.json()['plans']]
-    assert ids == ['pro']
-    assert {p['id'] for p in r.json()['plans'][0]['prices']} == {'price_pro_m', 'price_pro_y'}
+    plans = r.json()['plans']
+    assert {p['plan_id'] for p in plans} == {'pro'}
+    # App wire contract (GeneratedPaymentPricingOption): one option per price,
+    # id/interval/price_string/unit_amount required.
+    assert {p['id'] for p in plans} == {'price_pro_m', 'price_pro_y'}
+    for p in plans:
+        assert p['interval'] in ('month', 'year')
+        assert 'price_string' in p and 'unit_amount' in p
+        assert p['is_active'] is True
 
 
 def test_legacy_plan_visible_to_its_subscriber(env):
@@ -101,8 +107,9 @@ def test_legacy_plan_visible_to_its_subscriber(env):
     with factory() as s:
         s.query(User).filter(User.userId == 1).update({'plan': 'home'})
         s.commit()
-    ids = [p['id'] for p in client.get('/v1/payments/available-plans', headers=_hdr()).json()['plans']]
-    assert ids == ['pro', 'home']
+    ids = {p['plan_id'] for p in
+           client.get('/v1/payments/available-plans', headers=_hdr()).json()['plans']}
+    assert ids == {'pro', 'home'}
 
 
 def test_subscription_shape_free_and_pro(env):

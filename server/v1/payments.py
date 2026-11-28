@@ -168,6 +168,8 @@ async def my_subscription(
         "subscription": {
             "plan": pid,
             "status": "active",
+            "has_access": True,
+            "is_paid": spec["is_paid"],
             "current_period_end": _period_end(current_user),
             "stripe_subscription_id": current_user.stripe_subscription_id,
             "current_price_id": None,
