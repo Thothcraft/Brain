@@ -671,3 +671,56 @@ async def delete_integration(app_key: str, user: User = Depends(get_current_user
 async def task_integrations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     default = _integration_docs(db, user)
     return {"integrations": default, "default_app": None}
+
+
+# -- file-server endpoints ------------------------------------------------------
+#
+# The browse-all Files page lets devices (desktop, future nodes) publish a
+# token-gated LAN file-server URL so the phone can reach them directly.
+# Desktop PUTs {name, url, token} on startup; the app GETs the list and
+# talks to each URL with the published token. Stored as app_doc kind
+# "files_endpoint" with doc_id = name.
+
+
+@root_router.get("/v2/files/endpoints")
+async def list_file_endpoints(user: User = Depends(get_current_user),
+                              db: Session = Depends(get_db)):
+    rows = db.execute(text(
+        "SELECT body FROM app_doc WHERE user_id = :u AND kind = 'files_endpoint'"),
+        {"u": user.userId}).fetchall()
+    endpoints = []
+    for (body,) in rows:
+        try:
+            doc = json.loads(body)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(doc, dict) and doc.get("url"):
+            endpoints.append(doc)
+    return {"endpoints": endpoints}
+
+
+@root_router.put("/v2/files/endpoints")
+async def put_file_endpoint(payload: Dict[str, Any] = Body(default={}),
+                            user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    name = str(payload.get("name") or "").strip()
+    url = str(payload.get("url") or "").strip()
+    if not name or not url:
+        raise HTTPException(400, "name and url required")
+    doc = {
+        "id": name,
+        "name": name,
+        "url": url,
+        "token": str(payload.get("token") or ""),
+        "label": str(payload.get("label") or name),
+        "updated_at": _now(),
+    }
+    _put(db, user, "files_endpoint", doc)
+    return {"ok": True, "name": name}
+
+
+@root_router.delete("/v2/files/endpoints/{name}")
+async def delete_file_endpoint(name: str, user: User = Depends(get_current_user),
+                               db: Session = Depends(get_db)):
+    _delete(db, user, "files_endpoint", name)
+    return {"ok": True}
