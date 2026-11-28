@@ -609,16 +609,65 @@ async def user_profile(user: User = Depends(get_current_user)):
 
 # -- integrations ----------------------------------------------------------------
 #
-# Settings reads per-app connection state (GET /v1/integrations/{app_key}) and
-# the task-router reads /v1/task-integrations. No integrations are stored yet —
-# answer "not connected" rather than 405 so the app stops erroring.
+# Settings reads/writes per-app connection state on /v1/integrations/{app_key}
+# and the task-router + context page read the whole map via
+# /v1/task-integrations and /v1/integrations. Stored as app_doc kind
+# "integration" with doc_id = app_key.
+
+
+def _integration_docs(db: Session, user: User) -> Dict[str, Dict[str, Any]]:
+    rows = db.execute(text(
+        "SELECT doc_id, body FROM app_doc WHERE user_id = :u AND kind = 'integration'"),
+        {"u": user.userId}).fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for doc_id, body in rows:
+        try:
+            doc = json.loads(body)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(doc, dict):
+            doc.setdefault("app_key", doc_id)
+            doc.setdefault("connected", True)
+            out[doc_id] = doc
+    return out
+
+
+@router.get("/integrations")
+async def list_integrations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return {"integrations": _integration_docs(db, user)}
 
 
 @router.get("/integrations/{app_key}")
-async def integration_state(app_key: str, user: User = Depends(get_current_user)):
-    return {"app_key": app_key, "connected": False, "read_selection_configured": False}
+async def integration_state(app_key: str, user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    doc = _integration_docs(db, user).get(app_key)
+    if doc is None:
+        return {"app_key": app_key, "connected": False, "read_selection_configured": False}
+    doc.setdefault("connected", True)
+    doc.setdefault("read_selection_configured", False)
+    return doc
+
+
+@router.put("/integrations/{app_key}")
+async def save_integration(app_key: str, payload: Dict[str, Any] = Body(default={}),
+                           user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    doc = dict(payload) if isinstance(payload, dict) else {}
+    doc["id"] = app_key
+    doc["app_key"] = app_key
+    doc["connected"] = bool(doc.get("connected", True))
+    doc["connected_at"] = _now()
+    _put(db, user, "integration", doc)
+    return {"app_key": app_key, "connected": doc["connected"]}
+
+
+@router.delete("/integrations/{app_key}")
+async def delete_integration(app_key: str, user: User = Depends(get_current_user),
+                             db: Session = Depends(get_db)):
+    _delete(db, user, "integration", app_key)
+    return {"status": "ok"}
 
 
 @router.get("/task-integrations")
-async def task_integrations(user: User = Depends(get_current_user)):
-    return {"integrations": {}, "default_app": None}
+async def task_integrations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    default = _integration_docs(db, user)
+    return {"integrations": default, "default_app": None}
