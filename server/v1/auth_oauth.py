@@ -65,12 +65,19 @@ def _unb64(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
+def _unquote(value: str) -> str:
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1].strip()
+    return v
+
+
 def _client_id() -> str:
-    return (os.getenv("GOOGLE_OAUTH_CLIENT_ID") or "").strip()
+    return _unquote(os.getenv("GOOGLE_OAUTH_CLIENT_ID") or "")
 
 
 def _client_secret() -> str:
-    return (os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or "").strip()
+    return _unquote(os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or "")
 
 
 def _callback_uri() -> str:
@@ -171,7 +178,9 @@ def _finish_callback(code: str, flow: Dict[str, Any]) -> str:
     except Exception as exc:
         raise HTTPException(502, f"provider exchange failed: {type(exc).__name__}")
     if resp.status_code != 200:
-        logger.info("[auth] google token exchange rejected: %s", resp.status_code)
+        logger.info(
+            "[auth] google token exchange rejected: %s %s",
+            resp.status_code, (resp.text or "")[:300])
         raise HTTPException(400, "provider rejected the authorization code")
     google_id_token = str((resp.json() or {}).get("id_token") or "")
     if not google_id_token:
